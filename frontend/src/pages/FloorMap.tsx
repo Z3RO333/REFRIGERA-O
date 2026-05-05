@@ -298,6 +298,18 @@ export default function FloorMap() {
               </div>
             )}
             <div className="flex flex-col gap-2">
+              {selectedDevice.position_x != null && selectedDevice.position_y != null && (
+                <button
+                  onClick={async () => {
+                    await devicesApi.updatePosition(selectedDevice.id, null, null)
+                    setSelectedDevice(null)
+                    await refetch()
+                  }}
+                  className="w-full py-2 bg-red-500/10 border border-red-500/30 text-red-500 rounded-lg text-sm hover:bg-red-500/20 transition-colors"
+                >
+                  Remover da planta
+                </button>
+              )}
               <button
                 onClick={() => navigate(`/devices/${selectedDevice.id}`)}
                 className="w-full py-2 bg-blue-600/20 border border-blue-600/30 text-blue-400 rounded-lg text-sm hover:bg-blue-600/30 transition-colors"
