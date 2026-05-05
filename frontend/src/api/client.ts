@@ -39,7 +39,7 @@ export const devicesApi = {
   updateMetadata: (id: string, data: object) => api.patch(`/devices/${id}`, data).then(r => r.data),
   control: (id: string, action: DeviceControlAction, step = 1) =>
     api.post(`/devices/${id}/control`, { action, step }).then(r => r.data),
-  updatePosition: (id: string, x: number, y: number) => api.put(`/devices/${id}/position`, { position_x: x, position_y: y }),
+  updatePosition: (id: string, x: number | null, y: number | null) => api.put(`/devices/${id}/position`, { position_x: x, position_y: y }),
   sync: (id: string) => api.post(`/devices/${id}/sync`),
   create: (data: object) => api.post('/devices', data),
 }

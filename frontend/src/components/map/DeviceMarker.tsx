@@ -21,7 +21,10 @@ export default function DeviceMarker({ device, onClick, scale = 1, showLabel, is
   return (
     <g
       transform={`translate(${device.position_x || 0}, ${device.position_y || 0})`}
-      onClick={() => onClick(device)}
+      onClick={event => {
+        event.stopPropagation()
+        onClick(device)
+      }}
       style={{ cursor: 'pointer' }}
     >
       {isCritical && (

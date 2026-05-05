@@ -8,10 +8,21 @@ interface Props {
   onDeviceClick: (device: Device) => void
   editMode?: boolean
   onDeviceMove?: (deviceId: string, x: number, y: number) => void
+  onCanvasPlace?: (x: number, y: number) => void
+  placingDeviceName?: string | null
   dirtyDeviceIds?: string[]
 }
 
-export default function FloorPlanCanvas({ devices, sector, onDeviceClick, editMode, onDeviceMove, dirtyDeviceIds = [] }: Props) {
+export default function FloorPlanCanvas({
+  devices,
+  sector,
+  onDeviceClick,
+  editMode,
+  onDeviceMove,
+  onCanvasPlace,
+  placingDeviceName,
+  dirtyDeviceIds = [],
+}: Props) {
   const svgRef = useRef<SVGSVGElement>(null)
   const [dragging, setDragging] = useState<string | null>(null)
   const [viewBox] = useState({ x: 0, y: 0, w: 800, h: 556 })
@@ -44,6 +55,15 @@ export default function FloorPlanCanvas({ devices, sector, onDeviceClick, editMo
 
   const handleMouseUp = () => setDragging(null)
 
+  const handleCanvasClick = (e: React.MouseEvent) => {
+    if (!editMode || !placingDeviceName || dragging) return
+    const point = clientToSvgPoint(e)
+    if (!point) return
+    const x = Math.max(viewBox.x, Math.min(viewBox.x + viewBox.w, point.x))
+    const y = Math.max(viewBox.y, Math.min(viewBox.y + viewBox.h, point.y))
+    onCanvasPlace?.(Math.round(x), Math.round(y))
+  }
+
   return (
     <div className="w-full h-full relative rounded-xl overflow-hidden border border-gray-200 bg-gray-100 shadow-inner dark:border-gray-800 dark:bg-gray-950">
       {!sector?.floor_plan_url && (
@@ -58,6 +78,8 @@ export default function FloorPlanCanvas({ devices, sector, onDeviceClick, editMo
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseUp}
+        onClick={handleCanvasClick}
+        style={{ cursor: editMode && placingDeviceName ? 'crosshair' : undefined }}
       >
         <defs>
           <filter id="plan-shadow" x="-8%" y="-8%" width="116%" height="116%">
@@ -88,7 +110,7 @@ export default function FloorPlanCanvas({ devices, sector, onDeviceClick, editMo
       </svg>
       {editMode && (
         <div className="absolute top-3 right-3 rounded-lg border border-blue-500/30 bg-white/95 px-3 py-2 text-xs font-medium text-blue-700 shadow-sm dark:bg-gray-900/95 dark:text-blue-300">
-          Arraste os marcadores
+          {placingDeviceName ? `Clique na planta para colocar: ${placingDeviceName}` : 'Arraste os marcadores'}
         </div>
       )}
     </div>

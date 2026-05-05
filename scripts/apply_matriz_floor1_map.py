@@ -1,6 +1,10 @@
 """
 Aplica a primeira planta 2D da Matriz/Escritório ao 1º andar.
 
+Este script não posiciona aparelhos automaticamente. Ele limpa posições
+estimadas do 1º andar para que a operação cadastre os pontos manualmente
+pela tela do mapa.
+
 Uso:
   cd "/home/21664@bemol.local/SISTEMA DE REFRIGERAÇÃO"
   backend/.venv/bin/python scripts/apply_matriz_floor1_map.py
@@ -19,39 +23,8 @@ from app.db.session import AsyncSessionLocal
 
 FLOOR_PLAN_URL = "/floorplans/matriz-escritorio-area-convivencia.png"
 
-SECTOR_POSITIONS = {
-    "Alimentos": (170.0, 205.0),
-    "Auditório": (245.0, 170.0),
-    "Bemol Online": (255.0, 455.0),
-    "CAB": (520.0, 360.0),
-    "Celulares": (535.0, 205.0),
-    "Comercial": (615.0, 370.0),
-    "Conta Bemol": (565.0, 250.0),
-    "Contabilidade": (465.0, 455.0),
-    "Convivência": (315.0, 125.0),
-    "Eletrodomésticos": (680.0, 375.0),
-    "Farmácia": (575.0, 195.0),
-    "Geral": (395.0, 285.0),
-    "Gestão de Risco": (645.0, 315.0),
-    "Informática": (565.0, 325.0),
-    "Marketing": (345.0, 225.0),
-    "Marketplace": (610.0, 455.0),
-    "Recepção": (430.0, 320.0),
-    "Recursos Humanos": (300.0, 390.0),
-    "Refeitório": (375.0, 120.0),
-    "SAC": (225.0, 300.0),
-    "Salas de Descanso": (315.0, 170.0),
-    "Televendas": (250.0, 505.0),
-    "Tesouraria": (425.0, 350.0),
-    "Têxtil": (675.0, 480.0),
-}
-
 
 async def main() -> None:
-    values_sql = ",\n".join(
-        f"('{name}', {x}, {y})" for name, (x, y) in SECTOR_POSITIONS.items()
-    )
-
     async with AsyncSessionLocal() as session:
         await session.execute(text("""
             UPDATE stores
@@ -66,34 +39,22 @@ async def main() -> None:
               AND floor = 1
         """), {"floor_plan_url": FLOOR_PLAN_URL})
 
-        await session.execute(text(f"""
-            WITH sector_positions(name, base_x, base_y) AS (
-              VALUES
-                {values_sql}
-            ), ranked AS (
-              SELECT
-                d.id,
-                sp.base_x + (((ROW_NUMBER() OVER (PARTITION BY ss.name ORDER BY d.name)) - 1) % 4) * 16 - 24 AS x,
-                sp.base_y + FLOOR(((ROW_NUMBER() OVER (PARTITION BY ss.name ORDER BY d.name)) - 1) / 4) * 16 - 8 AS y
-              FROM devices d
-              JOIN store_sectors ss ON ss.id = d.sector_id
-              JOIN stores st ON st.id = ss.store_id
-              JOIN sector_positions sp ON sp.name = ss.name
-              WHERE st.code = 'MATRIZ'
-                AND ss.floor = 1
-                AND d.active = TRUE
-            )
+        await session.execute(text("""
             UPDATE devices d
-            SET position_x = ranked.x,
-                position_y = ranked.y,
+            SET position_x = NULL,
+                position_y = NULL,
                 updated_at = NOW()
-            FROM ranked
-            WHERE d.id = ranked.id
+            FROM store_sectors ss, stores st
+            WHERE d.sector_id = ss.id
+              AND ss.store_id = st.id
+              AND st.code = 'MATRIZ'
+              AND ss.floor = 1
+              AND d.active = TRUE
         """))
 
         await session.commit()
 
-    print("Planta do 1º andar aplicada à Matriz.")
+    print("Planta do 1º andar aplicada à Matriz; posições dos aparelhos limpas.")
 
 
 if __name__ == "__main__":

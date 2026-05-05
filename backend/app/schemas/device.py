@@ -39,8 +39,8 @@ class DeviceControlCommand(BaseModel):
     step: int = Field(default=1, ge=1, le=5)
 
 class DevicePositionUpdate(BaseModel):
-    position_x: float
-    position_y: float
+    position_x: float | None
+    position_y: float | None
 
 class DeviceMetadataUpdate(BaseModel):
     btu: int = Field(ge=1000, le=300000)
