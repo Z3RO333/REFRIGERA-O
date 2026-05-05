@@ -19,6 +19,8 @@ export default function DeviceDetail() {
   const [editParams, setEditParams] = useState(false)
   const [params, setParams] = useState<any>(null)
   const [controlNotice, setControlNotice] = useState('')
+  const [editBtu, setEditBtu] = useState(false)
+  const [btuValue, setBtuValue] = useState('')
 
   const { data: device, refetch } = useQuery({
     queryKey: ['device', deviceId],
@@ -30,6 +32,10 @@ export default function DeviceDetail() {
     if (device?.parameters && !editParams) setParams(device.parameters)
   }, [device?.parameters, editParams])
 
+  useEffect(() => {
+    if (device?.btu && !editBtu) setBtuValue(String(device.btu))
+  }, [device?.btu, editBtu])
+
   const syncMutation = useMutation({
     mutationFn: () => devicesApi.sync(deviceId!),
     onSuccess: () => setTimeout(refetch, 2000),
@@ -38,6 +44,14 @@ export default function DeviceDetail() {
   const updateParams = useMutation({
     mutationFn: (p: object) => devicesApi.updateParams(deviceId!, p),
     onSuccess: () => { setEditParams(false); refetch() },
+  })
+
+  const updateMetadata = useMutation({
+    mutationFn: () => devicesApi.updateMetadata(deviceId!, { btu: Number(btuValue) }),
+    onSuccess: () => {
+      setEditBtu(false)
+      refetch()
+    },
   })
 
   const applyLocalCommand = (base: DeviceParameters | null | undefined, action: DeviceControlAction) => {
@@ -229,10 +243,35 @@ export default function DeviceDetail() {
       )}
 
       <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-5 space-y-3">
-        <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300">Informações do Dispositivo</h2>
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300">Informações do Dispositivo</h2>
+          <button
+            onClick={() => editBtu ? updateMetadata.mutate() : setEditBtu(true)}
+            disabled={updateMetadata.isPending || (editBtu && (!Number(btuValue) || Number(btuValue) < 1000))}
+            className={`text-xs px-3 py-1.5 rounded-lg transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+              editBtu ? 'bg-blue-600 text-gray-900 dark:text-white' : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
+            }`}
+          >
+            {editBtu ? (updateMetadata.isPending ? 'Salvando...' : 'Salvar BTU') : 'Editar BTU'}
+          </button>
+        </div>
         <div className="grid grid-cols-2 md:grid-cols-3 gap-4 text-sm">
           <div><div className="text-gray-500 text-xs">ID Brise</div><div className="text-gray-900 dark:text-white font-mono">{device.brise_id}</div></div>
-          <div><div className="text-gray-500 text-xs">Capacidade</div><div className="text-gray-900 dark:text-white">{device.btu?.toLocaleString()} BTU</div></div>
+          <div>
+            <div className="text-gray-500 text-xs">Capacidade</div>
+            {editBtu ? (
+              <input
+                type="number"
+                min={1000}
+                step={1000}
+                value={btuValue}
+                onChange={e => setBtuValue(e.target.value)}
+                className="mt-1 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 text-gray-900 dark:text-white rounded px-2 py-1 text-sm w-full"
+              />
+            ) : (
+              <div className="text-gray-900 dark:text-white">{device.btu?.toLocaleString()} BTU</div>
+            )}
+          </div>
           <div><div className="text-gray-500 text-xs">Última atualização</div><div className="text-gray-900 dark:text-white">{formatRelativeTime(device.updated_at)}</div></div>
           <div><div className="text-gray-500 text-xs">Última manutenção</div><div className="text-gray-900 dark:text-white">{device.last_maintenance ? formatRelativeTime(device.last_maintenance) : 'Não registrada'}</div></div>
           <div><div className="text-gray-500 text-xs">Ambiente crítico</div><div className="text-gray-900 dark:text-white">{device.is_critical_environment ? 'Sim' : 'Não'}</div></div>

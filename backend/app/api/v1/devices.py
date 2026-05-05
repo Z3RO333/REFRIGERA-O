@@ -7,7 +7,7 @@ from app.db.session import get_db
 from app.models.device import Device, DeviceParameters, DeviceStatusLatest
 from app.models.store import StoreSector, Store
 from app.brise.client import brise_client
-from app.schemas.device import DeviceControlCommand, DeviceParametersUpdate, DevicePositionUpdate
+from app.schemas.device import DeviceControlCommand, DeviceMetadataUpdate, DeviceParametersUpdate, DevicePositionUpdate
 from app.cache.device_cache import get_device_status
 
 router = APIRouter()
@@ -192,6 +192,24 @@ async def update_device_position(device_id: uuid.UUID, pos: DevicePositionUpdate
     device.position_y = pos.position_y
     await db.commit()
     return {"message": "Posição atualizada"}
+
+@router.patch("/{device_id}")
+async def update_device_metadata(
+    device_id: uuid.UUID,
+    data: DeviceMetadataUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    device = await db.get(Device, device_id)
+    if not device:
+        raise HTTPException(404, "Dispositivo não encontrado")
+    device.btu = data.btu
+    device.updated_at = datetime.utcnow()
+    await db.commit()
+    return {
+        "message": "Dispositivo atualizado",
+        "device_id": str(device.id),
+        "btu": device.btu,
+    }
 
 @router.post("/{device_id}/sync")
 async def force_sync(device_id: uuid.UUID, db: AsyncSession = Depends(get_db)):

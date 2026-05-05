@@ -36,6 +36,7 @@ export const devicesApi = {
   search: (q: string) => api.get('/devices/search', { params: { q } }).then(r => r.data),
   status: (id: string) => api.get(`/devices/${id}/status`).then(r => r.data),
   updateParams: (id: string, params: object) => api.put(`/devices/${id}/parameters`, params),
+  updateMetadata: (id: string, data: object) => api.patch(`/devices/${id}`, data).then(r => r.data),
   control: (id: string, action: DeviceControlAction, step = 1) =>
     api.post(`/devices/${id}/control`, { action, step }).then(r => r.data),
   updatePosition: (id: string, x: number, y: number) => api.put(`/devices/${id}/position`, { position_x: x, position_y: y }),
