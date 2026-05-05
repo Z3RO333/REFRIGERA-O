@@ -142,7 +142,7 @@ async def main():
         # Garante as lojas principais
         stores_config = [
             {"name": "CD Manaus", "code": "CDMANAUS"},
-            {"name": "Matriz", "code": "MATRIZ"},
+            {"name": "Escritório Matriz", "code": "MATRIZ"},
             {"name": "Bemol Farma Flores", "code": "FARMA_FLORES"}
         ]
         store_db = {}

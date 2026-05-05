@@ -41,7 +41,7 @@ async def main():
         existing_store = await session.execute(select(Store).where(Store.code == "MATRIZ"))
         if not existing_store.scalar_one_or_none():
             store = Store(
-                name="Loja Matriz",
+                name="Escritório Matriz",
                 code="MATRIZ",
                 city="Manaus",
                 state="AM",
@@ -59,7 +59,7 @@ async def main():
             ]
             for s in setores:
                 session.add(s)
-            print(f"✓ Loja Matriz criada com {len(setores)} setores")
+            print(f"✓ Escritório Matriz criado com {len(setores)} setores")
 
         await session.commit()
     print("\n✅ Seed concluído!")

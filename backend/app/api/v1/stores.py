@@ -26,7 +26,9 @@ async def list_stores(db: AsyncSession = Depends(get_db)):
     stores = []
     for store, device_count, last_reading_at in result.all():
         code_name = f"{store.code} {store.name}".upper()
-        if "FARMA" in code_name:
+        if store.code == "MATRIZ" or "ESCRIT" in code_name:
+            kind = "ESCRITORIO"
+        elif "FARMA" in code_name:
             kind = "FARMA"
         elif "CD" in code_name or "CENTRO" in code_name:
             kind = "CD"

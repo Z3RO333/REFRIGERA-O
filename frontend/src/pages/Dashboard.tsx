@@ -67,6 +67,7 @@ export default function Dashboard() {
   const cdCount = activeStores.filter((store: Store) => store.kind === 'CD').length
   const farmaCount = activeStores.filter((store: Store) => store.kind === 'FARMA').length
   const storeCount = activeStores.filter((store: Store) => store.kind === 'LOJA').length
+  const officeCount = activeStores.filter((store: Store) => store.kind === 'ESCRITORIO').length
 
   return (
     <div className="space-y-6">
@@ -74,7 +75,7 @@ export default function Dashboard() {
         <div>
           <h1 className="text-lg font-semibold text-gray-900 dark:text-white">Cockpit de Refrigeração</h1>
           <p className="text-xs text-gray-500">
-            {selectedStore ? `${unitLabel} • ${selectedStore.kind || 'LOJA'} • ${selectedStore.device_count ?? 0} equipamentos` : `${storeCount} lojas • ${farmaCount} farmas • ${cdCount} CDs • ${kpis?.total_devices ?? 0} equipamentos monitorados`}
+            {selectedStore ? `${unitLabel} • ${kindLabel(selectedStore.kind)} • ${selectedStore.device_count ?? 0} equipamentos` : `${storeCount} lojas • ${officeCount} escritórios • ${farmaCount} farmas • ${cdCount} CDs • ${kpis?.total_devices ?? 0} equipamentos monitorados`}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -87,7 +88,7 @@ export default function Dashboard() {
             <option value="all">Todas as unidades</option>
             {stores?.map((store: Store) => (
               <option key={store.id} value={store.id}>
-                {store.kind || 'LOJA'} · {store.name} ({store.device_count ?? 0})
+                {kindLabel(store.kind)} · {store.name} ({store.device_count ?? 0})
               </option>
             ))}
           </select>
@@ -302,7 +303,7 @@ function StoreRow({
     >
       <td className="px-4 py-3">
         <div className="font-medium text-gray-900 dark:text-white">{store.name}</div>
-        <div className="text-xs text-gray-500">{store.kind || 'LOJA'}{store.city ? ` • ${store.city}` : ''}</div>
+        <div className="text-xs text-gray-500">{kindLabel(store.kind)}{store.city ? ` • ${store.city}` : ''}</div>
       </td>
       <td className="text-center px-3 py-3 text-gray-700 dark:text-gray-300 font-medium">{store.device_count ?? data?.total_devices ?? '—'}</td>
       <td className="text-center px-3 py-3 text-green-400 font-medium">{data?.devices_normal ?? '—'}</td>
@@ -318,4 +319,9 @@ function StoreRow({
       </td>
     </tr>
   )
+}
+
+function kindLabel(kind?: string) {
+  if (kind === 'ESCRITORIO') return 'Escritório'
+  return kind || 'LOJA'
 }

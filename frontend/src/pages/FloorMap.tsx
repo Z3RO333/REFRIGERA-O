@@ -9,10 +9,11 @@ import { formatTemp, formatDelta } from '../lib/utils'
 import type { Device } from '../types'
 
 export default function FloorMap() {
-  const { storeId, sectorId } = useParams<{ storeId: string; sectorId: string }>()
+  const { storeId, sectorId } = useParams<{ storeId: string; sectorId?: string }>()
   const navigate = useNavigate()
   const [selectedDevice, setSelectedDevice] = useState<Device | null>(null)
   const [editMode, setEditMode] = useState(false)
+  const [selectedFloor, setSelectedFloor] = useState(1)
 
   const { data: devices = [], refetch } = useQuery({
     queryKey: ['store-devices', storeId],
@@ -28,7 +29,16 @@ export default function FloorMap() {
   })
 
   const sector = sectors.find((s: any) => s.id === sectorId) || null
-  const sectorDevices = devices.filter((d: any) => d.sector_id === sectorId)
+  const isGeneralMap = !sectorId
+  const currentFloor = sector?.floor ?? selectedFloor
+  const floorPlanUrl = sectors.find((s: any) => s.floor === currentFloor && s.floor_plan_url)?.floor_plan_url || null
+  const sectorsById = new Map<string, any>(sectors.map((s: any) => [s.id, s]))
+  const mapContext = isGeneralMap
+    ? { id: 'geral', name: `Matriz - ${formatFloor(currentFloor)}`, floor: currentFloor, floor_plan_url: floorPlanUrl, is_critical: false }
+    : sector
+  const sectorDevices = isGeneralMap
+    ? devices.filter((d: any) => d.sector_name !== 'Offline' && sectorsById.get(d.sector_id)?.floor === currentFloor)
+    : devices.filter((d: any) => d.sector_id === sectorId)
 
   const moveDevice = useMutation({
     mutationFn: ({ id, x, y }: { id: string; x: number; y: number }) =>
@@ -47,27 +57,45 @@ export default function FloorMap() {
             <ArrowLeft className="w-4 h-4" />
           </button>
           <div>
-            <h1 className="font-semibold text-gray-900 dark:text-white">{sector?.name || 'Mapa de Planta'}</h1>
-            <p className="text-xs text-gray-500">{sectorDevices.length} equipamentos neste setor</p>
+            <h1 className="font-semibold text-gray-900 dark:text-white">{mapContext?.name || 'Mapa de Planta'}</h1>
+            <p className="text-xs text-gray-500">{sectorDevices.length} equipamentos {isGeneralMap ? 'no mapa geral' : 'neste setor'}</p>
           </div>
         </div>
-        <button
-          onClick={() => { setEditMode(!editMode); if (editMode) refetch() }}
-          className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-colors ${
-            editMode
-              ? 'bg-blue-600 text-gray-900 dark:text-white'
-              : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
-          }`}
-        >
-          {editMode ? <><Save className="w-4 h-4" /> Salvar</> : <><Edit2 className="w-4 h-4" /> Editar mapa</>}
-        </button>
+        <div className="flex items-center gap-2">
+          {isGeneralMap && (
+            <div className="flex rounded-lg border border-gray-200 bg-white p-1 dark:border-gray-800 dark:bg-gray-900">
+              {[1, 2, 3, 4].map(floor => (
+                <button
+                  key={floor}
+                  type="button"
+                  onClick={() => setSelectedFloor(floor)}
+                  className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                    selectedFloor === floor ? 'bg-blue-600 text-white' : 'text-gray-500 hover:text-gray-900 dark:hover:text-white'
+                  }`}
+                >
+                  {formatFloor(floor)}
+                </button>
+              ))}
+            </div>
+          )}
+          <button
+            onClick={() => { setEditMode(!editMode); if (editMode) refetch() }}
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-colors ${
+              editMode
+                ? 'bg-blue-600 text-white'
+                : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
+            }`}
+          >
+            {editMode ? <><Save className="w-4 h-4" /> Salvar</> : <><Edit2 className="w-4 h-4" /> Editar mapa</>}
+          </button>
+        </div>
       </div>
 
       <div className="flex gap-4 flex-1 min-h-0">
         <div className="flex-1">
           <FloorPlanCanvas
             devices={sectorDevices}
-            sector={sector}
+            sector={mapContext}
             onDeviceClick={setSelectedDevice}
             editMode={editMode}
             onDeviceMove={handleDeviceMove}
@@ -132,4 +160,8 @@ export default function FloorMap() {
       </div>
     </div>
   )
+}
+
+function formatFloor(floor: number) {
+  return `${floor}º andar`
 }

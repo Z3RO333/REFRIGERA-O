@@ -69,6 +69,13 @@ export default function StoreView() {
         <div className="space-y-2">
           <h2 className="text-sm font-semibold text-gray-600 dark:text-gray-400">Ver no Mapa</h2>
           <div className="flex flex-wrap gap-2">
+            <button
+              onClick={() => navigate(`/lojas/${storeId}/mapa`)}
+              className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white hover:bg-blue-500 rounded-lg text-sm transition-colors"
+            >
+              <Map className="w-4 h-4" />
+              Mapa 1º andar
+            </button>
             {sectors.map((s: any) => (
               <button
                 key={s.id}

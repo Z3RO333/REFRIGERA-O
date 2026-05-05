@@ -6,7 +6,15 @@ import { kpiApi, storesApi } from '../api/client'
 import { cn, formatRelativeTime, formatTemp } from '../lib/utils'
 import type { Store } from '../types'
 
-const KIND_OPTIONS = ['TODAS', 'LOJA', 'FARMA', 'CD']
+const KIND_OPTIONS = ['TODAS', 'ESCRITORIO', 'LOJA', 'FARMA', 'CD']
+
+const KIND_LABELS: Record<string, string> = {
+  TODAS: 'Todas',
+  ESCRITORIO: 'Escritórios',
+  LOJA: 'Lojas',
+  FARMA: 'Farma',
+  CD: 'CD',
+}
 
 const STORE_STATUS = {
   normal: {
@@ -90,7 +98,7 @@ export default function StoresOverview() {
                   kind === option ? 'bg-blue-600 text-white' : 'text-gray-500 hover:text-gray-900 dark:hover:text-white'
                 )}
               >
-                {option === 'TODAS' ? 'Todas' : option}
+                {KIND_LABELS[option] || option}
               </button>
             ))}
           </div>
@@ -144,7 +152,7 @@ function StoreHealthCard({ store, onOpen, onMap }: { store: Store; onOpen: () =>
             <span className={cn('text-xs font-semibold uppercase', status.text)}>{status.label}</span>
           </div>
           <h2 className="mt-2 truncate text-base font-semibold text-gray-900 dark:text-white">{store.name}</h2>
-          <p className="text-xs text-gray-500">{store.kind || 'LOJA'}{store.city ? ` • ${store.city}` : ''}</p>
+          <p className="text-xs text-gray-500">{kindLabel(store.kind)}{store.city ? ` • ${store.city}` : ''}</p>
         </div>
         <Building2 className="h-5 w-5 shrink-0 text-gray-400" />
       </div>
@@ -190,4 +198,9 @@ function Metric({ icon, label, value, tone }: { icon?: React.ReactNode; label: s
       <div className={cn('mt-0.5 font-semibold text-gray-900 dark:text-white', tone)}>{value}</div>
     </div>
   )
+}
+
+function kindLabel(kind?: string) {
+  if (kind === 'ESCRITORIO') return 'Escritório'
+  return kind || 'LOJA'
 }

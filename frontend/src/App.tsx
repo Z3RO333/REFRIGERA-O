@@ -32,6 +32,7 @@ export default function App() {
           <Route path="dashboard" element={<Navigate to="/cockpit" replace />} />
           <Route path="lojas" element={<StoresOverview />} />
           <Route path="lojas/:storeId" element={<StoreView />} />
+          <Route path="lojas/:storeId/mapa" element={<FloorMap />} />
           <Route path="lojas/:storeId/mapa/:sectorId" element={<FloorMap />} />
           <Route path="mapa-termico" element={<ThermalMapsOverview />} />
           <Route path="equipamentos" element={<EquipmentOverview />} />

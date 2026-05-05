@@ -13,7 +13,7 @@ interface Props {
 export default function FloorPlanCanvas({ devices, sector, onDeviceClick, editMode, onDeviceMove }: Props) {
   const svgRef = useRef<SVGSVGElement>(null)
   const [dragging, setDragging] = useState<string | null>(null)
-  const [viewBox] = useState({ x: 0, y: 0, w: 800, h: 600 })
+  const [viewBox] = useState({ x: 0, y: 0, w: 800, h: 533 })
 
   const handleMouseDown = (e: React.MouseEvent, deviceId: string) => {
     if (!editMode) return
@@ -49,7 +49,7 @@ export default function FloorPlanCanvas({ devices, sector, onDeviceClick, editMo
         onMouseLeave={handleMouseUp}
       >
         {sector?.floor_plan_url && (
-          <image href={sector.floor_plan_url} x={0} y={0} width={viewBox.w} height={viewBox.h} preserveAspectRatio="xMidYMid meet" opacity={0.3} />
+          <image href={sector.floor_plan_url} x={0} y={0} width={viewBox.w} height={viewBox.h} preserveAspectRatio="xMidYMid meet" opacity={0.9} />
         )}
         {devices
           .filter(d => d.position_x != null && d.position_y != null)

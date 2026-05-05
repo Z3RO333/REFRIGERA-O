@@ -43,7 +43,7 @@ export interface Store {
   name: string
   code: string
   city: string | null
-  kind?: 'LOJA' | 'FARMA' | 'CD'
+  kind?: 'LOJA' | 'FARMA' | 'CD' | 'ESCRITORIO'
   device_count?: number
   last_reading_at?: string | null
 }
