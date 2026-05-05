@@ -9,9 +9,19 @@ import { devicesApi } from '../../api/client'
 import type { Device } from '../../types'
 
 const PAGE_TITLES: Record<string, string> = {
-  '/dashboard': 'Dashboard Gerencial',
+  '/cockpit': 'Cockpit de Refrigeração',
+  '/dashboard': 'Cockpit de Refrigeração',
+  '/lojas': 'Mapa das Lojas',
+  '/mapa-termico': 'Mapa Térmico',
+  '/equipamentos': 'Equipamentos',
+  '/alertas': 'Alertas Operacionais',
   '/alerts': 'Central de Alertas',
+  '/manutencoes': 'Manutenções',
   '/maintenance': 'Ranking de Manutenção',
+  '/fornecedores': 'Fornecedores',
+  '/relatorios': 'Relatórios',
+  '/configuracoes': 'Configurações',
+  '/usuarios': 'Usuários',
 }
 
 export default function Header() {
@@ -25,7 +35,8 @@ export default function Header() {
   const [searchMessage, setSearchMessage] = useState('')
   const [isSearching, setIsSearching] = useState(false)
 
-  const title = PAGE_TITLES[location.pathname] || 'Monitoramento de Refrigeração'
+  const title = PAGE_TITLES[location.pathname]
+    || (location.pathname.startsWith('/lojas/') ? 'Unidade Monitorada' : 'Monitoramento de Refrigeração')
   const { theme, toggle } = useThemeStore()
 
   const openDevice = (deviceId: string) => {
@@ -101,7 +112,7 @@ export default function Header() {
         </form>
         {(p1Count + p2Count) > 0 && (
           <button
-            onClick={() => navigate('/alerts')}
+            onClick={() => navigate('/alertas')}
             className="flex items-center gap-1.5 px-3 py-1.5 bg-red-500/20 border border-red-500/50 rounded-lg text-red-400 text-sm hover:bg-red-500/30 transition-colors"
           >
             <Bell className="w-4 h-4" />

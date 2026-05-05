@@ -11,15 +11,20 @@ router = APIRouter()
 @router.get("")
 async def list_stores(db: AsyncSession = Depends(get_db)):
     result = await db.execute(
-        select(Store, func.count(Device.id).label("device_count"))
+        select(
+            Store,
+            func.count(Device.id).label("device_count"),
+            func.max(DeviceStatusLatest.updated_at).label("last_reading_at"),
+        )
         .outerjoin(StoreSector, Store.id == StoreSector.store_id)
         .outerjoin(Device, (StoreSector.id == Device.sector_id) & (Device.active == True))
+        .outerjoin(DeviceStatusLatest, Device.id == DeviceStatusLatest.device_id)
         .where(Store.active == True)
         .group_by(Store.id)
         .order_by(Store.name)
     )
     stores = []
-    for store, device_count in result.all():
+    for store, device_count, last_reading_at in result.all():
         code_name = f"{store.code} {store.name}".upper()
         if "FARMA" in code_name:
             kind = "FARMA"
@@ -34,6 +39,7 @@ async def list_stores(db: AsyncSession = Depends(get_db)):
             "city": store.city,
             "kind": kind,
             "device_count": device_count or 0,
+            "last_reading_at": last_reading_at.isoformat() if last_reading_at else None,
         })
     return stores
 

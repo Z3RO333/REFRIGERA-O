@@ -25,6 +25,11 @@ export function formatTemp(t: number | null | undefined): string {
   return `${t.toFixed(1)}°C`
 }
 
+export function formatCurrency(value: number | null | undefined): string {
+  if (value == null) return '—'
+  return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value)
+}
+
 export function formatDelta(d: number | null | undefined): string {
   if (d == null) return '—'
   return d > 0 ? `+${d.toFixed(1)}°C` : `${d.toFixed(1)}°C`

@@ -72,7 +72,7 @@ export default function StoreView() {
             {sectors.map((s: any) => (
               <button
                 key={s.id}
-                onClick={() => navigate(`/stores/${storeId}/map/${s.id}`)}
+                onClick={() => navigate(`/lojas/${storeId}/mapa/${s.id}`)}
                 className="flex items-center gap-2 px-4 py-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 hover:border-gray-300 dark:hover:border-gray-700 rounded-lg text-sm text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors"
               >
                 <Map className="w-4 h-4" />

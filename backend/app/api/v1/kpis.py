@@ -85,6 +85,8 @@ async def get_store_kpis(store_id: str, db: AsyncSession = Depends(get_db)):
             func.count(DeviceStatusLatest.device_id).filter(DeviceStatusLatest.status_classification == "CRÍTICO").label("critical"),
             func.count(DeviceStatusLatest.device_id).filter(DeviceStatusLatest.status_classification == "SEM_LEITURA").label("no_reading"),
             func.count(DeviceStatusLatest.device_id).filter(DeviceStatusLatest.status_classification == "BAIXA_EFICIÊNCIA").label("low_eff"),
+            func.count(DeviceStatusLatest.device_id).filter(DeviceStatusLatest.status_classification == "DESLIGADO").label("off"),
+            func.avg(DeviceStatusLatest.temperature).filter(DeviceStatusLatest.state == True).label("avg_temp"),
         )
         .join(Device, DeviceStatusLatest.device_id == Device.id)
         .join(StoreSector, Device.sector_id == StoreSector.id)
@@ -95,7 +97,7 @@ async def get_store_kpis(store_id: str, db: AsyncSession = Depends(get_db)):
     row = result.first()
     if not row:
         return {"store_id": store_id, "total_devices": 0}
-    online = (row.total or 0) - (row.no_reading or 0)
+    online = (row.total or 0) - (row.no_reading or 0) - (row.off or 0)
     compliance = ((row.normal or 0) / online * 100) if online > 0 else None
     return {
         "store_id": store_id,
@@ -106,5 +108,8 @@ async def get_store_kpis(store_id: str, db: AsyncSession = Depends(get_db)):
         "devices_critical": row.critical or 0,
         "devices_no_reading": row.no_reading or 0,
         "devices_low_efficiency": row.low_eff or 0,
+        "devices_off": row.off or 0,
+        "devices_online": online,
+        "avg_temperature": float(row.avg_temp) if row.avg_temp else None,
         "compliance_rate": round(compliance, 1) if compliance else None,
     }

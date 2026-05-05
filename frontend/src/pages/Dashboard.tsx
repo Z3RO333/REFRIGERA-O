@@ -8,12 +8,8 @@ import KPICard from '../components/KPICard'
 import StatusDonut from '../components/charts/StatusDonut'
 import AlertCard from '../components/alerts/AlertCard'
 import { useAlertStore } from '../store/useAlertStore'
+import { formatCurrency } from '../lib/utils'
 import type { Alert, Store } from '../types'
-
-const formatCurrency = (value: number | null | undefined) =>
-  value == null
-    ? '—'
-    : new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value)
 
 export default function Dashboard() {
   const navigate = useNavigate()
@@ -76,9 +72,9 @@ export default function Dashboard() {
     <div className="space-y-6">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div>
-          <h1 className="text-lg font-semibold text-gray-900 dark:text-white">{unitLabel}</h1>
+          <h1 className="text-lg font-semibold text-gray-900 dark:text-white">Cockpit de Refrigeração</h1>
           <p className="text-xs text-gray-500">
-            {selectedStore ? `${selectedStore.kind || 'LOJA'} • ${selectedStore.device_count ?? 0} equipamentos` : `${storeCount} lojas • ${farmaCount} farmas • ${cdCount} CDs • ${kpis?.total_devices ?? 0} equipamentos monitorados`}
+            {selectedStore ? `${unitLabel} • ${selectedStore.kind || 'LOJA'} • ${selectedStore.device_count ?? 0} equipamentos` : `${storeCount} lojas • ${farmaCount} farmas • ${cdCount} CDs • ${kpis?.total_devices ?? 0} equipamentos monitorados`}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -222,7 +218,7 @@ export default function Dashboard() {
 
         <div className="lg:col-span-2 space-y-4">
           <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300">Lojas</h2>
+            <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300">Mapa das lojas</h2>
             <span className="text-xs text-gray-500">{activeStores.length} unidades com equipamentos</span>
           </div>
           <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl overflow-hidden">
@@ -247,7 +243,7 @@ export default function Dashboard() {
                     consumption={storeConsumption.get(store.id)}
                     isSelected={selectedStoreId === store.id}
                     onSelect={() => setSelectedStoreId(store.id)}
-                    onNavigate={() => navigate(`/stores/${store.id}`)}
+                    onNavigate={() => navigate(`/lojas/${store.id}`)}
                   />
                 ))}
                 {!activeStores.length && (
@@ -262,7 +258,7 @@ export default function Dashboard() {
       <div className="space-y-3">
         <div className="flex items-center justify-between">
           <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300">Alertas Recentes</h2>
-          <button onClick={() => navigate('/alerts')} className="text-xs text-blue-400 hover:text-blue-300 transition-colors">
+          <button onClick={() => navigate('/alertas')} className="text-xs text-blue-400 hover:text-blue-300 transition-colors">
             Ver todos →
           </button>
         </div>

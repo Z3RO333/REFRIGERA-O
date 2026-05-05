@@ -45,6 +45,7 @@ export interface Store {
   city: string | null
   kind?: 'LOJA' | 'FARMA' | 'CD'
   device_count?: number
+  last_reading_at?: string | null
 }
 
 export interface Sector {

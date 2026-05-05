@@ -1,8 +1,9 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { Check, Wrench } from 'lucide-react'
 import { alertsApi } from '../api/client'
-import AlertCard from '../components/alerts/AlertCard'
+import { cn, formatRelativeTime, SEVERITY_CONFIG } from '../lib/utils'
 import type { Alert } from '../types'
 
 const STATUS_TABS = [
@@ -68,22 +69,99 @@ export default function Alerts() {
         </div>
       </div>
 
-      {isLoading ? (
-        <div className="text-center py-12 text-gray-500 dark:text-gray-600 text-sm">Carregando alertas...</div>
-      ) : alerts.length === 0 ? (
-        <div className="text-center py-16 text-gray-500 dark:text-gray-600 text-sm">Nenhum alerta {statusTab === 'OPEN' ? 'aberto' : 'encontrado'}</div>
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-          {alerts.map((alert: any) => (
-            <AlertCard
-              key={alert.id}
-              alert={alert}
-              onAck={ackMutation.mutate}
-              onResolve={openDevicePanel}
-            />
-          ))}
+      <div className="overflow-hidden rounded-lg border border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-900">
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[980px] text-sm">
+            <thead>
+              <tr className="border-b border-gray-200 text-xs text-gray-500 dark:border-gray-800">
+                <th className="px-4 py-3 text-left">Severidade</th>
+                <th className="px-3 py-3 text-left">Loja</th>
+                <th className="px-3 py-3 text-left">Zona</th>
+                <th className="px-3 py-3 text-left">Equipamento</th>
+                <th className="px-3 py-3 text-left">Problema</th>
+                <th className="px-3 py-3 text-left">Tempo</th>
+                <th className="px-3 py-3 text-left">Responsável</th>
+                <th className="px-4 py-3 text-right">Ação</th>
+              </tr>
+            </thead>
+            <tbody>
+              {alerts.map((alert: Alert) => (
+                <AlertRow
+                  key={alert.id}
+                  alert={alert}
+                  onAck={() => ackMutation.mutate(alert.id)}
+                  onResolve={() => openDevicePanel(alert)}
+                />
+              ))}
+              {(isLoading || alerts.length === 0) && (
+                <tr>
+                  <td colSpan={8} className="py-14 text-center text-sm text-gray-500">
+                    {isLoading ? 'Carregando alertas...' : `Nenhum alerta ${statusTab === 'OPEN' ? 'aberto' : 'encontrado'}`}
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
-      )}
+      </div>
     </div>
+  )
+}
+
+function AlertRow({ alert, onAck, onResolve }: { alert: Alert; onAck: () => void; onResolve: () => void }) {
+  const severity = SEVERITY_CONFIG[alert.severity] || SEVERITY_CONFIG.P4
+  const problem = alert.message || alert.alert_type.replace(/_/g, ' ')
+  const assignee = alert.acked_by || 'Operação'
+
+  return (
+    <tr className={cn('border-b border-gray-200/60 dark:border-gray-800/60', alert.severity === 'P1' && alert.status === 'OPEN' && 'bg-red-500/5')}>
+      <td className="px-4 py-3">
+        <span className={cn('inline-flex rounded px-2 py-1 text-xs font-bold', severity.bg, severity.color)}>
+          {alert.severity}
+        </span>
+      </td>
+      <td className="px-3 py-3 text-gray-900 dark:text-white">{alert.store_name || '—'}</td>
+      <td className="px-3 py-3 text-gray-600 dark:text-gray-400">{alert.sector_name || '—'}</td>
+      <td className="px-3 py-3">
+        <button type="button" onClick={onResolve} className="text-left">
+          <div className="font-medium text-gray-900 hover:text-blue-500 dark:text-white">{alert.device_name || 'Equipamento'}</div>
+          <div className="font-mono text-xs text-gray-500">{alert.brise_id}</div>
+        </button>
+      </td>
+      <td className="max-w-sm px-3 py-3 text-gray-700 dark:text-gray-300">
+        <div className="line-clamp-2">{problem}</div>
+        {alert.temperature_at_alert != null && (
+          <div className="mt-1 text-xs text-gray-500">
+            {alert.temperature_at_alert.toFixed(1)}°C
+            {alert.setpoint_at_alert != null && ` / setpoint ${alert.setpoint_at_alert}°C`}
+            {alert.delta_at_alert != null && ` / +${alert.delta_at_alert.toFixed(1)}°C`}
+          </div>
+        )}
+      </td>
+      <td className="px-3 py-3 text-gray-600 dark:text-gray-400">{formatRelativeTime(alert.opened_at)}</td>
+      <td className="px-3 py-3 text-gray-600 dark:text-gray-400">{assignee}</td>
+      <td className="px-4 py-3">
+        <div className="flex justify-end gap-2">
+          {alert.status === 'OPEN' && (
+            <button
+              type="button"
+              onClick={onAck}
+              className="inline-flex items-center gap-1 rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-3 py-1.5 text-xs font-medium text-yellow-500 hover:bg-yellow-500/20"
+            >
+              <Check className="h-3.5 w-3.5" />
+              Reconhecer
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={onResolve}
+            className="inline-flex items-center gap-1 rounded-lg border border-green-500/30 bg-green-500/10 px-3 py-1.5 text-xs font-medium text-green-600 hover:bg-green-500/20 dark:text-green-400"
+          >
+            <Wrench className="h-3.5 w-3.5" />
+            Resolver
+          </button>
+        </div>
+      </td>
+    </tr>
   )
 }
