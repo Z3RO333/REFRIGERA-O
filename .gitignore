@@ -1,0 +1,31 @@
+# Local secrets
+.env
+.env.*
+!.env.example
+backend/.env
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+backend/.venv/
+
+# Node / frontend
+node_modules/
+frontend/node_modules/
+dist/
+frontend/dist/
+
+# Logs and runtime files
+*.log
+*.pid
+.DS_Store
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db

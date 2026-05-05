@@ -1,0 +1,32 @@
+version: "3.9"
+
+# Usar para desenvolvimento local: docker compose -f docker-compose.dev.yml up
+# Frontend e backend rodam diretamente na máquina; apenas DB e Redis via Docker.
+
+services:
+  db:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      POSTGRES_USER: hvac
+      POSTGRES_PASSWORD: hvac123
+      POSTGRES_DB: hvacdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data_dev:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hvac -d hvacdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data_dev:/data
+
+volumes:
+  postgres_data_dev:
+  redis_data_dev:
