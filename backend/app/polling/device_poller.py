@@ -170,7 +170,10 @@ async def poll_device(device_id: uuid.UUID, brise_id: str, is_critical_env: bool
 async def poll_all_devices():
     async with AsyncSessionLocal() as session:
         result = await session.execute(
-            select(Device).where(Device.active == True)
+            select(Device).where(
+                Device.active == True,
+                Device.brise_device_id.not_like("MANUAL-%"),
+            )
         )
         devices = result.scalars().all()
     tasks = [
