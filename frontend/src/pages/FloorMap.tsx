@@ -1,7 +1,7 @@
 import { useParams, useNavigate } from 'react-router-dom'
-import { useQuery, useMutation } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
-import { ArrowLeft, Edit2, Save } from 'lucide-react'
+import { ArrowLeft, Edit2, Save, X } from 'lucide-react'
 import { storesApi, devicesApi } from '../api/client'
 import FloorPlanCanvas from '../components/map/FloorPlanCanvas'
 import StatusBadge from '../components/StatusBadge'
@@ -14,6 +14,8 @@ export default function FloorMap() {
   const [selectedDevice, setSelectedDevice] = useState<Device | null>(null)
   const [editMode, setEditMode] = useState(false)
   const [selectedFloor, setSelectedFloor] = useState(1)
+  const [draftPositions, setDraftPositions] = useState<Record<string, { x: number; y: number }>>({})
+  const [isSavingPositions, setIsSavingPositions] = useState(false)
 
   const { data: devices = [], refetch } = useQuery({
     queryKey: ['store-devices', storeId],
@@ -39,14 +41,44 @@ export default function FloorMap() {
   const sectorDevices = isGeneralMap
     ? devices.filter((d: any) => d.sector_name !== 'Offline' && sectorsById.get(d.sector_id)?.floor === currentFloor)
     : devices.filter((d: any) => d.sector_id === sectorId)
-
-  const moveDevice = useMutation({
-    mutationFn: ({ id, x, y }: { id: string; x: number; y: number }) =>
-      devicesApi.updatePosition(id, x, y),
+  const dirtyDeviceIds = Object.keys(draftPositions)
+  const visibleDevices = sectorDevices.map((device: Device) => {
+    const draft = draftPositions[device.id]
+    if (!draft) return device
+    return { ...device, position_x: draft.x, position_y: draft.y }
   })
 
   const handleDeviceMove = (deviceId: string, x: number, y: number) => {
-    moveDevice.mutate({ id: deviceId, x, y })
+    setDraftPositions(prev => ({ ...prev, [deviceId]: { x, y } }))
+    setSelectedDevice(prev => prev?.id === deviceId ? { ...prev, position_x: x, position_y: y } : prev)
+  }
+
+  const startEditing = () => {
+    setDraftPositions({})
+    setEditMode(true)
+  }
+
+  const cancelEditing = () => {
+    setDraftPositions({})
+    setEditMode(false)
+    refetch()
+  }
+
+  const savePositions = async () => {
+    const entries = Object.entries(draftPositions)
+    if (!entries.length) {
+      setEditMode(false)
+      return
+    }
+    setIsSavingPositions(true)
+    try {
+      await Promise.all(entries.map(([id, pos]) => devicesApi.updatePosition(id, pos.x, pos.y)))
+      setDraftPositions({})
+      setEditMode(false)
+      await refetch()
+    } finally {
+      setIsSavingPositions(false)
+    }
   }
 
   return (
@@ -78,27 +110,44 @@ export default function FloorMap() {
               ))}
             </div>
           )}
-          <button
-            onClick={() => { setEditMode(!editMode); if (editMode) refetch() }}
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-colors ${
-              editMode
-                ? 'bg-blue-600 text-white'
-                : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
-            }`}
-          >
-            {editMode ? <><Save className="w-4 h-4" /> Salvar</> : <><Edit2 className="w-4 h-4" /> Editar mapa</>}
-          </button>
+          {editMode ? (
+            <>
+              <button
+                onClick={cancelEditing}
+                disabled={isSavingPositions}
+                className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm bg-gray-100 text-gray-700 hover:bg-gray-200 disabled:opacity-50 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
+              >
+                <X className="w-4 h-4" /> Cancelar
+              </button>
+              <button
+                onClick={savePositions}
+                disabled={isSavingPositions}
+                className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-50"
+              >
+                <Save className="w-4 h-4" />
+                {isSavingPositions ? 'Salvando...' : dirtyDeviceIds.length ? `Salvar ${dirtyDeviceIds.length}` : 'Concluir'}
+              </button>
+            </>
+          ) : (
+            <button
+              onClick={startEditing}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white"
+            >
+              <Edit2 className="w-4 h-4" /> Editar posições
+            </button>
+          )}
         </div>
       </div>
 
       <div className="flex gap-4 flex-1 min-h-0">
         <div className="flex-1">
           <FloorPlanCanvas
-            devices={sectorDevices}
+            devices={visibleDevices}
             sector={mapContext}
             onDeviceClick={setSelectedDevice}
             editMode={editMode}
             onDeviceMove={handleDeviceMove}
+            dirtyDeviceIds={dirtyDeviceIds}
           />
         </div>
 
