@@ -89,7 +89,7 @@ function ThermalStoreCard({ store }: { store: Store }) {
                   key={hasSector ? item.id : index}
                   type="button"
                   disabled={!hasSector}
-                  onClick={() => navigate(`/lojas/${store.id}/mapa/${item.id}`)}
+                  onClick={() => navigate(`/mapa-termico/${store.id}`)}
                   className={cn(
                     'flex min-h-16 flex-col items-start justify-between rounded-md border p-2 text-left transition-colors',
                     hasSector
@@ -122,7 +122,7 @@ function ThermalStoreCard({ store }: { store: Store }) {
               <button
                 key={sector.id}
                 type="button"
-                onClick={() => navigate(`/lojas/${store.id}/mapa/${sector.id}`)}
+                onClick={() => navigate(`/mapa-termico/${store.id}`)}
                 className="flex w-full items-center justify-between gap-2 rounded-lg border border-gray-200 px-3 py-2 text-left text-sm text-gray-700 hover:bg-gray-100 dark:border-gray-800 dark:text-gray-300 dark:hover:bg-gray-800"
               >
                 <span className="truncate">{sector.name}</span>
@@ -132,10 +132,17 @@ function ThermalStoreCard({ store }: { store: Store }) {
           </div>
           <button
             type="button"
-            onClick={() => navigate(`/lojas/${store.id}/mapa`)}
+            onClick={() => navigate(`/mapa-termico/${store.id}`)}
             className="w-full rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-500"
           >
-            Abrir 1º andar
+            Abrir conforto térmico
+          </button>
+          <button
+            type="button"
+            onClick={() => navigate(`/lojas/${store.id}/mapa`)}
+            className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 dark:border-gray-800 dark:text-gray-300 dark:hover:bg-gray-800"
+          >
+            Posicionar aparelhos
           </button>
         </div>
       </div>

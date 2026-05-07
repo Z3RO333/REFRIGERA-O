@@ -11,6 +11,7 @@ import History from './pages/History'
 import MaintenanceRanking from './pages/MaintenanceRanking'
 import DeviceDetail from './pages/DeviceDetail'
 import ThermalMapsOverview from './pages/ThermalMapsOverview'
+import ThermalComfortMap from './pages/ThermalComfortMap'
 import EquipmentOverview from './pages/EquipmentOverview'
 import Reports from './pages/Reports'
 import ModulePlaceholder from './pages/ModulePlaceholder'
@@ -35,6 +36,7 @@ export default function App() {
           <Route path="lojas/:storeId/mapa" element={<FloorMap />} />
           <Route path="lojas/:storeId/mapa/:sectorId" element={<FloorMap />} />
           <Route path="mapa-termico" element={<ThermalMapsOverview />} />
+          <Route path="mapa-termico/:storeId" element={<ThermalComfortMap />} />
           <Route path="equipamentos" element={<EquipmentOverview />} />
           <Route path="alertas" element={<Alerts />} />
           <Route path="manutencoes" element={<MaintenanceRanking />} />
