@@ -78,6 +78,9 @@ async def poll_device(device_id: uuid.UUID, brise_id: str, is_critical_env: bool
                 )
                 consecutive_count = 0
 
+            on_min  = variables.ON  if variables else None
+            off_min = variables.OFF if variables else None
+
             reading = DeviceReading(
                 time=datetime.utcnow(),
                 device_id=device_id,
@@ -89,6 +92,8 @@ async def poll_device(device_id: uuid.UUID, brise_id: str, is_critical_env: bool
                 status_classification=status,
                 delta_temp=delta,
                 efficiency_score=efficiency,
+                accumulated_on_minutes=on_min,
+                accumulated_off_minutes=off_min,
                 raw_payload=variables.model_dump() if variables else None,
             )
             session.add(reading)
@@ -103,6 +108,10 @@ async def poll_device(device_id: uuid.UUID, brise_id: str, is_critical_env: bool
                 status_row.delta_temp = delta
                 status_row.efficiency_score = efficiency
                 status_row.consecutive_readings_count = consecutive_count
+                if on_min is not None:
+                    status_row.accumulated_on_minutes = on_min
+                if off_min is not None:
+                    status_row.accumulated_off_minutes = off_min
                 status_row.updated_at = datetime.utcnow()
             else:
                 new_status = DeviceStatusLatest(
@@ -115,6 +124,8 @@ async def poll_device(device_id: uuid.UUID, brise_id: str, is_critical_env: bool
                     delta_temp=delta,
                     efficiency_score=efficiency,
                     consecutive_readings_count=consecutive_count,
+                    accumulated_on_minutes=on_min,
+                    accumulated_off_minutes=off_min,
                     updated_at=datetime.utcnow(),
                 )
                 session.add(new_status)

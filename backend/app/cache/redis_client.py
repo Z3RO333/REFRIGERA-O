@@ -46,6 +46,21 @@ class RedisClient:
         data = json.dumps(message) if not isinstance(message, str) else message
         await self.client.publish(channel, data)
 
+    async def incr(self, key: str) -> int:
+        return await self.client.incr(key)
+
+    async def expire(self, key: str, seconds: int):
+        await self.client.expire(key, seconds)
+
+    async def keys(self, pattern: str) -> list[str]:
+        return await self.client.keys(pattern)
+
+    async def rpush(self, key: str, *values: str) -> int:
+        return await self.client.rpush(key, *values)
+
+    async def lrange(self, key: str, start: int, end: int) -> list[str]:
+        return await self.client.lrange(key, start, end)
+
     async def acquire_lock(self, key: str, ttl: int = 240) -> bool:
         return bool(await self.client.set(key, "1", nx=True, ex=ttl))
 

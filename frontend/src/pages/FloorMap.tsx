@@ -1,7 +1,7 @@
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
-import { ArrowLeft, Edit2, MapPin, Save, Search, Trash2, X } from 'lucide-react'
+import { ArrowLeft, Edit2, MapPin, Save, Search, Thermometer, Trash2, Wind, X } from 'lucide-react'
 import { storesApi, devicesApi } from '../api/client'
 import FloorPlanCanvas from '../components/map/FloorPlanCanvas'
 import StatusBadge from '../components/StatusBadge'
@@ -230,7 +230,12 @@ export default function FloorMap() {
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
-                        <div className="font-mono text-xs text-blue-500">{device.brise_id}</div>
+                        <div className="flex items-center gap-1 font-mono text-xs text-blue-500">
+                          {device.is_external_sensor
+                            ? <><Thermometer className="w-3 h-3 text-amber-500" /><span className="text-amber-500">Sensor externo</span></>
+                            : <><Wind className="w-3 h-3" />{device.brise_id}</>
+                          }
+                        </div>
                         <div className="truncate text-sm font-medium text-gray-900 dark:text-white">{device.name}</div>
                         <div className="truncate text-xs text-gray-500">{device.sector_name || 'Sem setor'}</div>
                       </div>

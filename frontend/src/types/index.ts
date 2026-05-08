@@ -12,9 +12,13 @@ export interface Device {
   store_id: string | null
   store_name: string | null
   btu: number
+  dnd?: boolean
   position_x: number | null
   position_y: number | null
   is_critical_environment: boolean
+  is_external_sensor?: boolean
+  influence_radius_m?: number
+  source_url?: string | null
   last_maintenance: string | null
   status: DeviceStatus
   temperature: number | null

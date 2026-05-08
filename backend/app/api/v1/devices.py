@@ -106,6 +106,8 @@ async def update_device_parameters(
     device = await db.get(Device, device_id)
     if not device:
         raise HTTPException(404, "Dispositivo não encontrado")
+    if device.dnd:
+        raise HTTPException(409, "Dispositivo em modo DND — ajuste manual bloqueado pelo equipamento")
     brise_params = {
         "modeDevice": params.mode_device,
         "modeAC": params.mode_ac,
@@ -143,6 +145,8 @@ async def control_device(
     device = await db.get(Device, device_id)
     if not device:
         raise HTTPException(404, "Dispositivo não encontrado")
+    if device.dnd:
+        raise HTTPException(409, "Dispositivo em modo DND — comando bloqueado pelo equipamento")
 
     current_params = await _get_current_parameters(device_id, device.brise_device_id, db)
     next_params = current_params.copy()
@@ -230,6 +234,11 @@ async def create_device(data: dict, db: AsyncSession = Depends(get_db)):
     return {"id": str(device.id)}
 
 def _format_device(device, status, sector, store) -> dict:
+    on_min  = status.accumulated_on_minutes  if status else None
+    off_min = status.accumulated_off_minutes if status else None
+    hours_on = round(on_min / 60, 1) if on_min is not None else None
+    total_min = (on_min or 0) + (off_min or 0)
+    uptime_pct = round(on_min / total_min * 100, 1) if total_min > 0 and on_min is not None else None
     return {
         "id": str(device.id),
         "brise_id": device.brise_device_id,
@@ -239,6 +248,7 @@ def _format_device(device, status, sector, store) -> dict:
         "store_id": str(sector.store_id) if sector else None,
         "store_name": store.name if store else None,
         "btu": device.btu,
+        "dnd": device.dnd,
         "position_x": device.position_x,
         "position_y": device.position_y,
         "is_critical_environment": device.is_critical_environment,
@@ -250,6 +260,13 @@ def _format_device(device, status, sector, store) -> dict:
         "efficiency_score": status.efficiency_score if status else None,
         "state": status.state if status else None,
         "updated_at": status.updated_at.isoformat() if status else None,
+        "hours_of_operation": hours_on,
+        "uptime_pct": uptime_pct,
+        "accumulated_on_minutes": on_min,
+        "accumulated_off_minutes": off_min,
+        "source_url": device.source_url,
+        "is_external_sensor": device.source_url is not None,
+        "influence_radius_m": device.influence_radius_m if hasattr(device, 'influence_radius_m') else 8,
     }
 
 async def _get_current_parameters(device_id: uuid.UUID, brise_id: str, db: AsyncSession) -> dict:
@@ -313,3 +330,69 @@ async def _get_device_parameters_row(device_id: uuid.UUID, db: AsyncSession) -> 
         select(DeviceParameters).where(DeviceParameters.device_id == device_id)
     )
     return result.scalar_one_or_none()
+
+
+# ── Sensores externos ─────────────────────────────────────────────────────────
+
+@router.post("/external-sensor")
+async def register_external_sensor(
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Cadastra um sensor externo (HTTP/JSON) como dispositivo virtual.
+
+    Body:
+        name            str  obrigatório — nome exibido no painel
+        source_url      str  obrigatório — URL base do sensor (ex: http://172.20.212.180)
+        sector_id       str  opcional    — UUID do setor; null = sem setor
+        setpoint_cool   int  opcional    — setpoint padrão (padrão: 24)
+        is_critical     bool opcional    — ambiente crítico (padrão: false)
+    """
+    name = (payload.get("name") or "").strip()
+    source_url = (payload.get("source_url") or "").strip().rstrip("/")
+    if not name or not source_url:
+        raise HTTPException(400, "name e source_url são obrigatórios")
+
+    # Identificador único derivado da URL
+    ext_id = "EXT:" + source_url.replace("http://", "").replace("https://", "").replace("/", "_")
+
+    # Verifica duplicata
+    existing = await db.execute(
+        select(Device).where(Device.brise_device_id == ext_id)
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(409, f"Sensor já cadastrado: {ext_id}")
+
+    sector_id = None
+    if payload.get("sector_id"):
+        try:
+            sector_id = uuid.UUID(payload["sector_id"])
+        except ValueError:
+            raise HTTPException(400, "sector_id inválido")
+
+    device = Device(
+        brise_device_id=ext_id,
+        sector_id=sector_id,
+        name=name,
+        source_url=source_url,
+        is_critical_environment=bool(payload.get("is_critical", False)),
+        active=True,
+    )
+    db.add(device)
+    await db.flush()
+
+    setpoint = int(payload.get("setpoint_cool") or 24)
+    db.add(DeviceParameters(device_id=device.id, setpoint_cool=setpoint))
+
+    await db.commit()
+    await db.refresh(device)
+
+    return {
+        "id": str(device.id),
+        "brise_id": device.brise_device_id,
+        "name": device.name,
+        "source_url": device.source_url,
+        "is_external_sensor": True,
+        "message": "Sensor externo cadastrado. Próxima leitura no próximo ciclo de polling.",
+    }

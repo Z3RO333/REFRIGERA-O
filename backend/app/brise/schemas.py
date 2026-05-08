@@ -6,9 +6,13 @@ class BriseVariables(BaseModel):
 
     state: bool | None = None
     temperature: float | None = None
-    humidity: float | None = None       # API retorna float (ex: 47.5)
+    humidity: float | None = None
     consumption: float | None = None
     consumptionEstimated: float | None = None
+    ON: int | None = None   # minutos acumulados ligado (hodômetro de operação)
+    OFF: int | None = None  # minutos acumulados desligado
+    WM: int | None = None   # working minutes do período corrente
+    ACC: int | None = None  # acumulado total
 
 
 class BriseParameters(BaseModel):

@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1 import devices, alerts, history, kpis, stores, maintenance, auth, ai
 from app.api import websocket as ws_router
 from app.db.session import engine, Base
+from app.db.migrations import run_migrations, seed_external_sensors
 from app.cache.redis_client import redis_client
 from app.polling.scheduler import start_scheduler, stop_scheduler
 
@@ -12,6 +13,8 @@ async def lifespan(app: FastAPI):
     await redis_client.connect()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await run_migrations()
+    await seed_external_sensors()
     await start_scheduler()
     yield
     await stop_scheduler()

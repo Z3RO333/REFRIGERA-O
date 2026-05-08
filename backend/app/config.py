@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     email_use_ssl: bool = False
     allowed_email_domain: str = ""     # se definido, filtra destinatários pelo domínio
 
+    # ── Sensores externos HTTP ─────────────────────────────────────────────────
+    # JSON: [{"source_url": "http://...", "name": "...", "is_critical": false, "setpoint_cool": 24}]
+    external_sensors_seed: str = "[]"
+
     class Config:
         env_file = ".env"
 

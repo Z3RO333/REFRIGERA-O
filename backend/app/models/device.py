@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import String, Boolean, DateTime, Float, Integer, ForeignKey, Text
+from sqlalchemy import BigInteger, String, Boolean, DateTime, Float, Integer, ForeignKey, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID
 from app.db.session import Base
@@ -14,6 +14,7 @@ class Device(Base):
     btu: Mapped[int] = mapped_column(Integer, default=12000)
     enable_fan: Mapped[bool] = mapped_column(Boolean, default=True)
     enable_heat: Mapped[bool] = mapped_column(Boolean, default=False)
+    dnd: Mapped[bool] = mapped_column(Boolean, default=False)
     time_zone: Mapped[int] = mapped_column(Integer, default=-4)
     group_level1: Mapped[str | None] = mapped_column(String(50))
     group_level2: Mapped[str | None] = mapped_column(String(50))
@@ -25,6 +26,8 @@ class Device(Base):
     is_critical_environment: Mapped[bool] = mapped_column(Boolean, default=False)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     last_maintenance: Mapped[datetime | None] = mapped_column(DateTime)
+    source_url: Mapped[str | None] = mapped_column(Text)          # sensor externo HTTP (NULL = Brise)
+    influence_radius_m: Mapped[int] = mapped_column(Integer, default=8)  # raio de influência no mapa térmico (metros)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     sector: Mapped["StoreSector"] = relationship("StoreSector", back_populates="devices")
@@ -50,12 +53,14 @@ class DeviceStatusLatest(Base):
     device_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("devices.id"), primary_key=True)
     state: Mapped[bool | None] = mapped_column(Boolean)
     temperature: Mapped[float | None] = mapped_column(Float)
-    humidity: Mapped[int | None] = mapped_column(Integer)
+    humidity: Mapped[float | None] = mapped_column(Float)
     consumption: Mapped[float | None] = mapped_column(Float)
     consumption_estimated: Mapped[float | None] = mapped_column(Float)
     status_classification: Mapped[str | None] = mapped_column(String(30))
     delta_temp: Mapped[float | None] = mapped_column(Float)
     efficiency_score: Mapped[float | None] = mapped_column(Float)
     consecutive_readings_count: Mapped[int] = mapped_column(Integer, default=0)
+    accumulated_on_minutes: Mapped[int | None] = mapped_column(BigInteger)
+    accumulated_off_minutes: Mapped[int | None] = mapped_column(BigInteger)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     device: Mapped["Device"] = relationship("Device", back_populates="status_latest")
