@@ -33,6 +33,26 @@ _STATEMENTS = [
     "ALTER TABLE devices ADD COLUMN IF NOT EXISTS source_url TEXT",
     # raio de influência no mapa térmico
     "ALTER TABLE devices ADD COLUMN IF NOT EXISTS influence_radius_m INTEGER NOT NULL DEFAULT 8",
+    # guardrails por zona
+    "ALTER TABLE zone_automations ADD COLUMN IF NOT EXISTS allowed_start_hour INTEGER NOT NULL DEFAULT 7",
+    "ALTER TABLE zone_automations ADD COLUMN IF NOT EXISTS allowed_end_hour INTEGER NOT NULL DEFAULT 22",
+    "ALTER TABLE zone_automations ADD COLUMN IF NOT EXISTS is_critical_zone BOOLEAN NOT NULL DEFAULT FALSE",
+    # precisão de minutos no horário (07:30 / 18:30)
+    "ALTER TABLE zone_automations ADD COLUMN IF NOT EXISTS allowed_start_minute INTEGER NOT NULL DEFAULT 30",
+    "ALTER TABLE zone_automations ADD COLUMN IF NOT EXISTS allowed_end_minute INTEGER NOT NULL DEFAULT 30",
+    # corrige registros antigos que tinham end_hour=22 (antes do ajuste para 18:30)
+    "UPDATE zone_automations SET allowed_end_hour = 18 WHERE allowed_end_hour = 22",
+    # tipo de zona e confiança de leitura (bloqueio térmico)
+    "ALTER TABLE zone_automations ADD COLUMN IF NOT EXISTS zone_type VARCHAR(20) NOT NULL DEFAULT 'ABERTA'",
+    "ALTER TABLE zone_automations ADD COLUMN IF NOT EXISTS reading_confidence FLOAT NOT NULL DEFAULT 1.0",
+    # índice composto para queries de histórico (device_id + time é o padrão de acesso)
+    "CREATE INDEX IF NOT EXISTS ix_device_readings_device_time ON device_readings (device_id, time DESC)",
+    # índice para lookup de alertas abertos por device+tipo (dedup e listagem)
+    "CREATE INDEX IF NOT EXISTS ix_alerts_device_type_status ON alerts (device_id, alert_type, status)",
+    # FK sector_id agora usa ON DELETE SET NULL (dispositivo fica sem setor se o setor for deletado)
+    "ALTER TABLE devices DROP CONSTRAINT IF EXISTS devices_sector_id_fkey",
+    """ALTER TABLE devices ADD CONSTRAINT devices_sector_id_fkey
+       FOREIGN KEY (sector_id) REFERENCES store_sectors(id) ON DELETE SET NULL""",
 ]
 
 

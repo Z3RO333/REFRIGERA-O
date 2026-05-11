@@ -5,7 +5,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useAuthStore } from '../../store/useAuthStore'
 import { useAlertStore } from '../../store/useAlertStore'
 import { useThemeStore } from '../../store/useThemeStore'
-import { devicesApi } from '../../api/client'
+import { authApi, devicesApi } from '../../api/client'
 import type { Device } from '../../types'
 
 const PAGE_TITLES: Record<string, string> = {
@@ -44,6 +44,15 @@ export default function Header() {
     setSearchMessage('')
     setMachineQuery('')
     navigate(`/devices/${deviceId}`)
+  }
+
+  const handleLogout = async () => {
+    try {
+      await authApi.logout()
+    } finally {
+      logout()
+      navigate('/login')
+    }
   }
 
   const handleMachineSearch = async (event: FormEvent<HTMLFormElement>) => {
@@ -136,7 +145,7 @@ export default function Header() {
         <div className="flex items-center gap-2">
           <span className="text-sm text-gray-600 dark:text-gray-400 hidden md:block">{name}</span>
           <button
-            onClick={() => { logout(); navigate('/login') }}
+            onClick={handleLogout}
             className="p-2 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors"
             title="Sair"
           >

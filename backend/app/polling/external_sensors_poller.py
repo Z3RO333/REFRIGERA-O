@@ -19,6 +19,7 @@ from app.models.device import Device, DeviceParameters, DeviceStatusLatest
 from app.models.reading import DeviceReading
 from app.rules.alert_generator import generate_alert_if_needed
 from app.rules.classifier import classify_status
+from app.security.network import validate_sensor_url
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,14 @@ async def poll_external_sensors() -> None:
 
 
 async def _poll_one(device: Device) -> None:
-    url = device.source_url.rstrip("/") + "/telemetry"
+    try:
+        base_url = validate_sensor_url(device.source_url or "")
+    except ValueError as exc:
+        logger.warning("Sensor %s com source_url bloqueada: %s", device.name, exc)
+        await _write_no_reading(device)
+        return
+
+    url = base_url + "/telemetry"
     try:
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             resp = await client.get(url)
@@ -142,8 +150,16 @@ async def _poll_one(device: Device) -> None:
         if alert_data:
             in_cooldown = await check_alert_cooldown(device.id, alert_data["alert_type"])
             if not in_cooldown:
-                session.add(Alert(**alert_data))
-                await set_alert_cooldown(device.id, alert_data["alert_type"])
+                existing_open = await session.scalar(
+                    select(Alert.id).where(
+                        Alert.device_id == device.id,
+                        Alert.alert_type == alert_data["alert_type"],
+                        Alert.status == "OPEN",
+                    ).limit(1)
+                )
+                if not existing_open:
+                    session.add(Alert(**alert_data))
+                await set_alert_cooldown(device.id, alert_data["alert_type"], alert_data["severity"])
 
         await session.commit()
 

@@ -1,11 +1,11 @@
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
-import { ArrowLeft, RefreshCw, History, Minus, Plus, Power, PowerOff } from 'lucide-react'
+import { ArrowLeft, RefreshCw, History, Minus, Plus, Power, PowerOff, CalendarDays } from 'lucide-react'
 import { devicesApi } from '../api/client'
 import StatusBadge from '../components/StatusBadge'
 import { formatTemp, formatDelta, formatRelativeTime, formatEfficiency } from '../lib/utils'
-import type { DeviceControlAction, DeviceParameters } from '../types'
+import type { BriseSchedule, DeviceControlAction, DeviceParameters } from '../types'
 
 const MODE_DEVICE = ['Desligado', 'Manual', 'Absoluto', 'Eco']
 const MODE_AC = ['Refrigeração', 'Aquecimento', 'Automático', 'Ventilação']
@@ -28,6 +28,13 @@ export default function DeviceDetail() {
     enabled: !!deviceId,
   })
 
+  const { data: briseSchedules } = useQuery<BriseSchedule[]>({
+    queryKey: ['brise-schedules', deviceId],
+    queryFn: () => devicesApi.briseSchedules(deviceId!),
+    enabled: !!deviceId && !device?.is_external_sensor,
+    staleTime: 5 * 60 * 1000,
+  })
+
   useEffect(() => {
     if (device?.parameters && !editParams) setParams(device.parameters)
   }, [device?.parameters, editParams])
@@ -39,11 +46,19 @@ export default function DeviceDetail() {
   const syncMutation = useMutation({
     mutationFn: () => devicesApi.sync(deviceId!),
     onSuccess: () => setTimeout(refetch, 2000),
+    onError: () => {
+      setControlNotice('Falha ao sincronizar dispositivo')
+      setTimeout(() => setControlNotice(''), 3000)
+    },
   })
 
   const updateParams = useMutation({
     mutationFn: (p: object) => devicesApi.updateParams(deviceId!, p),
     onSuccess: () => { setEditParams(false); refetch() },
+    onError: () => {
+      setControlNotice('Falha ao salvar parâmetros')
+      setTimeout(() => setControlNotice(''), 3000)
+    },
   })
 
   const updateMetadata = useMutation({
@@ -51,6 +66,10 @@ export default function DeviceDetail() {
     onSuccess: () => {
       setEditBtu(false)
       refetch()
+    },
+    onError: () => {
+      setControlNotice('Falha ao atualizar BTU')
+      setTimeout(() => setControlNotice(''), 3000)
     },
   })
 
@@ -235,6 +254,43 @@ export default function DeviceDetail() {
                   )
                 ) : (
                   <div className="text-gray-900 dark:text-white font-medium">{value}</div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {briseSchedules && briseSchedules.length > 0 && (
+        <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-5 space-y-3">
+          <div className="flex items-center gap-2">
+            <CalendarDays className="w-4 h-4 text-blue-500" />
+            <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300">Agendamentos Brise</h2>
+          </div>
+          <div className="space-y-2">
+            {briseSchedules.map(s => (
+              <div
+                key={s.schedule_id}
+                className={`flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border px-4 py-3 text-sm ${
+                  s.currently_active
+                    ? 'border-blue-400/50 bg-blue-50 dark:bg-blue-950/30'
+                    : 'border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-950'
+                }`}
+              >
+                <span className={`font-medium ${s.currently_active ? 'text-blue-600 dark:text-blue-400' : 'text-gray-900 dark:text-white'}`}>
+                  {s.name || `Schedule #${s.schedule_id}`}
+                </span>
+                {s.currently_active && (
+                  <span className="text-xs bg-blue-500 text-white rounded-full px-2 py-0.5">ativo agora</span>
+                )}
+                {!s.enable && (
+                  <span className="text-xs bg-gray-400 text-white rounded-full px-2 py-0.5">desativado</span>
+                )}
+                <span className="text-gray-500 text-xs">
+                  {s.active_days.join(', ')} &nbsp;·&nbsp; {s.start_time}–{s.end_time}
+                </span>
+                {s.setpoint_cool != null && (
+                  <span className="text-gray-500 text-xs">setpoint {s.setpoint_cool}°C</span>
                 )}
               </div>
             ))}

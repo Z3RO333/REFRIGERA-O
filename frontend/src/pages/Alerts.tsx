@@ -16,6 +16,7 @@ export default function Alerts() {
   const navigate = useNavigate()
   const [statusTab, setStatusTab] = useState('OPEN')
   const [severityFilter, setSeverityFilter] = useState('')
+  const [notice, setNotice] = useState('')
   const queryClient = useQueryClient()
 
   const { data, isLoading } = useQuery({
@@ -30,7 +31,14 @@ export default function Alerts() {
 
   const ackMutation = useMutation({
     mutationFn: (id: string) => alertsApi.acknowledge(id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['alerts'] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['alerts'] })
+      setNotice('')
+    },
+    onError: () => {
+      setNotice('Falha ao reconhecer alerta. Tente novamente.')
+      setTimeout(() => setNotice(''), 4000)
+    },
   })
 
   const alerts = data?.alerts || []
@@ -68,6 +76,10 @@ export default function Alerts() {
           ))}
         </div>
       </div>
+
+      {notice && (
+        <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-500">{notice}</div>
+      )}
 
       <div className="overflow-hidden rounded-lg border border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-900">
         <div className="overflow-x-auto">

@@ -1,12 +1,16 @@
 import { useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { ArrowLeft, Eye, EyeOff, SlidersHorizontal, Thermometer, Wind, Zap } from 'lucide-react'
-import { devicesApi, storesApi } from '../api/client'
+import {
+  Activity, AlertTriangle, ArrowLeft, Bot, ChevronDown, ChevronUp, Clock,
+  Eye, EyeOff, PlayCircle, RefreshCw, Shield, ShieldOff, SlidersHorizontal,
+  Thermometer, TrendingDown, TrendingUp, Wind, Zap,
+} from 'lucide-react'
+import { automationApi, devicesApi, digitalTwinApi, storesApi, zonesApi } from '../api/client'
 import StatusBadge from '../components/StatusBadge'
 import DeviceMarker from '../components/map/DeviceMarker'
 import { cn, formatRelativeTime, formatTemp } from '../lib/utils'
-import type { Device, Sector } from '../types'
+import type { AutomationStatus, Device, DigitalTwinZone, Sector, ZoneAutomationState, ZoneMode, ZoneType } from '../types'
 
 type ThermalStatus = 'COLD' | 'COMFORT' | 'WARM' | 'HOT' | 'CRITICAL' | 'NO_READING'
 type SourceType = 'zone' | 'brise' | 'sensor' | 'merged'
@@ -21,6 +25,7 @@ interface ZoneDefinition {
   h: number
   idealMin: number
   idealMax: number
+  zone_type: ZoneType
 }
 
 interface HeatPoint {
@@ -39,24 +44,44 @@ interface HeatPoint {
   mergedSources?: { label: string; temp: number; type: 'brise' | 'sensor' }[]
 }
 
+type ZoneState = ZoneDefinition & {
+  devices: Device[]
+  actionableDevices: Device[]
+  avgTemp: number | null
+  status: ThermalStatus
+}
+
 const VIEWBOX = { w: 800, h: 556 }
 
 /** Pixels SVG por metro — escala aproximada para o Escritório Matriz */
 const M_TO_SVG = 14
 
+// ── Definição de zonas com tipo (ABERTA | SALA_FECHADA) ──────────────────────
+// Coordenadas baseadas na planta 1.png (viewbox 800×556).
+// ABERTA: área ampla sem barreiras relevantes — interpolação térmica contínua.
+// SALA_FECHADA: sala com paredes — isolamento térmico, borda tracejada no mapa.
 const ZONES: ZoneDefinition[] = [
-  { key: 'convivencia', sectorNames: ['Convivência', 'Refeitório', 'Salas de Descanso'], label: 'Convivência', x: 125, y: 8, w: 250, h: 105, idealMin: 22, idealMax: 24 },
-  { key: 'sac', sectorNames: ['SAC'], label: 'SAC', x: 70, y: 128, w: 245, h: 112, idealMin: 22, idealMax: 24 },
-  { key: 'conta-bemol', sectorNames: ['Conta Bemol'], label: 'Conta Bemol', x: 340, y: 140, w: 118, h: 92, idealMin: 22, idealMax: 24 },
-  { key: 'auditorio', sectorNames: ['Auditório'], label: 'Auditório', x: 105, y: 250, w: 220, h: 82, idealMin: 22, idealMax: 24 },
-  { key: 'comercial', sectorNames: ['Comercial'], label: 'Comercial', x: 515, y: 155, w: 210, h: 92, idealMin: 22, idealMax: 24 },
-  { key: 'marketing', sectorNames: ['Marketing', 'Marketplace'], label: 'Marketing / Marketplace', x: 545, y: 265, w: 210, h: 92, idealMin: 22, idealMax: 24 },
-  { key: 'contabilidade', sectorNames: ['Contabilidade', 'Gestão de Risco'], label: 'Contabilidade / Risco', x: 520, y: 365, w: 235, h: 90, idealMin: 22, idealMax: 24 },
-  { key: 'bemol-online', sectorNames: ['Bemol Online', 'Televendas'], label: 'Online / Televendas', x: 128, y: 360, w: 245, h: 128, idealMin: 22, idealMax: 24 },
-  { key: 'geral', sectorNames: ['Geral', 'Recepção', 'CAB'], label: 'Área central', x: 330, y: 250, w: 145, h: 150, idealMin: 22, idealMax: 24 },
-  { key: 'farmacia',    sectorNames: ['Farmácia'],    label: 'Farmácia',    x: 480, y: 110, w: 90,  h: 92,  idealMin: 20, idealMax: 22 },
-  { key: 'presidencia', sectorNames: ['Presidência'], label: 'Presidência', x: 140, y: 145, w: 130, h: 80,  idealMin: 21, idealMax: 25 },
+  // ── Escritório Matriz ─────────────────────────────────────────────────────────
+  { key: 'convivencia',   sectorNames: ['Convivência','Refeitório','Salas de Descanso'], label: 'Convivência',           x: 125, y: 8,   w: 250, h: 105, idealMin: 22, idealMax: 24, zone_type: 'ABERTA' },
+  { key: 'sac',           sectorNames: ['SAC'],                                          label: 'SAC',                   x: 70,  y: 128, w: 245, h: 112, idealMin: 22, idealMax: 24, zone_type: 'ABERTA' },
+  { key: 'conta-bemol',   sectorNames: ['Conta Bemol'],                                  label: 'Conta Bemol',           x: 340, y: 140, w: 118, h: 92,  idealMin: 22, idealMax: 24, zone_type: 'ABERTA' },
+  { key: 'auditorio',     sectorNames: ['Auditório'],                                    label: 'Auditório',             x: 105, y: 250, w: 220, h: 82,  idealMin: 22, idealMax: 24, zone_type: 'ABERTA' },
+  { key: 'comercial',     sectorNames: ['Comercial'],                                    label: 'Comercial',             x: 515, y: 155, w: 210, h: 92,  idealMin: 22, idealMax: 24, zone_type: 'ABERTA' },
+  { key: 'marketing',     sectorNames: ['Marketing','Marketplace'],                      label: 'Marketing / Marketplace', x: 545, y: 265, w: 210, h: 92, idealMin: 22, idealMax: 24, zone_type: 'ABERTA' },
+  { key: 'contabilidade', sectorNames: ['Contabilidade','Gestão de Risco'],              label: 'Contabilidade / Risco', x: 520, y: 365, w: 235, h: 90,  idealMin: 22, idealMax: 24, zone_type: 'ABERTA' },
+  { key: 'bemol-online',  sectorNames: ['Bemol Online','Televendas'],                   label: 'Online / Televendas',   x: 128, y: 360, w: 245, h: 128, idealMin: 22, idealMax: 24, zone_type: 'ABERTA' },
+  { key: 'geral',         sectorNames: ['Geral','Recepção','CAB'],                       label: 'Área central',          x: 330, y: 250, w: 145, h: 150, idealMin: 22, idealMax: 24, zone_type: 'ABERTA' },
+  { key: 'farmacia',      sectorNames: ['Farmácia'],                                     label: 'Farmácia',              x: 480, y: 110, w: 90,  h: 92,  idealMin: 20, idealMax: 22, zone_type: 'ABERTA' },
+  { key: 'presidencia',   sectorNames: ['Presidência'],                                  label: 'Presidência',           x: 140, y: 145, w: 130, h: 80,  idealMin: 21, idealMax: 25, zone_type: 'ABERTA' },
+
+  // ── Farma Flores (planta 1376×768 → SVG 800×556, escala 0.58, y-offset 55) ──
+  // Prédio: x 20–782, y 102–462. Salão=14.1m, fundo=3.2m (12m largura).
+  { key: 'farma-vendas',      sectorNames: ['Área de Vendas'],  label: 'Salão de Vendas', x: 20,  y: 102, w: 480, h: 360, idealMin: 20, idealMax: 24, zone_type: 'ABERTA'      },
+  { key: 'farma-dispensario', sectorNames: ['Dispensário'],     label: 'Dispensário',     x: 500, y: 102, w: 90,  h: 360, idealMin: 20, idealMax: 22, zone_type: 'SALA_FECHADA' },
+  { key: 'farma-admin',       sectorNames: ['Administrativa'],  label: 'Administrativa',  x: 590, y: 102, w: 192, h: 200, idealMin: 22, idealMax: 24, zone_type: 'SALA_FECHADA' },
+  { key: 'farma-escritorio',  sectorNames: ['Escritório'],      label: 'Escritório',      x: 590, y: 302, w: 192, h: 160, idealMin: 22, idealMax: 24, zone_type: 'SALA_FECHADA' },
 ]
+
 
 const STATUS_META: Record<ThermalStatus, { label: string; color: string; fill: string; text: string }> = {
   COLD:       { label: 'Frio demais',   color: '#2563EB', fill: 'rgba(37, 99, 235, 0.48)',  text: 'text-blue-600 dark:text-blue-400' },
@@ -92,12 +117,50 @@ export default function ThermalComfortMap() {
     enabled: !!storeId,
   })
 
+  const { data: zonesData = [], refetch: refetchZones } = useQuery<ZoneAutomationState[]>({
+    queryKey: ['zones-automation', storeId],
+    queryFn: () => zonesApi.list(storeId!),
+    enabled: !!storeId,
+    refetchInterval: 60_000,
+  })
+
+  const { data: autoStatus, refetch: refetchAutoStatus } = useQuery<AutomationStatus>({
+    queryKey: ['automation-status'],
+    queryFn: () => automationApi.status(),
+    refetchInterval: 30_000,
+  })
+
+  const { data: twinData = [] } = useQuery<DigitalTwinZone[]>({
+    queryKey: ['digital-twin', storeId],
+    queryFn: () => digitalTwinApi.store(storeId!),
+    enabled: !!storeId,
+    refetchInterval: 60_000,
+    staleTime: 45_000,
+  })
+
+  const [togglingKillSwitch, setTogglingKillSwitch] = useState(false)
+
+  const handleKillSwitch = async (activate: boolean) => {
+    setTogglingKillSwitch(true)
+    await automationApi.setKillSwitch(activate).finally(() => setTogglingKillSwitch(false))
+    await refetchAutoStatus()
+    await refetchZones()
+  }
+
   const floorPlanUrl = sectors.find((s: Sector) => s.floor === selectedFloor && s.floor_plan_url)?.floor_plan_url ?? null
   const sectorsById = new Map<string, Sector>(sectors.map((s: Sector) => [s.id, s]))
   const floorDevices = devices.filter((d: Device) => sectorsById.get(d.sector_id || '')?.floor === selectedFloor)
   const positionedDevices = floorDevices.filter((d: Device) => d.position_x != null && d.position_y != null)
 
-  const zoneStates = useMemo(() => ZONES.map(zone => {
+  // Filtra apenas as zonas cujos setores existem nesta loja
+  const storeSectorNames = useMemo(() => new Set(sectors.map((s: Sector) => s.name)), [sectors])
+  const storeZones = useMemo(
+    () => ZONES.filter(z => z.sectorNames.some(n => storeSectorNames.has(n))),
+    [storeSectorNames]
+  )
+
+  // ── Estado de todas as zonas ────────────────────────────────────────────────
+  const zoneStates = useMemo(() => storeZones.map(zone => {
     const zoneDevices = floorDevices.filter((d: Device) => zone.sectorNames.includes(d.sector_name || ''))
     const temperatureDevices = zoneDevices.filter((d: Device) => d.temperature != null)
     const avgTemp = temperatureDevices.length
@@ -106,15 +169,17 @@ export default function ThermalComfortMap() {
     const status = classifyZone(avgTemp, zone.idealMin, zone.idealMax)
     const actionableDevices = zoneDevices.filter((d: Device) => !['SEM_LEITURA', 'DESLIGADO'].includes(d.status))
     return { ...zone, devices: zoneDevices, actionableDevices, avgTemp, status }
-  }), [floorDevices])
+  }), [floorDevices, storeZones])
 
-  const visibleZones = statusFilter === 'ALL' ? zoneStates : zoneStates.filter(z => z.status === statusFilter)
+  const visibleZones = statusFilter === 'ALL'
+    ? zoneStates
+    : zoneStates.filter(z => z.status === statusFilter)
 
+  // ── Heat points ────────────────────────────────────────────────────────────
   const heatPoints = useMemo(() => {
     const sectorIdealByName = new Map<string, Pick<ZoneDefinition, 'idealMin' | 'idealMax'>>()
     zoneStates.forEach(z => z.sectorNames.forEach(name => sectorIdealByName.set(name, z)))
 
-    // Monta grupos por setor: sectorId → { acs, sensors }
     const sectorGroups = new Map<string, { acs: Device[]; sensors: Device[] }>()
     positionedDevices.forEach((d: Device) => {
       if (!d.sector_id || d.temperature == null) return
@@ -123,36 +188,33 @@ export default function ThermalComfortMap() {
       d.is_external_sensor ? g.sensors.push(d) : g.acs.push(d)
     })
 
-    // IDs de sensores que foram fundidos com um AC (não geram blob independente)
     const mergedSensorIds = new Set<string>()
 
-    // Pontos de zona (fundo)
     const zonePoints: HeatPoint[] = visibleZones.map(zone => ({
       key: `zone-${zone.key}`,
       label: zone.label,
       x: zone.x + zone.w / 2,
       y: zone.y + zone.h / 2,
-      radius: Math.max(zone.w, zone.h) * 0.78,
-      radiusM: Math.round(Math.max(zone.w, zone.h) * 0.78 / M_TO_SVG),
+      radius: Math.max(zone.w, zone.h) / 2,
+      radiusM: Math.round(Math.max(zone.w, zone.h) / 2 / M_TO_SVG),
       temp: zone.avgTemp,
       status: zone.status,
       opacity: 0.55,
       sourceType: 'zone' as SourceType,
     }))
 
-    // Pontos Brise — se ambas camadas ativas e há sensor no mesmo setor → funde
     const brisePoints: HeatPoint[] = showBriseLyr
       ? positionedDevices
           .filter((d: Device) => !d.is_external_sensor && d.temperature != null)
           .map((d: Device): HeatPoint => {
             const radiusM = d.influence_radius_m ?? 8
+            const radiusPx = radiusM * M_TO_SVG
             const ideal = sectorIdealByName.get(d.sector_name || '')
             const sensorsInSector = showSensorLyr
               ? (sectorGroups.get(d.sector_id ?? '')?.sensors ?? [])
               : []
 
             if (sensorsInSector.length > 0) {
-              // Funde: média de todas as temperaturas (AC + sensores do setor)
               const allTemps = [Number(d.temperature), ...sensorsInSector.map(s => Number(s.temperature))]
               const avgTemp = allTemps.reduce((a, b) => a + b, 0) / allTemps.length
               sensorsInSector.forEach(s => mergedSensorIds.add(s.id))
@@ -161,11 +223,11 @@ export default function ThermalComfortMap() {
                 label: d.name,
                 x: Number(d.position_x),
                 y: Number(d.position_y),
-                radius: radiusM * M_TO_SVG,
+                radius: radiusPx,
                 radiusM,
                 temp: avgTemp,
                 status: classifyZone(avgTemp, ideal?.idealMin ?? 22, ideal?.idealMax ?? 24),
-                opacity: 0.95,
+                opacity: 0.85,
                 sourceType: 'merged',
                 lastUpdated: d.updated_at,
                 deviceId: d.id,
@@ -181,11 +243,11 @@ export default function ThermalComfortMap() {
               label: d.name,
               x: Number(d.position_x),
               y: Number(d.position_y),
-              radius: radiusM * M_TO_SVG,
+              radius: radiusPx,
               radiusM,
               temp: Number(d.temperature),
               status: classifyZone(Number(d.temperature), ideal?.idealMin ?? 22, ideal?.idealMax ?? 24),
-              opacity: 0.95,
+              opacity: 0.85,
               sourceType: 'brise',
               lastUpdated: d.updated_at,
               deviceId: d.id,
@@ -193,7 +255,6 @@ export default function ThermalComfortMap() {
           })
       : []
 
-    // Pontos de sensores não fundidos (sozinhos no setor ou camada Brise desligada)
     const sensorPoints: HeatPoint[] = showSensorLyr
       ? positionedDevices
           .filter((d: Device) => d.is_external_sensor && d.temperature != null && !mergedSensorIds.has(d.id))
@@ -230,6 +291,29 @@ export default function ThermalComfortMap() {
   const externalSensorsOnFloor = floorDevices.filter((d: Device) => d.is_external_sensor)
   const positionedSensors = externalSensorsOnFloor.filter((d: Device) => d.position_x != null)
 
+  const activeZoneKey = selectedZone?.key ?? null
+  const zoneAutomation = zonesData.find(z => z.zone_key === activeZoneKey)
+  const activeTwin = twinData.find(z => z.zone_key === activeZoneKey)
+
+  const handleModeChange = async (mode: ZoneMode) => {
+    if (!storeId || !activeZoneKey) return
+    await zonesApi.setMode(storeId, activeZoneKey, { mode })
+    refetchZones()
+  }
+
+  const handleTrigger = async () => {
+    if (!storeId || !activeZoneKey) return
+    setActionMessage('Disparando avaliação...')
+    try {
+      await zonesApi.trigger(storeId, activeZoneKey)
+      setActionMessage('Avaliação concluída.')
+      await refetchDevices()
+      await refetchZones()
+    } catch {
+      setActionMessage('Erro ao disparar avaliação.')
+    }
+  }
+
   const applyRecommendedAdjustment = async () => {
     if (!selectedZone) return
     const action = recommendedControlAction(selectedZone.status)
@@ -260,7 +344,6 @@ export default function ThermalComfortMap() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {/* Seletor de andar */}
           {[1, 2, 3, 4].map(floor => (
             <button key={floor} type="button" onClick={() => setSelectedFloor(floor)}
               className={cn('rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors',
@@ -270,7 +353,6 @@ export default function ThermalComfortMap() {
             </button>
           ))}
 
-          {/* Camada Brise */}
           <button type="button" onClick={() => setShowBriseLyr(v => !v)}
             className={cn('inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors',
               showBriseLyr ? 'border-blue-500/40 bg-blue-500/10 text-blue-600 dark:text-blue-400' : 'border-gray-200 text-gray-400 hover:bg-gray-100 dark:border-gray-800 dark:hover:bg-gray-800'
@@ -280,7 +362,6 @@ export default function ThermalComfortMap() {
             {showBriseLyr ? <Eye className="h-3 w-3" /> : <EyeOff className="h-3 w-3" />}
           </button>
 
-          {/* Camada Termômetros */}
           <button type="button" onClick={() => setShowSensorLyr(v => !v)}
             className={cn('inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors',
               showSensorLyr ? 'border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400' : 'border-gray-200 text-gray-400 hover:bg-gray-100 dark:border-gray-800 dark:hover:bg-gray-800'
@@ -290,7 +371,6 @@ export default function ThermalComfortMap() {
             {showSensorLyr ? <Eye className="h-3 w-3" /> : <EyeOff className="h-3 w-3" />}
           </button>
 
-          {/* Ícones no mapa */}
           <button type="button" onClick={() => setShowEquipment(v => !v)}
             className="inline-flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-100 dark:border-gray-800 dark:text-gray-400 dark:hover:bg-gray-800">
             {showEquipment ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
@@ -302,8 +382,44 @@ export default function ThermalComfortMap() {
             <SlidersHorizontal className="h-3.5 w-3.5" />
             Posicionamento
           </button>
+
+          <button
+            type="button"
+            disabled={togglingKillSwitch}
+            onClick={() => handleKillSwitch(!autoStatus?.kill_switch_active)}
+            title={autoStatus?.kill_switch_active ? 'Reativar automação' : 'Pausar toda a automação agora'}
+            className={cn(
+              'inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors',
+              autoStatus?.kill_switch_active
+                ? 'border-red-500 bg-red-500 text-white hover:bg-red-600'
+                : 'border-gray-200 text-gray-600 hover:border-red-300 hover:bg-red-50 hover:text-red-600 dark:border-gray-800 dark:text-gray-400',
+            )}
+          >
+            {autoStatus?.kill_switch_active
+              ? <><ShieldOff className="h-3.5 w-3.5" /> Auto PAUSADA</>
+              : <><Shield className="h-3.5 w-3.5" /> Kill switch</>
+            }
+          </button>
         </div>
       </div>
+
+      {/* ── Banner kill switch ── */}
+      {autoStatus?.kill_switch_active && (
+        <div className="flex items-center gap-3 rounded-lg border border-red-300 bg-red-50 px-4 py-2.5 dark:border-red-800 dark:bg-red-950/40">
+          <ShieldOff className="h-4 w-4 flex-shrink-0 text-red-600 dark:text-red-400" />
+          <div className="flex-1 min-w-0">
+            <span className="text-sm font-semibold text-red-700 dark:text-red-400">Automação global pausada</span>
+            <span className="ml-2 text-xs text-red-500">
+              Nenhum ajuste automático será executado até reativar.
+              {autoStatus.kill_switch_activated_by && ` Pausado por: ${autoStatus.kill_switch_activated_by}.`}
+            </span>
+          </div>
+          <button type="button" onClick={() => handleKillSwitch(false)}
+            className="flex-shrink-0 rounded-md bg-red-600 px-3 py-1 text-xs font-medium text-white hover:bg-red-500">
+            Reativar
+          </button>
+        </div>
+      )}
 
       {/* ── KPIs ── */}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
@@ -340,15 +456,21 @@ export default function ThermalComfortMap() {
           )}
           <svg viewBox={`0 0 ${VIEWBOX.w} ${VIEWBOX.h}`} className="h-full w-full">
             <defs>
-              <filter id="thermal-blur" x="-30%" y="-30%" width="160%" height="160%" colorInterpolationFilters="sRGB">
-                <feGaussianBlur stdDeviation="24" />
+              <filter id="thermal-blur" x="-20%" y="-20%" width="140%" height="140%" colorInterpolationFilters="sRGB">
+                <feGaussianBlur stdDeviation="22" />
               </filter>
+              <clipPath id="map-clip">
+                <rect x={0} y={0} width={VIEWBOX.w} height={VIEWBOX.h} />
+              </clipPath>
+
+              {/* Gradientes radiais — preenchimento denso até ~80% do raio, fade suave no final */}
               {heatPoints.map(point => {
                 const color = thermalColor(point.temp)
                 return (
                   <radialGradient key={point.key} id={`tg-${point.key}`} cx="50%" cy="50%" r="50%">
                     <stop offset="0%"   stopColor={color} stopOpacity={point.opacity} />
-                    <stop offset="40%"  stopColor={color} stopOpacity={point.opacity * 0.55} />
+                    <stop offset="50%"  stopColor={color} stopOpacity={point.opacity * 0.80} />
+                    <stop offset="80%"  stopColor={color} stopOpacity={point.opacity * 0.40} />
                     <stop offset="100%" stopColor={color} stopOpacity={0} />
                   </radialGradient>
                 )
@@ -364,14 +486,14 @@ export default function ThermalComfortMap() {
                 preserveAspectRatio="xMidYMid meet" opacity={0.82} />
             )}
 
-            {/* Camada térmica (blurred) */}
-            <g filter="url(#thermal-blur)" style={{ mixBlendMode: 'multiply' }} opacity={0.80}>
+            {/* Camada térmica — clipada ao viewbox para não vazar nas bordas */}
+            <g clipPath="url(#map-clip)" filter="url(#thermal-blur)" style={{ mixBlendMode: 'multiply' }} opacity={0.80}>
               {heatPoints.map(point => (
                 <circle key={point.key} cx={point.x} cy={point.y} r={point.radius} fill={`url(#tg-${point.key})`} />
               ))}
             </g>
 
-            {/* Zonas clicáveis (transparentes) */}
+            {/* Zonas clicáveis */}
             {visibleZones.map(zone => {
               const meta = STATUS_META[zone.status]
               return (
@@ -397,15 +519,35 @@ export default function ThermalComfortMap() {
               <DeviceMarker key={d.id} device={d} onClick={() => undefined} scale={0.78} />
             ))}
 
-            {/* Áreas de hit invisíveis para tooltip — sobre tudo, sem blur */}
+            {/* Labels de temperatura flutuantes */}
+            <g pointerEvents="none">
+              {heatPoints
+                .filter(p => p.sourceType !== 'zone' && p.temp != null)
+                .map(point => {
+                  const label = `${point.temp!.toFixed(1)}°`
+                  const tw = label.length * 5.8 + 10
+                  const tx = point.x - tw / 2
+                  const ty = point.y - 18
+                  const dot = point.sourceType === 'sensor' ? '#F59E0B' : point.sourceType === 'merged' ? '#A78BFA' : '#60A5FA'
+                  return (
+                    <g key={`lbl-${point.key}`} transform={`translate(${tx},${ty})`}>
+                      <rect width={tw} height={16} rx={4} fill="rgba(15,23,42,0.72)" />
+                      <circle cx={6} cy={8} r={2.5} fill={dot} />
+                      <text x={tw / 2 + 2} y={11.5} textAnchor="middle" fontSize={9} fontWeight="600" fill="#F1F5F9" fontFamily="ui-monospace,monospace">
+                        {label}
+                      </text>
+                    </g>
+                  )
+                })}
+            </g>
+
+            {/* Áreas de hit para tooltip */}
             {heatPoints
               .filter(p => p.sourceType !== 'zone')
               .map(point => (
                 <circle
                   key={`hit-${point.key}`}
-                  cx={point.x}
-                  cy={point.y}
-                  r={32}
+                  cx={point.x} cy={point.y} r={32}
                   fill="transparent"
                   style={{ cursor: 'crosshair' }}
                   onMouseEnter={() => setHoveredPoint(point)}
@@ -452,35 +594,43 @@ export default function ThermalComfortMap() {
         </div>
 
         {/* Painel lateral */}
-        <aside className="overflow-y-auto rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
+        <aside className="overflow-y-auto rounded-xl border border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900 space-y-4">
+          <ZoneAlertsSummary
+            zones={zoneStates}
+            selectedZoneKey={selectedZoneKey}
+            onZoneSelect={(key) => { setSelectedZoneKey(key); setActionMessage('') }}
+            onRefetch={() => { refetchDevices(); refetchZones() }}
+          />
           {selectedZone ? (
-            <ZonePanel zone={selectedZone} actionMessage={actionMessage} onApply={applyRecommendedAdjustment} />
+            <>
+              <ZonePanel
+                key={selectedZone.key}
+                zone={selectedZone}
+                storeId={storeId!}
+                automation={zoneAutomation}
+                actionMessage={actionMessage}
+                onModeChange={handleModeChange}
+                onTrigger={handleTrigger}
+                onRefetch={() => { refetchDevices(); refetchZones() }}
+              />
+              <DigitalTwinPanel twin={activeTwin} />
+            </>
           ) : (
-            <div className="py-10 text-center text-sm text-gray-500">Selecione uma zona</div>
+            <div className="rounded-lg bg-gray-50 px-3 py-6 dark:bg-gray-950 text-center text-sm text-gray-500">
+              Clique em uma zona no mapa para ver detalhes e automação
+            </div>
           )}
         </aside>
       </div>
 
-      {/* Legenda de escala */}
+      {/* Legenda */}
       <div className="flex flex-wrap items-center gap-4 text-xs text-gray-500">
-        <div className="flex items-center gap-1.5">
-          <div className="h-3 w-3 rounded-full" style={{ background: '#1D4ED8' }} />≤19°C
-        </div>
-        <div className="flex items-center gap-1.5">
-          <div className="h-3 w-3 rounded-full" style={{ background: '#00A6D6' }} />21°C
-        </div>
-        <div className="flex items-center gap-1.5">
-          <div className="h-3 w-3 rounded-full" style={{ background: '#16A34A' }} />23°C
-        </div>
-        <div className="flex items-center gap-1.5">
-          <div className="h-3 w-3 rounded-full" style={{ background: '#FACC15' }} />25°C
-        </div>
-        <div className="flex items-center gap-1.5">
-          <div className="h-3 w-3 rounded-full" style={{ background: '#FB923C' }} />27°C
-        </div>
-        <div className="flex items-center gap-1.5">
-          <div className="h-3 w-3 rounded-full" style={{ background: '#DC2626' }} />&gt;27°C
-        </div>
+        <div className="flex items-center gap-1.5"><div className="h-3 w-3 rounded-full" style={{ background: '#1D4ED8' }} />≤19°C</div>
+        <div className="flex items-center gap-1.5"><div className="h-3 w-3 rounded-full" style={{ background: '#00A6D6' }} />21°C</div>
+        <div className="flex items-center gap-1.5"><div className="h-3 w-3 rounded-full" style={{ background: '#16A34A' }} />23°C</div>
+        <div className="flex items-center gap-1.5"><div className="h-3 w-3 rounded-full" style={{ background: '#FACC15' }} />25°C</div>
+        <div className="flex items-center gap-1.5"><div className="h-3 w-3 rounded-full" style={{ background: '#FB923C' }} />27°C</div>
+        <div className="flex items-center gap-1.5"><div className="h-3 w-3 rounded-full" style={{ background: '#DC2626' }} />&gt;27°C</div>
         <span className="ml-auto">Raio padrão: 8m — {M_TO_SVG}px/m</span>
       </div>
     </div>
@@ -489,37 +639,582 @@ export default function ThermalComfortMap() {
 
 /* ── Componentes auxiliares ── */
 
-function ZonePanel({ zone, actionMessage, onApply }: { zone: any; actionMessage: string; onApply: () => void }) {
+const ALERT_SEVERITY: ThermalStatus[] = ['CRITICAL', 'HOT', 'WARM', 'COLD']
+
+function ZoneAlertsSummary({
+  zones, selectedZoneKey, onZoneSelect, onRefetch,
+}: {
+  zones: ZoneState[]
+  selectedZoneKey: string | null
+  onZoneSelect: (key: string) => void
+  onRefetch: () => void
+}) {
+  const problematic = zones
+    .filter(z => ALERT_SEVERITY.includes(z.status))
+    .sort((a, b) => ALERT_SEVERITY.indexOf(a.status) - ALERT_SEVERITY.indexOf(b.status))
+
+  if (!problematic.length) {
+    return (
+      <div className="flex items-center gap-2 rounded-lg bg-green-50 px-3 py-2.5 dark:bg-green-950/30">
+        <span className="h-2 w-2 rounded-full bg-green-500 flex-shrink-0" />
+        <span className="text-xs font-medium text-green-700 dark:text-green-400">Todas as zonas dentro da faixa confortável</span>
+      </div>
+    )
+  }
+
+  return (
+    <div className="rounded-lg border border-orange-200 dark:border-orange-900/60 overflow-hidden">
+      <div className="flex items-center gap-2 bg-orange-50 px-3 py-2 dark:bg-orange-950/30">
+        <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0 text-orange-500" />
+        <span className="text-xs font-semibold text-orange-700 dark:text-orange-400">
+          {problematic.length} zona{problematic.length !== 1 ? 's' : ''} precisam de atenção
+        </span>
+        <span className="ml-auto text-xs text-orange-400">clique para ajustar</span>
+      </div>
+      <div className="divide-y divide-gray-100 dark:divide-gray-800">
+        {problematic.map(zone => (
+          <ZoneAlertRow
+            key={zone.key}
+            zone={zone}
+            isSelected={zone.key === selectedZoneKey}
+            onSelect={() => onZoneSelect(zone.key)}
+            onRefetch={onRefetch}
+          />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+type RowPhase = 'idle' | 'loading' | 'done' | 'error'
+
+function ZoneAlertRow({
+  zone, isSelected, onSelect, onRefetch,
+}: {
+  zone: ZoneState
+  isSelected: boolean
+  onSelect: () => void
+  onRefetch: () => void
+}) {
+  const [phase, setPhase] = useState<RowPhase>('idle')
+  const [lockedUntil, setLockedUntil] = useState(0)
+  const isLocked = Date.now() < lockedUntil
+  const meta = STATUS_META[zone.status]
+  const action = recommendedControlAction(zone.status)
+  const acDevices = zone.actionableDevices.filter((d: Device) => !d.is_external_sensor)
+  const canAdjust = action != null && acDevices.length > 0 && !isLocked && phase !== 'loading'
+
+  const quickAdjust = async () => {
+    if (!action || !canAdjust) return
+    setPhase('loading')
+    try {
+      // Só ajusta ACs cuja temperatura individual confirma que estão fora da faixa
+      const hot = acDevices.filter((d: Device) => {
+        if (d.temperature == null) return false
+        return action === 'temperature_down' ? d.temperature > zone.idealMax : d.temperature < zone.idealMin
+      })
+      const targets = (hot.length > 0 ? hot : acDevices.filter((d: Device) => d.temperature == null)).slice(0, 8)
+      if (!targets.length) { setPhase('idle'); return }
+      await Promise.all(targets.map((d: Device) => devicesApi.control(d.id, action, 1)))
+      setPhase('done')
+      setLockedUntil(Date.now() + 2 * 60 * 1000)
+      onRefetch()
+      setTimeout(() => setPhase('idle'), 8000)
+    } catch {
+      setPhase('error')
+      setTimeout(() => setPhase('idle'), 4000)
+    }
+  }
+
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={onSelect}
+      onKeyDown={(e) => e.key === 'Enter' && onSelect()}
+      className={cn(
+        'flex items-center gap-3 px-3 py-2.5 text-left transition-colors cursor-pointer',
+        isSelected ? 'bg-blue-50 dark:bg-blue-950/30' : 'hover:bg-gray-50 dark:hover:bg-gray-800/50',
+      )}
+    >
+      <span className="h-2.5 w-2.5 flex-shrink-0 rounded-full" style={{ background: meta.color }} />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <span className="truncate text-sm font-medium text-gray-900 dark:text-white">{zone.label}</span>
+          {isSelected && (
+            <span className="flex-shrink-0 rounded bg-blue-100 px-1 py-0.5 text-[10px] text-blue-600 dark:bg-blue-900/50 dark:text-blue-400">
+              ativo
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-2 text-xs">
+          <span className={meta.text}>{meta.label}</span>
+          {zone.avgTemp != null && <span className="text-gray-500">· {formatTemp(zone.avgTemp)}</span>}
+          {acDevices.length > 0 && (
+            <span className="text-gray-400">· {acDevices.length} AC{acDevices.length !== 1 ? 's' : ''}</span>
+          )}
+        </div>
+      </div>
+      {action && (
+        <button
+          type="button"
+          title={action === 'temperature_down'
+            ? `Reduzir 1°C em ${acDevices.length} AC(s) de ${zone.label}`
+            : `Aumentar 1°C em ${acDevices.length} AC(s) de ${zone.label}`}
+          onClick={(e) => { e.stopPropagation(); void quickAdjust() }}
+          disabled={!canAdjust}
+          className={cn(
+            'flex-shrink-0 inline-flex items-center justify-center rounded-md px-2.5 py-1 text-xs font-semibold transition-colors min-w-[52px]',
+            phase === 'done'
+              ? 'bg-green-100 text-green-700 dark:bg-green-950/50 dark:text-green-400'
+              : phase === 'error'
+              ? 'bg-red-100 text-red-700 dark:bg-red-950/50 dark:text-red-400'
+              : isLocked
+              ? 'cursor-not-allowed bg-gray-100 text-gray-400 dark:bg-gray-800'
+              : !canAdjust
+              ? 'cursor-not-allowed bg-gray-100 text-gray-400 dark:bg-gray-800'
+              : action === 'temperature_down'
+              ? 'bg-orange-100 text-orange-700 hover:bg-orange-200 dark:bg-orange-950/50 dark:text-orange-400'
+              : 'bg-blue-100 text-blue-700 hover:bg-blue-200 dark:bg-blue-950/50 dark:text-blue-400',
+          )}
+        >
+          {phase === 'loading'
+            ? <RefreshCw className="h-3 w-3 animate-spin" />
+            : phase === 'done'
+            ? '✓ OK'
+            : phase === 'error'
+            ? '✗ Erro'
+            : isLocked
+            ? 'esperar'
+            : acDevices.length === 0
+            ? 'sem AC'
+            : action === 'temperature_down'
+            ? '↓ 1°C'
+            : '↑ 1°C'
+          }
+        </button>
+      )}
+    </div>
+  )
+}
+
+const ZONE_MODES: { key: ZoneMode; label: string; description: string }[] = [
+  { key: 'manual',     label: 'Manual',      description: 'Sem automação — só sugestões visuais.' },
+  { key: 'suggestion', label: 'Sugestão',    description: 'Registra sugestões, aguarda aprovação.' },
+  { key: 'semi',       label: 'Semi-auto',   description: 'Executa 1 ajuste/ciclo com verificação.' },
+  { key: 'auto',       label: 'Automático',  description: 'Avalia e executa automaticamente.' },
+]
+
+const ACTION_STATUS_META: Record<string, { label: string; color: string }> = {
+  suggestion:           { label: 'Sugestão',          color: 'text-blue-500' },
+  pending_verification: { label: 'Verificando…',      color: 'text-yellow-500' },
+  executed:             { label: 'Executado',          color: 'text-green-500' },
+  blocked:              { label: 'Bloqueado',          color: 'text-gray-500' },
+  verified_success:     { label: 'Eficaz ✓',          color: 'text-green-600' },
+  verified_failure:     { label: 'Sem efeito ✗',      color: 'text-red-500' },
+}
+
+type ManualPhase = 'idle' | 'confirming' | 'sending' | 'done' | 'error'
+
+function ZonePanel({
+  zone, storeId, automation, actionMessage, onModeChange, onTrigger, onRefetch,
+}: {
+  zone: any
+  storeId: string
+  automation: ZoneAutomationState | undefined
+  actionMessage: string
+  onModeChange: (mode: ZoneMode) => Promise<void>
+  onTrigger: () => Promise<void>
+  onRefetch: () => void
+}) {
+  const [changingMode, setChangingMode] = useState(false)
+  const [triggering, setTriggering] = useState(false)
+  const [manualPhase, setManualPhase] = useState<ManualPhase>('idle')
+  const [manualLockedUntil, setManualLockedUntil] = useState(0)
+  const [manualResult, setManualResult] = useState<{ targetSp: number; count: number } | null>(null)
+  const [manualError, setManualError] = useState<string | null>(null)
+
   const meta = STATUS_META[zone.status as ThermalStatus]
-  const action = recommendedText(zone.status)
-  const canApply = Boolean(recommendedControlAction(zone.status)) && zone.actionableDevices.length > 0
+
+  const acDevices: Device[] = zone.actionableDevices.filter((d: Device) => !d.is_external_sensor)
+  // Prefere dispositivo com setpoint disponível + maior delta; se nenhum tem setpoint, usa o de maior delta mesmo
+  const bestDevice: Device | null =
+    ([...acDevices].filter(d => d.setpoint_cool != null)
+      .sort((a, b) => Math.abs(b.delta_temp ?? 0) - Math.abs(a.delta_temp ?? 0))[0])
+    ?? ([...acDevices].sort((a, b) => Math.abs(b.delta_temp ?? 0) - Math.abs(a.delta_temp ?? 0))[0])
+    ?? null
+
+  const currentSp: number | null = bestDevice?.setpoint_cool ?? null
+  const ctrlAction = recommendedControlAction(zone.status)
+
+  const targetSp: number | null =
+    ctrlAction === 'temperature_down' && currentSp != null ? Math.max(zone.idealMin, currentSp - 1)
+    : ctrlAction === 'temperature_up' && currentSp != null ? Math.min(zone.idealMax, currentSp + 1)
+    : null
+
+  // Quando setpoint desconhecido, ainda envia o comando direcional (step=1)
+  const actualAction: 'temperature_up' | 'temperature_down' | null =
+    targetSp != null && currentSp != null && targetSp !== currentSp
+      ? targetSp > currentSp ? 'temperature_up' : 'temperature_down'
+      : ctrlAction ?? null
+
+  const step = targetSp != null && currentSp != null ? Math.abs(targetSp - currentSp) : 1
+  const atLimit = currentSp != null && targetSp === currentSp
+  const isLocked = Date.now() < manualLockedUntil
+  const canShowManual = acDevices.length > 0 && !!ctrlAction && !isLocked
+
+  // Só ajusta ACs cuja temperatura individual está realmente fora da faixa
+  const needsAdjust = (d: Device) => {
+    if (d.temperature == null) return false
+    return ctrlAction === 'temperature_down' ? d.temperature > zone.idealMax : d.temperature < zone.idealMin
+  }
+  const hotDevices = ctrlAction ? acDevices.filter(needsAdjust) : []
+  // Fallback: sem leitura de temperatura → inclui para não ignorar cegamente
+  const adjustTargets = hotDevices.length > 0
+    ? hotDevices
+    : acDevices.filter(d => d.temperature == null)
+  const allAlreadyOk = adjustTargets.length === 0 && acDevices.length > 0
+
+  const confirmApply = async () => {
+    const action = actualAction ?? ctrlAction
+    if (!action || allAlreadyOk) return
+    setManualPhase('sending')
+    setManualError(null)
+    try {
+      const targets = adjustTargets.slice(0, 8)
+      await Promise.all(targets.map(d => devicesApi.control(d.id, action, step)))
+      setManualResult({ targetSp: targetSp ?? (currentSp ?? 0) + (action === 'temperature_up' ? 1 : -1), count: targets.length })
+      setManualPhase('done')
+      setManualLockedUntil(Date.now() + 2 * 60 * 1000)
+      onRefetch()
+    } catch {
+      setManualError('Falha ao enviar o comando para a Brise API.')
+      setManualPhase('error')
+    }
+  }
+
+  const currentMode: ZoneMode = automation?.mode ?? 'manual'
+  const lastAction = automation?.last_action ?? null
+  const cooldownS = automation?.cooldown_remaining_s ?? null
+  const dailyCount = automation?.daily_count ?? 0
+  const maxDaily = automation?.max_daily_adjustments ?? 6
+  const consecFail = automation?.consecutive_failures ?? 0
+
+  const handleMode = async (mode: ZoneMode) => {
+    setChangingMode(true)
+    await onModeChange(mode).finally(() => setChangingMode(false))
+  }
+
+  const handleTrigger = async () => {
+    setTriggering(true)
+    await onTrigger().finally(() => setTriggering(false))
+  }
 
   return (
     <div className="space-y-4">
+      {/* Cabeçalho da zona */}
       <div>
         <div className={cn('text-xs font-semibold uppercase', meta.text)}>{meta.label}</div>
         <h2 className="mt-1 text-lg font-semibold text-gray-900 dark:text-white">{zone.label}</h2>
         <p className="text-xs text-gray-500">Faixa ideal: {zone.idealMin}°C a {zone.idealMax}°C</p>
       </div>
 
+      {/* Métricas */}
       <div className="grid grid-cols-2 gap-3">
         <PanelMetric label="Temperatura" value={zone.avgTemp != null ? formatTemp(zone.avgTemp) : '—'} />
         <PanelMetric label="Aparelhos"   value={zone.devices.length} />
-        <PanelMetric label="Sensores"    value={zone.devices.filter((d: Device) => d.temperature != null).length} />
+        <PanelMetric label="Com leitura" value={zone.devices.filter((d: Device) => d.temperature != null).length} />
         <PanelMetric label="Ajustáveis"  value={zone.actionableDevices.length} />
       </div>
 
-      <div className="rounded-lg border border-gray-200 p-3 dark:border-gray-800">
-        <div className="text-xs font-semibold uppercase text-gray-500">Ação recomendada</div>
-        <div className="mt-1 text-sm text-gray-900 dark:text-white">{action}</div>
-        <button type="button" disabled={!canApply} onClick={onApply}
-          className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-gray-300 disabled:text-gray-500 dark:disabled:bg-gray-800">
-          <Zap className="h-4 w-4" />
-          Aplicar ajuste recomendado
-        </button>
-        {actionMessage && <div className="mt-2 text-xs text-gray-500">{actionMessage}</div>}
+      {/* ── Automação Inteligente ── */}
+      <div className="rounded-lg border border-gray-200 dark:border-gray-800 overflow-hidden">
+        <div className="flex items-center gap-2 bg-gray-50 px-3 py-2 dark:bg-gray-950">
+          <Bot className="h-3.5 w-3.5 text-purple-500" />
+          <span className="text-xs font-semibold uppercase text-gray-600 dark:text-gray-400">Automação Inteligente</span>
+        </div>
+
+        <div className="p-3 space-y-3">
+          {/* Seletor de modo */}
+          <div>
+            <div className="mb-1.5 text-xs text-gray-500">Modo de operação</div>
+            <div className="grid grid-cols-2 gap-1">
+              {ZONE_MODES.map(m => (
+                <button
+                  key={m.key}
+                  type="button"
+                  disabled={changingMode}
+                  onClick={() => handleMode(m.key)}
+                  title={m.description}
+                  className={cn(
+                    'rounded-md px-2 py-1.5 text-xs font-medium transition-colors text-center',
+                    currentMode === m.key
+                      ? 'bg-purple-600 text-white'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-400 dark:hover:bg-gray-700',
+                    changingMode && 'opacity-40 cursor-not-allowed',
+                  )}
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
+            {ZONE_MODES.find(m => m.key === currentMode) && (
+              <p className="mt-1 text-xs text-gray-400">{ZONE_MODES.find(m => m.key === currentMode)!.description}</p>
+            )}
+          </div>
+
+          {/* Guardrails */}
+          {automation && (
+            <GuardrailsPanel
+              automation={automation}
+              storeId={storeId}
+              zoneKey={zone.key}
+              onUpdated={onRefetch}
+            />
+          )}
+
+          {/* Stats */}
+          <div className="grid grid-cols-3 gap-2">
+            <div className="rounded bg-gray-50 dark:bg-gray-950 p-2 text-center">
+              <div className="text-xs text-gray-500">Hoje</div>
+              <div className={cn('text-sm font-semibold', dailyCount >= maxDaily ? 'text-red-500' : 'text-gray-900 dark:text-white')}>
+                {dailyCount}/{maxDaily}
+              </div>
+            </div>
+            <div className="rounded bg-gray-50 dark:bg-gray-950 p-2 text-center">
+              <div className="text-xs text-gray-500">Falhas</div>
+              <div className={cn('text-sm font-semibold', consecFail >= 3 ? 'text-red-500' : 'text-gray-900 dark:text-white')}>
+                {consecFail}
+              </div>
+            </div>
+            <div className="rounded bg-gray-50 dark:bg-gray-950 p-2 text-center">
+              <div className="text-xs text-gray-500">Cooldown</div>
+              <div className={cn('text-sm font-semibold', cooldownS ? 'text-amber-500' : 'text-green-500')}>
+                {cooldownS ? `${Math.ceil(cooldownS / 60)}m` : 'Livre'}
+              </div>
+            </div>
+          </div>
+
+          {/* Última ação */}
+          {lastAction && (() => {
+            const aMeta = ACTION_STATUS_META[lastAction.status] ?? { label: lastAction.status, color: 'text-gray-500' }
+            return (
+              <div className="rounded-lg border border-gray-200 dark:border-gray-700 p-2.5 space-y-1">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-semibold text-gray-700 dark:text-gray-300">Última ação</span>
+                  <span className={cn('text-xs font-semibold', aMeta.color)}>{aMeta.label}</span>
+                </div>
+                <div className="flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-400">
+                  {lastAction.direction === 'down'
+                    ? <ChevronDown className="h-3 w-3 text-orange-500" />
+                    : <ChevronUp className="h-3 w-3 text-blue-500" />
+                  }
+                  <span>
+                    {lastAction.device_name ?? '—'}
+                    {lastAction.setpoint_before != null && lastAction.setpoint_after != null && (
+                      <> · {lastAction.setpoint_before}°→{lastAction.setpoint_after}°C</>
+                    )}
+                  </span>
+                </div>
+                {lastAction.temp_before != null && (
+                  <div className="text-xs text-gray-500">
+                    {lastAction.temp_before.toFixed(1)}°C antes
+                    {lastAction.temp_after != null && <> → {lastAction.temp_after.toFixed(1)}°C depois</>}
+                    {lastAction.confidence != null && <> · conf. {Math.round(lastAction.confidence * 100)}%</>}
+                  </div>
+                )}
+                {lastAction.block_reason && (
+                  <div className="text-xs text-red-400 italic">{lastAction.block_reason}</div>
+                )}
+                <div className="flex items-center gap-1 text-xs text-gray-400">
+                  <Clock className="h-3 w-3" />
+                  {formatRelativeTime(lastAction.created_at)}
+                </div>
+              </div>
+            )
+          })()}
+
+          {/* Disparar avaliação */}
+          {currentMode !== 'manual' && (
+            <button
+              type="button"
+              disabled={triggering || !!cooldownS}
+              onClick={handleTrigger}
+              className={cn(
+                'inline-flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs font-medium transition-colors',
+                cooldownS
+                  ? 'cursor-not-allowed bg-gray-100 text-gray-400 dark:bg-gray-800'
+                  : 'bg-purple-600 text-white hover:bg-purple-500 disabled:opacity-60',
+              )}
+            >
+              {triggering
+                ? <><RefreshCw className="h-3.5 w-3.5 animate-spin" /> Avaliando…</>
+                : cooldownS
+                ? <><Clock className="h-3.5 w-3.5" /> Em cooldown ({Math.ceil(cooldownS / 60)}min)</>
+                : <><PlayCircle className="h-3.5 w-3.5" /> Reavaliar agora</>
+              }
+            </button>
+          )}
+        </div>
       </div>
 
+      {/* Ajuste manual rápido */}
+      <div className="rounded-lg border border-gray-200 dark:border-gray-800 overflow-hidden">
+        <div className="flex items-center gap-2 bg-gray-50 px-3 py-2 dark:bg-gray-950">
+          <Zap className="h-3.5 w-3.5 text-blue-500" />
+          <span className="text-xs font-semibold uppercase text-gray-600 dark:text-gray-400">Ajuste manual</span>
+        </div>
+
+        <div className="p-3">
+          {!canShowManual && (
+            <p className="text-sm text-gray-500">
+              {isLocked
+                ? 'Aguarde antes de reaplicar (cooldown de 2 min).'
+                : acDevices.length === 0
+                ? 'Nenhum aparelho ajustável nesta zona.'
+                : 'Zona dentro da faixa confortável — nenhum ajuste necessário.'}
+            </p>
+          )}
+
+          {canShowManual && manualPhase === 'idle' && bestDevice && (
+            <div className="space-y-3">
+              <div className="space-y-1">
+                <div className="flex items-center gap-1.5">
+                  <Wind className="h-3.5 w-3.5 flex-shrink-0 text-blue-500" />
+                  <span className="truncate text-sm font-medium text-gray-900 dark:text-white">{bestDevice.name}</span>
+                </div>
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-gray-500">
+                  <span>{bestDevice.sector_name ?? zone.label}</span>
+                  {bestDevice.temperature != null && <span>Ambiente: {formatTemp(bestDevice.temperature)}</span>}
+                  {currentSp != null && <span>Setpoint atual: <strong className="text-gray-700 dark:text-gray-300">{currentSp}°C</strong></span>}
+                  <span className="font-mono text-gray-400">{bestDevice.brise_id}</span>
+                </div>
+                <p className="text-xs text-gray-600 dark:text-gray-400">
+                  {allAlreadyOk
+                    ? `Todos os ${acDevices.length} ACs já estão dentro da faixa (${zone.idealMin}–${zone.idealMax}°C). Nenhum ajuste necessário.`
+                    : atLimit
+                    ? `Setpoint já no limite da faixa ideal (${currentSp}°C = ${ctrlAction === 'temperature_down' ? 'mín' : 'máx'}. ${ctrlAction === 'temperature_down' ? zone.idealMin : zone.idealMax}°C).`
+                    : currentSp == null
+                    ? ctrlAction === 'temperature_down'
+                      ? `Zona aquecida — será enviado comando de redução. Setpoint atual não disponível (faixa ideal: ${zone.idealMin}–${zone.idealMax}°C).`
+                      : `Zona fria — será enviado comando de aumento. Setpoint atual não disponível (faixa ideal: ${zone.idealMin}–${zone.idealMax}°C).`
+                    : ctrlAction === 'temperature_down'
+                    ? `Zona aquecida — reduzir para ${targetSp}°C (faixa: ${zone.idealMin}–${zone.idealMax}°C).`
+                    : `Zona fria — aumentar para ${targetSp}°C (faixa: ${zone.idealMin}–${zone.idealMax}°C).`
+                  }
+                  {!allAlreadyOk && adjustTargets.length > 0 && adjustTargets.length < acDevices.length && (
+                    <> <span className="font-medium text-orange-600 dark:text-orange-400">
+                      Somente {adjustTargets.length} de {acDevices.length} ACs fora da faixa serão ajustados.
+                    </span></>
+                  )}
+                  {!allAlreadyOk && adjustTargets.length > 1 && adjustTargets.length === acDevices.length && ` Aplicar em ${adjustTargets.length} aparelhos.`}
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={atLimit || allAlreadyOk}
+                onClick={() => setManualPhase('confirming')}
+                className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-400 dark:disabled:bg-gray-800 dark:disabled:text-gray-600"
+              >
+                <Zap className="h-4 w-4" />
+                {allAlreadyOk
+                  ? 'Todos já confortáveis'
+                  : atLimit
+                  ? `Setpoint no limite (${currentSp}°C)`
+                  : targetSp != null
+                  ? `Ajustar para ${targetSp}°C${adjustTargets.length > 1 ? ` (${adjustTargets.length} ACs)` : ''}`
+                  : ctrlAction === 'temperature_down'
+                  ? `Reduzir setpoint${adjustTargets.length > 1 ? ` (${adjustTargets.length} ACs)` : ''}`
+                  : `Aumentar setpoint${adjustTargets.length > 1 ? ` (${adjustTargets.length} ACs)` : ''}`
+                }
+              </button>
+            </div>
+          )}
+
+          {canShowManual && manualPhase === 'confirming' && (
+            <div className="space-y-3">
+              <div className="rounded-lg bg-blue-50 p-3 dark:bg-blue-950/30 space-y-1.5">
+                <p className="text-xs font-semibold text-blue-700 dark:text-blue-400">Confirmar envio de comando</p>
+                <div className="space-y-0.5 text-xs text-blue-900 dark:text-blue-300">
+                  <div className="flex items-center gap-1.5">
+                    <Wind className="h-3 w-3" />
+                    <span className="font-medium">{bestDevice?.name}</span>
+                    <span className="text-blue-500">({bestDevice?.brise_id})</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span>Setor: {bestDevice?.sector_name ?? zone.label}</span>
+                  </div>
+                  {currentSp != null && targetSp != null && (
+                    <div className="flex items-center gap-2 font-mono">
+                      <span>Setpoint:</span>
+                      <span className="text-gray-500">{currentSp}°C</span>
+                      <span>→</span>
+                      <span className="font-bold text-blue-700 dark:text-blue-300">{targetSp}°C</span>
+                    </div>
+                  )}
+                  <div className="text-blue-600 dark:text-blue-400">
+                    Faixa ideal: {zone.idealMin}–{zone.idealMax}°C
+                    {adjustTargets.length > 1 && ` · ${adjustTargets.length} aparelho${adjustTargets.length !== 1 ? 's' : ''} fora da faixa`}
+                  </div>
+                  {adjustTargets.length < acDevices.length && adjustTargets.length > 0 && (
+                    <div className="rounded bg-amber-50 px-2 py-1 text-xs text-amber-700 dark:bg-amber-950/30 dark:text-amber-400">
+                      {acDevices.length - adjustTargets.length} AC{acDevices.length - adjustTargets.length !== 1 ? 's' : ''} já confortável{acDevices.length - adjustTargets.length !== 1 ? 'is' : ''} — não serão tocados.
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <button type="button" onClick={() => setManualPhase('idle')}
+                  className="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-gray-800">
+                  Cancelar
+                </button>
+                <button type="button" onClick={confirmApply}
+                  className="flex-1 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-500">
+                  Confirmar
+                </button>
+              </div>
+            </div>
+          )}
+
+          {manualPhase === 'sending' && (
+            <div className="flex items-center justify-center gap-2 py-4 text-sm text-gray-500">
+              <RefreshCw className="h-4 w-4 animate-spin" />
+              Enviando comando…
+            </div>
+          )}
+
+          {manualPhase === 'done' && manualResult && (
+            <div className="space-y-2">
+              <div className="rounded-lg bg-green-50 p-3 dark:bg-green-950/30 space-y-1">
+                <p className="text-xs font-semibold text-green-700 dark:text-green-400">✓ Comando enviado</p>
+                <p className="text-xs text-green-800 dark:text-green-300">
+                  Setpoint ajustado para <strong>{manualResult.targetSp}°C</strong> em{' '}
+                  {manualResult.count} aparelho{manualResult.count !== 1 ? 's' : ''}.
+                </p>
+                <p className="text-xs text-green-600 dark:text-green-500">
+                  Reavaliar em 10–15 minutos para verificar o efeito.
+                </p>
+              </div>
+              <p className="text-xs text-gray-400">Próximo ajuste disponível em 2 minutos.</p>
+            </div>
+          )}
+
+          {manualPhase === 'error' && (
+            <div className="space-y-2">
+              <div className="rounded-lg bg-red-50 p-3 dark:bg-red-950/30">
+                <p className="text-xs font-semibold text-red-700 dark:text-red-400">Falha no envio</p>
+                <p className="text-xs text-red-600 dark:text-red-400">{manualError}</p>
+              </div>
+              <button type="button" onClick={() => setManualPhase('idle')}
+                className="inline-flex w-full items-center justify-center gap-2 rounded-lg border border-gray-300 px-3 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-400">
+                Tentar novamente
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Aparelhos vinculados */}
       <div>
         <h3 className="text-sm font-semibold text-gray-900 dark:text-white">Aparelhos vinculados</h3>
         <div className="mt-2 space-y-2">
@@ -540,7 +1235,9 @@ function ZonePanel({ zone, actionMessage, onApply }: { zone: any; actionMessage:
               </div>
             </div>
           ))}
-          {!zone.devices.length && <div className="py-6 text-center text-sm text-gray-500">Nenhum aparelho vinculado</div>}
+          {!zone.devices.length && (
+            <div className="py-6 text-center text-sm text-gray-500">Nenhum aparelho vinculado</div>
+          )}
         </div>
       </div>
     </div>
@@ -561,6 +1258,231 @@ function PanelMetric({ label, value }: { label: string; value: string | number }
     <div className="rounded-lg bg-gray-50 p-3 dark:bg-gray-950">
       <div className="text-xs text-gray-500">{label}</div>
       <div className="mt-1 font-semibold text-gray-900 dark:text-white">{value}</div>
+    </div>
+  )
+}
+
+function toTimeStr(hour: number, minute: number) {
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`
+}
+
+function GuardrailsPanel({
+  automation, storeId, zoneKey, onUpdated,
+}: {
+  automation: ZoneAutomationState
+  storeId: string
+  zoneKey: string
+  onUpdated: () => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [startTime, setStartTime] = useState(toTimeStr(automation.allowed_start_hour, automation.allowed_start_minute))
+  const [endTime, setEndTime] = useState(toTimeStr(automation.allowed_end_hour, automation.allowed_end_minute))
+  const [isCritical, setIsCritical] = useState(automation.is_critical_zone)
+  const [saving, setSaving] = useState(false)
+
+  const isInvalid = startTime >= endTime
+
+  const save = async () => {
+    if (isInvalid) return
+    setSaving(true)
+    await zonesApi.updateGuardrails(storeId, zoneKey, {
+      allowed_start_time: startTime,
+      allowed_end_time: endTime,
+      is_critical_zone: isCritical,
+    }).finally(() => setSaving(false))
+    setEditing(false)
+    onUpdated()
+  }
+
+  const displayStart = toTimeStr(automation.allowed_start_hour, automation.allowed_start_minute)
+  const displayEnd = toTimeStr(automation.allowed_end_hour, automation.allowed_end_minute)
+
+  return (
+    <div className="space-y-1.5">
+      {automation.guardrail_active && automation.guardrail_reason && (
+        <div className="flex items-start gap-1.5 rounded-md bg-amber-50 px-2.5 py-2 dark:bg-amber-950/30">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-amber-500" />
+          <span className="text-xs text-amber-700 dark:text-amber-400">{automation.guardrail_reason}</span>
+        </div>
+      )}
+      <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+          {automation.is_critical_zone && (
+            <span className="inline-flex items-center gap-0.5 rounded bg-red-100 px-1.5 py-0.5 text-xs font-medium text-red-600 dark:bg-red-950/50 dark:text-red-400">
+              <Shield className="h-2.5 w-2.5" /> Crítica
+            </span>
+          )}
+          <span>Horário: {displayStart}–{displayEnd} (Manaus)</span>
+        </div>
+        <button type="button" onClick={() => setEditing(v => !v)}
+          className="flex-shrink-0 text-xs text-purple-500 underline hover:text-purple-700 dark:hover:text-purple-300">
+          {editing ? 'Fechar' : 'Configurar'}
+        </button>
+      </div>
+
+      {editing && (
+        <div className="rounded-lg border border-purple-200 dark:border-purple-900 p-3 space-y-3">
+          <label className="flex cursor-pointer items-center gap-2 text-xs text-gray-700 dark:text-gray-300">
+            <input type="checkbox" checked={isCritical} onChange={e => setIsCritical(e.target.checked)}
+              className="h-3.5 w-3.5 rounded accent-red-500" />
+            Zona crítica — bloqueia auto e semi-auto
+          </label>
+          <div>
+            <div className="mb-1.5 text-xs text-gray-500">Janela de horário (horário de Manaus)</div>
+            <div className="flex items-center gap-2">
+              <input type="time" value={startTime} onChange={e => setStartTime(e.target.value)}
+                className="rounded border border-gray-300 px-2 py-1 text-xs dark:border-gray-700 dark:bg-gray-900 dark:text-white" />
+              <span className="text-xs text-gray-400">até</span>
+              <input type="time" value={endTime} onChange={e => setEndTime(e.target.value)}
+                className="rounded border border-gray-300 px-2 py-1 text-xs dark:border-gray-700 dark:bg-gray-900 dark:text-white" />
+            </div>
+            {isInvalid && <p className="mt-1 text-xs text-red-500">Horário de início deve ser anterior ao de fim.</p>}
+            <p className="mt-1 text-xs text-gray-400">Fora desta janela a automação não executa comandos.</p>
+          </div>
+          <button type="button" disabled={saving || isInvalid} onClick={save}
+            className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-purple-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-purple-500 disabled:opacity-60 disabled:cursor-not-allowed">
+            {saving && <RefreshCw className="h-3 w-3 animate-spin" />}
+            Salvar
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ── Digital Twin Panel ── */
+
+const RISK_META = {
+  LOW:      { label: 'Baixo',   cls: 'text-green-600 dark:text-green-400',  bg: 'bg-green-50 dark:bg-green-950/30' },
+  MEDIUM:   { label: 'Médio',   cls: 'text-yellow-600 dark:text-yellow-400', bg: 'bg-yellow-50 dark:bg-yellow-950/30' },
+  HIGH:     { label: 'Alto',    cls: 'text-orange-600 dark:text-orange-400', bg: 'bg-orange-50 dark:bg-orange-950/30' },
+  CRITICAL: { label: 'Crítico', cls: 'text-red-600 dark:text-red-400',       bg: 'bg-red-50 dark:bg-red-950/30' },
+} as const
+
+const SIM_LABELS: Record<string, string> = {
+  no_action:       'Sem ajuste',
+  setpoint_down_1: '↓ Reduzir 1°C',
+  setpoint_up_1:   '↑ Aumentar 1°C',
+}
+
+function DigitalTwinPanel({ twin }: { twin: DigitalTwinZone | undefined }) {
+  if (!twin) return (
+    <div className="rounded-lg border border-violet-200 dark:border-violet-900/50 overflow-hidden">
+      <div className="flex items-center gap-2 bg-violet-50 px-3 py-2 dark:bg-violet-950/30">
+        <Activity className="h-3.5 w-3.5 text-violet-500" />
+        <span className="text-xs font-semibold text-violet-700 dark:text-violet-400">Digital Twin</span>
+      </div>
+      <div className="p-3 text-xs text-gray-400">Calculando previsões…</div>
+    </div>
+  )
+
+  const risk = RISK_META[twin.risk_level] ?? RISK_META.LOW
+  const trend = twin.trend_c_per_hour
+  const TrendIcon = trend != null && trend > 0.1 ? TrendingUp : trend != null && trend < -0.1 ? TrendingDown : null
+  const trendColor = trend != null && trend > 0.1 ? 'text-orange-500' : 'text-blue-500'
+  const trendStr = trend != null ? `${trend > 0 ? '+' : ''}${trend.toFixed(1)}°C/h` : '—'
+  const confPct = Math.round(twin.confidence * 100)
+
+  return (
+    <div className="rounded-lg border border-violet-200 dark:border-violet-900/50 overflow-hidden">
+      {/* Header */}
+      <div className="flex items-center gap-2 bg-violet-50 px-3 py-2 dark:bg-violet-950/30">
+        <Activity className="h-3.5 w-3.5 text-violet-500 flex-shrink-0" />
+        <span className="text-xs font-semibold text-violet-700 dark:text-violet-400">Digital Twin</span>
+        <span className="ml-auto text-[10px] text-violet-400">conf. {confPct}%</span>
+      </div>
+
+      <div className="p-3 space-y-3">
+        {/* Risco + Tendência */}
+        <div className="grid grid-cols-2 gap-2">
+          <div className={cn('rounded-md px-2 py-2 text-center', risk.bg)}>
+            <div className="text-[10px] text-gray-500 dark:text-gray-400">Risco</div>
+            <div className={cn('text-sm font-bold', risk.cls)}>{risk.label}</div>
+          </div>
+          <div className="rounded-md bg-gray-50 dark:bg-gray-950 px-2 py-2 text-center">
+            <div className="text-[10px] text-gray-500">Tendência</div>
+            <div className={cn('flex items-center justify-center gap-1 text-sm font-bold', trend != null ? trendColor : 'text-gray-400')}>
+              {TrendIcon && <TrendIcon className="h-3.5 w-3.5" />}
+              {trendStr}
+            </div>
+          </div>
+        </div>
+
+        {/* Previsões de temperatura */}
+        <div>
+          <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-gray-400">Previsão de temperatura</div>
+          <div className="grid grid-cols-3 gap-1.5">
+            {([
+              { label: '15 min', val: twin.predicted_temp_15m },
+              { label: '30 min', val: twin.predicted_temp_30m },
+              { label: '60 min', val: twin.predicted_temp_60m },
+            ] as const).map(({ label, val }) => (
+              <div key={label} className="rounded bg-gray-50 dark:bg-gray-950 px-1.5 py-2 text-center">
+                <div className="text-[10px] text-gray-400">{label}</div>
+                <div className="mt-0.5 text-xs font-semibold text-gray-800 dark:text-gray-200">
+                  {val != null ? `${val.toFixed(1)}°C` : '—'}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Recomendação */}
+        {twin.recommended_action !== 'NONE' && (
+          <div className={cn('rounded-md px-2.5 py-2 space-y-0.5', risk.bg)}>
+            <div className={cn('text-xs font-semibold', risk.cls)}>
+              {twin.recommended_action.replace(/_/g, ' ')}
+            </div>
+            <div className="text-xs text-gray-600 dark:text-gray-400 leading-snug">
+              {twin.explanation}
+            </div>
+          </div>
+        )}
+
+        {/* Simulações */}
+        {twin.simulated_actions.length > 0 && (
+          <div>
+            <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-gray-400">Simulações (heurístico)</div>
+            <div className="space-y-1">
+              {twin.simulated_actions.map(sim => (
+                <div
+                  key={sim.action}
+                  className={cn(
+                    'flex items-center gap-2 rounded px-2.5 py-1.5 text-xs',
+                    sim.feasible
+                      ? 'bg-gray-50 dark:bg-gray-950'
+                      : 'bg-gray-100/60 dark:bg-gray-900/50 opacity-60',
+                  )}
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="font-medium text-gray-700 dark:text-gray-300">
+                      {SIM_LABELS[sim.action] ?? sim.action}
+                    </div>
+                    {sim.block_reason && (
+                      <div className="text-[10px] text-red-500">{sim.block_reason}</div>
+                    )}
+                  </div>
+                  {sim.feasible && (
+                    <div className="flex-shrink-0 text-right font-mono">
+                      <div className="text-gray-500 text-[10px]">
+                        30m <span className="text-gray-700 dark:text-gray-300">{sim.predicted_temp_30m?.toFixed(1) ?? '—'}°C</span>
+                      </div>
+                      <div className="text-gray-400 text-[10px]">
+                        60m <span className="text-gray-600 dark:text-gray-400">{sim.predicted_temp_60m?.toFixed(1) ?? '—'}°C</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="text-[10px] text-gray-400">
+          Calculado às {new Date(twin.computed_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+          {' · '}confiança {confPct}% · heurístico, não executa comandos
+        </div>
+      </div>
     </div>
   )
 }
@@ -590,14 +1512,6 @@ function recommendedControlAction(status: ThermalStatus) {
   if (status === 'HOT' || status === 'CRITICAL' || status === 'WARM') return 'temperature_down' as const
   if (status === 'COLD') return 'temperature_up' as const
   return null
-}
-
-function recommendedText(status: ThermalStatus) {
-  if (status === 'COLD')       return 'Aumentar 1°C no setpoint dos aparelhos ajustáveis da zona.'
-  if (status === 'WARM')       return 'Reduzir 1°C no setpoint e reavaliar após 10 a 15 minutos.'
-  if (status === 'HOT' || status === 'CRITICAL') return 'Reduzir 1°C no setpoint dos aparelhos ajustáveis da zona.'
-  if (status === 'NO_READING') return 'Verificar sensores/aparelhos sem comunicação antes de ajustar.'
-  return 'Manter configuração atual.'
 }
 
 function average(values: number[]) {

@@ -43,7 +43,7 @@ def classify_status(
     if temperature is None:
         return STATUS_NO_READING, None, None
     if mode_ac not in (0, 2):
-        return STATUS_NORMAL, None, 1.0
+        return STATUS_NORMAL, None, None
 
     if current_status in (STATUS_NO_READING, STATUS_OFF):
         current_status = None
@@ -51,6 +51,17 @@ def classify_status(
 
     delta = compute_delta_temp(temperature, setpoint_cool)
     efficiency = compute_efficiency_score(delta)
+
+    # Sensor de retorno de ar: lê temperatura ambiente do setor inteiro.
+    # BAIXA_EFICIÊNCIA tem prioridade: ambiente quente (delta > 1°C) mas compressor
+    # trabalhando abaixo do mínimo indica problema real — não ATENÇÃO, é falha de capacidade.
+    if delta > 1.0:
+        btu_threshold = compute_btu_threshold(btu)
+        if (consumption_estimated is not None
+                and consumption_estimated < btu_threshold
+                and consecutive_count >= LOW_EFFICIENCY_READINGS_REQUIRED):
+            return STATUS_LOW_EFFICIENCY, delta, efficiency
+
     if delta > DELTA_CRITICAL_MIN:
         if consecutive_count >= CONSECUTIVE_READINGS_REQUIRED:
             return STATUS_CRITICAL, delta, efficiency
@@ -59,10 +70,4 @@ def classify_status(
         if consecutive_count >= CONSECUTIVE_READINGS_REQUIRED:
             return STATUS_WARNING, delta, efficiency
         return current_status or STATUS_NORMAL, delta, efficiency
-    if DELTA_WARNING_MIN >= delta > 1.0:
-        btu_threshold = compute_btu_threshold(btu)
-        below_consumption = (consumption_estimated is not None and consumption_estimated < btu_threshold)
-        low_eff = efficiency < 0.5
-        if below_consumption and low_eff and consecutive_count >= LOW_EFFICIENCY_READINGS_REQUIRED:
-            return STATUS_LOW_EFFICIENCY, delta, efficiency
     return STATUS_NORMAL, delta, efficiency

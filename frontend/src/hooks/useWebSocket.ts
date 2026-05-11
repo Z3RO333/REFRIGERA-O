@@ -7,9 +7,10 @@ export function useWebSocket() {
   const reconnectTimeout = useRef<number | null>(null)
 
   useEffect(() => {
+    let mounted = true
+
     function connect() {
-      const token = localStorage.getItem('hvac_token')
-      if (!token) return
+      if (!mounted) return
 
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
       const socket = new WebSocket(`${protocol}//${window.location.host}/ws/updates`)
@@ -30,7 +31,9 @@ export function useWebSocket() {
       }
 
       socket.onclose = () => {
-        reconnectTimeout.current = window.setTimeout(connect, 5000)
+        if (mounted) {
+          reconnectTimeout.current = window.setTimeout(connect, 5000)
+        }
       }
 
       socket.onerror = () => {
@@ -41,6 +44,7 @@ export function useWebSocket() {
     connect()
 
     return () => {
+      mounted = false
       if (reconnectTimeout.current) clearTimeout(reconnectTimeout.current)
       ws.current?.close()
     }

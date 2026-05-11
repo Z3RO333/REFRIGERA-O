@@ -50,3 +50,28 @@ class BriseDevice(BaseModel):
     deviceId: int
     deviceUser: str | None = None
     devicePassword: str | None = None
+
+
+class BriseScheduleParameter(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    modeDevice: int | None = None
+    modeAC: int | None = None
+    fanSpeed: int | None = None
+    setpointCool: int | None = None
+    setpointHeat: int | None = None
+    ecoCool: int | None = None
+    ecoHeat: int | None = None
+
+
+class BriseSchedule(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    scheduleId: int
+    name: str | None = None
+    enable: bool = False
+    dateStart: int | None = None   # Unix timestamp — usado como referência de hora
+    dateEnd: int | None = None     # Unix timestamp — usado como referência de hora
+    repetitionMode: int | None = None  # 1 = semanal
+    repetitionValue: int | None = None  # bitmask: bit0=Seg, bit1=Ter, ..., bit5=Sáb, bit6=Dom
+    parameter: BriseScheduleParameter | None = None

@@ -1,24 +1,27 @@
 import axios from 'axios'
 import type { DeviceControlAction } from '../types'
 
-export const api = axios.create({ baseURL: '/api/v1' })
-
-api.interceptors.request.use(config => {
-  const token = localStorage.getItem('hvac_token')
-  if (token) config.headers.Authorization = `Bearer ${token}`
-  return config
-})
+export const api = axios.create({ baseURL: '/api/v1', withCredentials: true })
 
 api.interceptors.response.use(
   r => r,
   err => {
-    if (err.response?.status === 401) {
-      localStorage.removeItem('hvac_token')
+    const url = err.config?.url ?? ''
+    if (err.response?.status === 401 && !url.startsWith('/auth/')) {
+      localStorage.removeItem('hvac_role')
+      localStorage.removeItem('hvac_name')
       window.location.href = '/login'
     }
     return Promise.reject(err)
   }
 )
+
+export const authApi = {
+  login: (email: string, password: string) => api.post('/auth/login', { email, password }).then(r => r.data),
+  logout: () => api.post('/auth/logout').then(r => r.data),
+  me: () => api.get('/auth/me').then(r => r.data),
+  methods: () => api.get('/auth/methods').then(r => r.data),
+}
 
 export const kpiApi = {
   summary: (storeId?: string) => api.get('/kpis/summary', { params: storeId ? { store_id: storeId } : undefined }).then(r => r.data),
@@ -42,6 +45,7 @@ export const devicesApi = {
   updatePosition: (id: string, x: number | null, y: number | null) => api.put(`/devices/${id}/position`, { position_x: x, position_y: y }),
   sync: (id: string) => api.post(`/devices/${id}/sync`),
   create: (data: object) => api.post('/devices', data),
+  briseSchedules: (id: string) => api.get(`/devices/${id}/brise-schedules`).then(r => r.data),
 }
 
 export const alertsApi = {
@@ -60,4 +64,31 @@ export const historyApi = {
 
 export const maintenanceApi = {
   ranking: () => api.get('/maintenance/ranking').then(r => r.data.ranking),
+}
+
+export const zonesApi = {
+  list: (storeId: string) => api.get(`/zones/${storeId}`).then(r => r.data),
+  setMode: (storeId: string, zoneKey: string, data: object) =>
+    api.put(`/zones/${storeId}/${zoneKey}/mode`, data).then(r => r.data),
+  history: (storeId: string, zoneKey: string, limit = 20) =>
+    api.get(`/zones/${storeId}/${zoneKey}/history`, { params: { limit } }).then(r => r.data),
+  trigger: (storeId: string, zoneKey: string) =>
+    api.post(`/zones/${storeId}/${zoneKey}/trigger`).then(r => r.data),
+  updateGuardrails: (storeId: string, zoneKey: string, data: {
+    allowed_start_time?: string
+    allowed_end_time?: string
+    is_critical_zone?: boolean
+  }) => api.put(`/zones/${storeId}/${zoneKey}/guardrails`, data).then(r => r.data),
+}
+
+export const automationApi = {
+  status: () => api.get('/automation/status').then(r => r.data),
+  setKillSwitch: (active: boolean, by?: string) =>
+    api.post('/automation/kill-switch', { active, by: by ?? 'operador' }).then(r => r.data),
+}
+
+export const digitalTwinApi = {
+  store: (storeId: string) => api.get(`/digital-twin/stores/${storeId}`).then(r => r.data),
+  zone:  (storeId: string, zoneKey: string) =>
+    api.get(`/digital-twin/stores/${storeId}/zones/${zoneKey}`).then(r => r.data),
 }

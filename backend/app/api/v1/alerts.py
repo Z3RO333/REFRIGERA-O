@@ -1,13 +1,27 @@
 import uuid
 from datetime import datetime
-from fastapi import APIRouter, Depends, Query
+from typing import Optional
+from fastapi import APIRouter, Depends, Header, Query
+from jose import jwt, JWTError
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.config import settings
 from app.db.session import get_db
 from app.models.alert import Alert
 from app.models.device import Device
 from app.models.store import StoreSector, Store
 from app.schemas.alert import AlertAck
+
+
+def _extract_user_email(authorization: Optional[str]) -> str:
+    if not authorization or not authorization.startswith("Bearer "):
+        return "operator"
+    try:
+        token = authorization.removeprefix("Bearer ")
+        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
+        return payload.get("email") or "operator"
+    except JWTError:
+        return "operator"
 
 router = APIRouter()
 
@@ -16,8 +30,8 @@ async def list_alerts(
     status: str | None = None,
     severity: str | None = None,
     store_id: uuid.UUID | None = None,
-    page: int = 1,
-    per_page: int = 50,
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
 ):
     query = (
@@ -63,14 +77,19 @@ async def list_alerts(
     return {"alerts": alerts, "page": page, "per_page": per_page}
 
 @router.post("/{alert_id}/acknowledge")
-async def acknowledge_alert(alert_id: uuid.UUID, body: AlertAck, db: AsyncSession = Depends(get_db)):
+async def acknowledge_alert(
+    alert_id: uuid.UUID,
+    body: AlertAck,
+    db: AsyncSession = Depends(get_db),
+    authorization: Optional[str] = Header(None),
+):
     alert = await db.get(Alert, alert_id)
     if not alert:
         from fastapi import HTTPException
         raise HTTPException(404, "Alerta não encontrado")
     alert.status = "ACK"
     alert.acked_at = datetime.utcnow()
-    alert.acked_by = "operator"
+    alert.acked_by = _extract_user_email(authorization)
     if body.notes:
         alert.notes = body.notes
     await db.commit()

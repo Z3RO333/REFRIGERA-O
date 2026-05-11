@@ -3,7 +3,7 @@ import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from app.config import settings
 from app.brise.token_manager import token_manager
-from app.brise.schemas import BriseVariables, BriseParameters, BriseConfig
+from app.brise.schemas import BriseVariables, BriseParameters, BriseConfig, BriseSchedule
 
 class BriseAPIError(Exception):
     def __init__(self, status_code: int, message: str):
@@ -26,7 +26,7 @@ class BriseClient:
     async def _request(self, method: str, path: str, **kwargs) -> dict | None:
         async with self._semaphore:
             headers = await self._get_headers()
-            async with httpx.AsyncClient(verify=False, timeout=20) as client:
+            async with httpx.AsyncClient(verify=settings.brise_verify_tls, timeout=20) as client:
                 resp = await client.request(
                     method,
                     f"{settings.brise_base_url}{path}",
@@ -67,6 +67,15 @@ class BriseClient:
             return True
         except Exception:
             return False
+
+    async def get_schedules(self, device_id: str) -> list[BriseSchedule]:
+        try:
+            data = await self._request("GET", f"/device/{device_id}/schedules")
+            if not data:
+                return []
+            return [BriseSchedule(**s) for s in data.get("schedules", [])]
+        except Exception:
+            return []
 
     async def get_user_devices(self) -> list:
         try:

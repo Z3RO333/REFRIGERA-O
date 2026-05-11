@@ -1,7 +1,10 @@
+import logging
 import uuid
 from datetime import datetime
 import asyncio
 from sqlalchemy import func, select, update
+
+logger = logging.getLogger(__name__)
 from app.db.session import AsyncSessionLocal
 from app.models.device import Device, DeviceParameters, DeviceStatusLatest
 from app.models.reading import DeviceReading
@@ -13,7 +16,10 @@ from app.cache.device_cache import (
     acquire_polling_lock, release_polling_lock,
 )
 from app.cache.redis_client import redis_client
-from app.rules.classifier import NO_READING_THRESHOLD_MINUTES, classify_status
+from app.rules.classifier import (
+    NO_READING_THRESHOLD_MINUTES, classify_status,
+    STATUS_NO_READING, STATUS_OFF, CONSECUTIVE_READINGS_REQUIRED,
+)
 from app.rules.alert_generator import generate_alert_if_needed
 
 async def poll_device(device_id: uuid.UUID, brise_id: str, is_critical_env: bool):
@@ -46,6 +52,7 @@ async def poll_device(device_id: uuid.UUID, brise_id: str, is_critical_env: bool
             current_status = status_row.status_classification if status_row else None
 
             if variables:
+                prev_status = current_status
                 status, delta, efficiency = classify_status(
                     state=variables.state,
                     temperature=variables.temperature,
@@ -57,8 +64,11 @@ async def poll_device(device_id: uuid.UUID, brise_id: str, is_critical_env: bool
                     consecutive_count=consecutive_count,
                     current_status=current_status,
                 )
-                if status == current_status:
+                if status == prev_status:
                     consecutive_count += 1
+                elif prev_status in (STATUS_NO_READING, STATUS_OFF):
+                    # Dispositivo voltou do offline — aciona alertas imediatamente
+                    consecutive_count = CONSECUTIVE_READINGS_REQUIRED
                 else:
                     consecutive_count = 1
             else:
@@ -156,8 +166,15 @@ async def poll_device(device_id: uuid.UUID, brise_id: str, is_critical_env: bool
                 alert_type = alert_data["alert_type"]
                 in_cooldown = await check_alert_cooldown(device_id, alert_type)
                 if not in_cooldown:
-                    alert = Alert(**alert_data)
-                    session.add(alert)
+                    existing_open = await session.scalar(
+                        select(Alert.id).where(
+                            Alert.device_id == device_id,
+                            Alert.alert_type == alert_type,
+                            Alert.status == "OPEN",
+                        ).limit(1)
+                    )
+                    if not existing_open:
+                        session.add(Alert(**alert_data))
                     await set_alert_cooldown(device_id, alert_type, alert_data["severity"])
 
             await session.commit()
@@ -184,6 +201,7 @@ async def poll_all_devices():
             select(Device).where(
                 Device.active == True,
                 Device.brise_device_id.not_like("MANUAL-%"),
+                Device.source_url.is_(None),   # sensores externos têm poller próprio
             )
         )
         devices = result.scalars().all()
@@ -192,7 +210,13 @@ async def poll_all_devices():
         for d in devices
     ]
     if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for device, outcome in zip(devices, results):
+            if isinstance(outcome, Exception):
+                logger.error(
+                    "poll_device falhou [%s]: %s: %s",
+                    device.brise_device_id, type(outcome).__name__, outcome,
+                )
 
     # Dispara análise de IA logo após o polling (non-blocking)
     from app.config import settings

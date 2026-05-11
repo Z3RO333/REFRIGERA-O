@@ -127,6 +127,136 @@ export interface HistoryStats {
   estimated_cost?: number | null
 }
 
+export type ZoneMode = 'manual' | 'suggestion' | 'semi' | 'auto'
+export type ZoneType = 'ABERTA' | 'SALA_FECHADA'
+export type ZoneActionStatus =
+  | 'suggestion'
+  | 'pending_verification'
+  | 'executed'
+  | 'blocked'
+  | 'verified_success'
+  | 'verified_failure'
+
+export interface ZoneActionRecord {
+  id: string
+  zone_key: string
+  zone_label: string | null
+  device_id: string | null
+  device_name: string | null
+  direction: 'up' | 'down' | null
+  temp_before: number | null
+  temp_after: number | null
+  ideal_min: number
+  ideal_max: number
+  setpoint_before: number | null
+  setpoint_after: number | null
+  reason: string | null
+  confidence: number | null
+  mode: ZoneMode | null
+  status: ZoneActionStatus
+  block_reason: string | null
+  attempt_count: number
+  created_at: string
+  verified_at: string | null
+}
+
+export interface ZoneAutomationState {
+  zone_key: string
+  zone_label: string
+  zone_type: ZoneType
+  sector_names: string[]
+  ideal_min: number
+  ideal_max: number
+  mode: ZoneMode
+  setpoint_min: number
+  setpoint_max: number
+  max_daily_adjustments: number
+  daily_count: number
+  consecutive_failures: number
+  cooldown_remaining_s: number | null
+  last_action: ZoneActionRecord | null
+  // guardrails
+  allowed_start_hour: number
+  allowed_start_minute: number
+  allowed_end_hour: number
+  allowed_end_minute: number
+  is_critical_zone: boolean
+  guardrail_active: boolean
+  guardrail_reason: string | null
+  reading_confidence: number
+}
+
+export interface AutomationStatus {
+  kill_switch_active: boolean
+  kill_switch_activated_at: string | null
+  kill_switch_activated_by: string | null
+  mode_counts: Record<string, number>
+  executed_today: number
+}
+
+// ── Digital Twin ──────────────────────────────────────────────────────────────
+
+export type RiskLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'
+
+export interface DigitalTwinDevice {
+  device_id: string
+  brise_id: string
+  name: string
+  temperature: number | null
+  status: string
+  is_external_sensor: boolean
+  efficiency_score: number | null
+  updated_at: string | null
+}
+
+export interface DigitalTwinSimulation {
+  action: 'no_action' | 'setpoint_down_1' | 'setpoint_up_1'
+  label: string
+  predicted_temp_30m: number | null
+  predicted_temp_60m: number | null
+  status_30m: string
+  status_60m: string
+  risk_after_30m: RiskLevel
+  feasible: boolean
+  block_reason: string | null
+}
+
+export interface DigitalTwinZone {
+  store_id: string
+  zone_key: string
+  zone_label: string
+  zone_type: ZoneType
+  ideal_min: number
+  ideal_max: number
+  current_avg_temp: number | null
+  current_status: DeviceStatus | 'COLD' | 'COMFORT' | 'WARM' | 'HOT' | 'CRITICAL' | 'NO_READING'
+  trend_c_per_hour: number | null
+  predicted_temp_15m: number | null
+  predicted_temp_30m: number | null
+  predicted_temp_60m: number | null
+  risk_level: RiskLevel
+  confidence: number
+  contributing_devices: DigitalTwinDevice[]
+  recommended_action: string
+  explanation: string
+  simulated_actions: DigitalTwinSimulation[]
+  computed_at: string
+}
+
+export interface BriseSchedule {
+  schedule_id: number
+  name: string | null
+  enable: boolean
+  active_days: string[]
+  start_time: string | null
+  end_time: string | null
+  repetition_mode: number | null
+  setpoint_cool: number | null
+  mode_ac: number | null
+  fan_speed: number | null
+  currently_active: boolean
+}
+
 export interface MaintenanceItem {
   rank: number
   device_id: string

@@ -9,6 +9,7 @@ from app.models.store import StoreSector, Store
 from app.brise.client import brise_client
 from app.schemas.device import DeviceControlCommand, DeviceMetadataUpdate, DeviceParametersUpdate, DevicePositionUpdate
 from app.cache.device_cache import get_device_status
+from app.security.network import validate_sensor_url
 
 router = APIRouter()
 
@@ -215,6 +216,55 @@ async def update_device_metadata(
         "btu": device.btu,
     }
 
+@router.get("/{device_id}/brise-schedules")
+async def get_brise_schedules(device_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    device = await db.get(Device, device_id)
+    if not device:
+        raise HTTPException(404, "Dispositivo não encontrado")
+    if device.source_url is not None:
+        return []
+    schedules = await brise_client.get_schedules(device.brise_device_id)
+    return [_format_schedule(s) for s in schedules]
+
+
+def _format_schedule(s) -> dict:
+    from datetime import datetime, timezone
+    days_map = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"]
+    rep_val = s.repetitionValue or 0
+    active_days = [days_map[i] for i in range(7) if rep_val & (1 << i)]
+
+    def ts_to_time(ts):
+        if not ts:
+            return None
+        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%H:%M")
+
+    # Verifica se o schedule está ativo agora
+    now = datetime.now(tz=timezone.utc)
+    today_bit = 1 << now.weekday()  # weekday(): 0=Seg
+    day_match = bool(rep_val & today_bit) if s.repetitionMode == 1 else False
+    start_time = ts_to_time(s.dateStart)
+    end_time = ts_to_time(s.dateEnd)
+    currently_active = False
+    if s.enable and day_match and start_time and end_time:
+        now_hm = now.strftime("%H:%M")
+        currently_active = start_time <= now_hm <= end_time
+
+    p = s.parameter
+    return {
+        "schedule_id": s.scheduleId,
+        "name": s.name,
+        "enable": s.enable,
+        "active_days": active_days,
+        "start_time": start_time,
+        "end_time": end_time,
+        "repetition_mode": s.repetitionMode,
+        "setpoint_cool": p.setpointCool if p else None,
+        "mode_ac": p.modeAC if p else None,
+        "fan_speed": p.fanSpeed if p else None,
+        "currently_active": currently_active,
+    }
+
+
 @router.post("/{device_id}/sync")
 async def force_sync(device_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     from app.polling.device_poller import poll_device
@@ -353,6 +403,11 @@ async def register_external_sensor(
     source_url = (payload.get("source_url") or "").strip().rstrip("/")
     if not name or not source_url:
         raise HTTPException(400, "name e source_url são obrigatórios")
+
+    try:
+        source_url = validate_sensor_url(source_url)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
     # Identificador único derivado da URL
     ext_id = "EXT:" + source_url.replace("http://", "").replace("https://", "").replace("/", "_")

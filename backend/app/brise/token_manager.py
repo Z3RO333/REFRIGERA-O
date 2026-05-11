@@ -33,22 +33,35 @@ class BriseTokenManager:
 
     async def _acquire_token(self) -> str:
         async with self._lock:
+            # Double-check dentro do lock local (protege workers no mesmo processo)
             token = await redis_client.get(REDIS_TOKEN_KEY)
             expiry = await redis_client.get(REDIS_EXPIRY_KEY)
             if token and expiry and float(expiry) > time.time() + 300:
                 return token
 
-            refresh = await redis_client.get(REDIS_REFRESH_KEY)
-            if refresh:
-                try:
-                    return await self._exchange_refresh(refresh)
-                except Exception:
-                    pass
+            # Lock distribuído protege múltiplos processos/workers
+            acquired = await redis_client.acquire_lock("brise:token:refresh_lock", ttl=30)
+            if not acquired:
+                # Outro processo já está renovando; aguarda e retorna o token novo
+                await asyncio.sleep(3)
+                token = await redis_client.get(REDIS_TOKEN_KEY)
+                if token:
+                    return token
 
-            return await self._full_auth()
+            try:
+                refresh = await redis_client.get(REDIS_REFRESH_KEY)
+                if refresh:
+                    try:
+                        return await self._exchange_refresh(refresh)
+                    except Exception:
+                        pass
+                return await self._full_auth()
+            finally:
+                if acquired:
+                    await redis_client.release_lock("brise:token:refresh_lock")
 
     async def _full_auth(self) -> str:
-        async with httpx.AsyncClient(verify=False, timeout=30) as client:
+        async with httpx.AsyncClient(verify=settings.brise_verify_tls, timeout=30) as client:
             r1 = await client.post(
                 settings.brise_authkey_url,
                 json={
@@ -74,7 +87,7 @@ class BriseTokenManager:
             return await self._store_tokens(r2.json())
 
     async def _exchange_refresh(self, refresh_token: str) -> str:
-        async with httpx.AsyncClient(verify=False, timeout=30) as client:
+        async with httpx.AsyncClient(verify=settings.brise_verify_tls, timeout=30) as client:
             r = await client.post(
                 settings.brise_token_url,
                 json={

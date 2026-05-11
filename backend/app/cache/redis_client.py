@@ -42,6 +42,9 @@ class RedisClient:
     async def exists(self, key: str) -> bool:
         return bool(await self.client.exists(key))
 
+    async def ttl(self, key: str) -> int:
+        return await self.client.ttl(key)
+
     async def publish(self, channel: str, message: Any):
         data = json.dumps(message) if not isinstance(message, str) else message
         await self.client.publish(channel, data)

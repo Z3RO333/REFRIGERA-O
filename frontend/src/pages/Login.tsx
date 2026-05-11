@@ -1,25 +1,36 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Thermometer, Eye, EyeOff } from 'lucide-react'
+import { Building2, Thermometer, Eye, EyeOff } from 'lucide-react'
 import { useAuthStore } from '../store/useAuthStore'
-import { api } from '../api/client'
+import { authApi } from '../api/client'
 
 export default function LoginPage() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [showPass, setShowPass] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [microsoftEnabled, setMicrosoftEnabled] = useState(false)
   const [error, setError] = useState('')
   const login = useAuthStore(s => s.login)
   const navigate = useNavigate()
+
+  useEffect(() => {
+    authApi.methods()
+      .then(data => setMicrosoftEnabled(Boolean(data.microsoft)))
+      .catch(() => setMicrosoftEnabled(false))
+  }, [])
+
+  const handleMicrosoftLogin = () => {
+    window.location.href = '/api/v1/auth/microsoft/login'
+  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setLoading(true)
     setError('')
     try {
-      const { data } = await api.post('/auth/login', { email, password })
-      login(data.access_token, data.role, data.name)
+      const data = await authApi.login(email, password)
+      login(data.role, data.name)
       navigate('/dashboard')
     } catch {
       setError('Email ou senha inválidos')
@@ -41,6 +52,23 @@ export default function LoginPage() {
           <p className="text-gray-500 text-sm mt-1">Bemol Varejo</p>
         </div>
         <form onSubmit={handleSubmit} className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl p-8 space-y-5">
+          {microsoftEnabled && (
+            <>
+              <button
+                type="button"
+                onClick={handleMicrosoftLogin}
+                className="flex w-full items-center justify-center gap-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 px-4 py-2.5 text-sm font-medium text-gray-900 dark:text-white transition-colors hover:bg-gray-100 dark:hover:bg-gray-700"
+              >
+                <Building2 className="h-4 w-4" />
+                Entrar com Microsoft
+              </button>
+              <div className="flex items-center gap-3">
+                <div className="h-px flex-1 bg-gray-200 dark:bg-gray-800" />
+                <span className="text-xs text-gray-500">ou</span>
+                <div className="h-px flex-1 bg-gray-200 dark:bg-gray-800" />
+              </div>
+            </>
+          )}
           <div className="space-y-2">
             <label className="text-sm text-gray-600 dark:text-gray-400">Email</label>
             <input

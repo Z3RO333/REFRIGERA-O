@@ -1,3 +1,4 @@
+from collections import defaultdict
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends
 from sqlalchemy import select, func
@@ -21,13 +22,19 @@ async def get_maintenance_ranking(db: AsyncSession = Depends(get_db)):
     )
     rows = result.all()
     since_30d = datetime.utcnow() - timedelta(days=30)
+
+    device_ids = [device.id for device, _, _, _ in rows]
+    alerts_bulk = await db.execute(
+        select(Alert.device_id, Alert.severity)
+        .where(Alert.device_id.in_(device_ids), Alert.opened_at >= since_30d)
+    )
+    alerts_by_device: dict = defaultdict(list)
+    for row in alerts_bulk.all():
+        alerts_by_device[row.device_id].append({"severity": row.severity})
+
     ranking = []
     for device, status, sector, store in rows:
-        alerts_result = await db.execute(
-            select(Alert.severity)
-            .where(Alert.device_id == device.id, Alert.opened_at >= since_30d)
-        )
-        alerts = [{"severity": row.severity} for row in alerts_result.all()]
+        alerts = alerts_by_device.get(device.id, [])
         eff = status.efficiency_score if status and status.efficiency_score else None
 
         # Horas reais de operação vindas do hodômetro Brise

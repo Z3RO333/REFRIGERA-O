@@ -4,7 +4,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db
 from app.models.store import Store, StoreSector
-from app.models.device import Device, DeviceStatusLatest
+from app.models.device import Device, DeviceParameters, DeviceStatusLatest
 
 router = APIRouter()
 
@@ -56,14 +56,15 @@ async def create_store(data: dict, db: AsyncSession = Depends(get_db)):
 @router.get("/{store_id}/devices")
 async def get_store_devices(store_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
-        select(Device, DeviceStatusLatest, StoreSector)
+        select(Device, DeviceStatusLatest, StoreSector, DeviceParameters)
         .join(StoreSector, Device.sector_id == StoreSector.id)
         .outerjoin(DeviceStatusLatest, Device.id == DeviceStatusLatest.device_id)
+        .outerjoin(DeviceParameters, Device.id == DeviceParameters.device_id)
         .where(StoreSector.store_id == store_id, Device.active == True)
     )
     rows = result.all()
     devices = []
-    for device, status, sector in rows:
+    for device, status, sector, params in rows:
         devices.append({
             "id": str(device.id),
             "brise_id": device.brise_device_id,
@@ -83,6 +84,7 @@ async def get_store_devices(store_id: uuid.UUID, db: AsyncSession = Depends(get_
             "delta_temp": status.delta_temp if status else None,
             "efficiency_score": status.efficiency_score if status else None,
             "state": status.state if status else None,
+            "setpoint_cool": params.setpoint_cool if params else None,
             "updated_at": status.updated_at.isoformat() if status else None,
         })
     return {"devices": devices}

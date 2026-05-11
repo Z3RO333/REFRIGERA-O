@@ -1,5 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { useEffect } from 'react'
 import { useAuthStore } from './store/useAuthStore'
+import { authApi } from './api/client'
 import Layout from './components/layout/Layout'
 import LoginPage from './pages/Login'
 import Dashboard from './pages/Dashboard'
@@ -17,8 +19,17 @@ import Reports from './pages/Reports'
 import ModulePlaceholder from './pages/ModulePlaceholder'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const token = useAuthStore(s => s.token)
-  if (!token) return <Navigate to="/login" replace />
+  const { status, setSession, logout } = useAuthStore()
+
+  useEffect(() => {
+    if (status !== 'checking') return
+    authApi.me()
+      .then(user => setSession(user.role, user.name))
+      .catch(() => logout())
+  }, [status, setSession, logout])
+
+  if (status === 'checking') return null
+  if (status !== 'authenticated') return <Navigate to="/login" replace />
   return <>{children}</>
 }
 

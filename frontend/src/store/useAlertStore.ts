@@ -21,10 +21,12 @@ export const useAlertStore = create<AlertState>((set, get) => ({
   }),
   addAlert: (alert) => {
     const current = get().activeAlerts
+    if (current.some(a => a.id === alert.id)) return
+    const updated = [alert, ...current]
     set({
-      activeAlerts: [alert, ...current],
-      p1Count: alert.severity === 'P1' ? get().p1Count + 1 : get().p1Count,
-      p2Count: alert.severity === 'P2' ? get().p2Count + 1 : get().p2Count,
+      activeAlerts: updated,
+      p1Count: updated.filter(a => a.severity === 'P1' && a.status === 'OPEN').length,
+      p2Count: updated.filter(a => a.severity === 'P2' && a.status === 'OPEN').length,
     })
   },
   removeAlert: (id) => {

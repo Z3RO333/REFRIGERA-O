@@ -9,7 +9,7 @@ class Device(Base):
     __tablename__ = "devices"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     brise_device_id: Mapped[str] = mapped_column(String(20), unique=True, index=True)
-    sector_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("store_sectors.id"))
+    sector_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("store_sectors.id", ondelete="SET NULL"))
     name: Mapped[str] = mapped_column(String(100))
     btu: Mapped[int] = mapped_column(Integer, default=12000)
     enable_fan: Mapped[bool] = mapped_column(Boolean, default=True)
