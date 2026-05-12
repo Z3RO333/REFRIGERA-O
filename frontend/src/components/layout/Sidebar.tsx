@@ -1,5 +1,6 @@
 import { NavLink } from 'react-router-dom'
 import {
+  Activity,
   BarChart3,
   Bell,
   Building2,
@@ -26,6 +27,7 @@ const navItems = [
   { to: '/relatorios', icon: BarChart3, label: 'Relatórios' },
   { to: '/configuracoes', icon: Settings, label: 'Configurações' },
   { to: '/usuarios', icon: Users, label: 'Usuários' },
+  { to: '/atividade', icon: Activity, label: 'Atividade' },
 ]
 
 export default function Sidebar() {

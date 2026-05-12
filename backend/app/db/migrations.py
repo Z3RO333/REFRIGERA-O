@@ -53,6 +53,8 @@ _STATEMENTS = [
     "ALTER TABLE devices DROP CONSTRAINT IF EXISTS devices_sector_id_fkey",
     """ALTER TABLE devices ADD CONSTRAINT devices_sector_id_fkey
        FOREIGN KEY (sector_id) REFERENCES store_sectors(id) ON DELETE SET NULL""",
+    # último login de cada usuário
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMP",
 ]
 
 

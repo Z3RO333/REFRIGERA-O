@@ -15,3 +15,4 @@ class User(Base):
     store_ids: Mapped[list | None] = mapped_column(JSONB, default=list)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

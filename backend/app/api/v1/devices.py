@@ -10,6 +10,9 @@ from app.brise.client import brise_client
 from app.schemas.device import DeviceControlCommand, DeviceMetadataUpdate, DeviceParametersUpdate, DevicePositionUpdate
 from app.cache.device_cache import get_device_status
 from app.security.network import validate_sensor_url
+from app.models.user import User
+from app.api.v1.auth import get_current_user
+from app.services.audit_service import log_action
 
 router = APIRouter()
 
@@ -142,6 +145,7 @@ async def control_device(
     device_id: uuid.UUID,
     command: DeviceControlCommand,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     device = await db.get(Device, device_id)
     if not device:
@@ -181,6 +185,22 @@ async def control_device(
             status.delta_temp = None
             status.updated_at = datetime.utcnow()
 
+    action_labels = {
+        "power_on": "ligou", "power_off": "desligou",
+        "temperature_up": f"aumentou setpoint → {next_params.get('setpoint_cool')}°C",
+        "temperature_down": f"reduziu setpoint → {next_params.get('setpoint_cool')}°C",
+    }
+    label = action_labels.get(command.action, command.action)
+    await log_action(
+        db, "device_control",
+        f"{current_user.name} {label} '{device.name}'",
+        user=current_user,
+        device_id=device_id,
+        device_name=device.name,
+        old_value=str(current_params.get("setpoint_cool")) if "temperature" in command.action else None,
+        new_value=str(next_params.get("setpoint_cool")) if "temperature" in command.action else None,
+        metadata={"action": command.action},
+    )
     await db.commit()
     return {
         "message": "Comando enviado",

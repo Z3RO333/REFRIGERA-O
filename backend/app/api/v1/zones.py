@@ -9,6 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.cache.redis_client import redis_client
 from app.db.session import get_db
 from app.models.zone import ZoneAction, ZoneAutomation
+from app.models.user import User
+from app.api.v1.auth import get_current_user
+from app.services.audit_service import log_action
 from app.services.zone_controller import (
     KILL_SWITCH_KEY,
     ZONE_COOLDOWN_SECONDS,
@@ -117,6 +120,7 @@ async def set_zone_mode(
     zone_key: str,
     data: dict,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> dict:
     """Altera o modo de automação de uma zona (manual|suggestion|semi|auto)."""
     mode = data.get("mode", "manual")
@@ -128,6 +132,7 @@ async def set_zone_mode(
         raise HTTPException(404, "Zona não encontrada")
 
     automation = await get_or_create_automation(store_id, zone_key, db)
+    old_mode = automation.mode
     automation.mode = mode
 
     if "setpoint_min" in data:
@@ -137,6 +142,16 @@ async def set_zone_mode(
     if "max_daily_adjustments" in data:
         automation.max_daily_adjustments = int(data["max_daily_adjustments"])
 
+    zone_label = ZONES[zone_key].label if zone_key in ZONES else zone_key
+    await log_action(
+        db, "zone_mode_change",
+        f"Modo da zona '{zone_label}' alterado: {old_mode} → {mode}",
+        user=current_user,
+        store_id=store_id,
+        zone_key=zone_key,
+        old_value=old_mode,
+        new_value=mode,
+    )
     await db.commit()
     return {"zone_key": zone_key, "mode": mode}
 

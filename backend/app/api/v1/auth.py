@@ -14,6 +14,7 @@ from app.db.session import get_db
 from app.models.user import User
 from app.schemas.auth import LoginRequest, LoginResponse, SessionResponse, UserCreate
 from app.config import settings
+from app.services.audit_service import log_action
 
 router = APIRouter()
 
@@ -207,6 +208,9 @@ async def login(request: Request, response: Response, credentials: LoginRequest,
         {"sub": str(user.id), "email": user.email, "role": user.role},
         timedelta(minutes=settings.access_token_expire_minutes),
     )
+    user.last_login_at = datetime.utcnow()
+    await log_action(db, "login", f"{user.name} fez login (local)", user=user)
+    await db.commit()
     _set_auth_cookie(response, token)
     return LoginResponse(role=user.role, name=user.name, email=user.email)
 
@@ -289,6 +293,9 @@ async def microsoft_callback(
     elif not user.active:
         raise HTTPException(status_code=401, detail="Usuário inativo")
 
+    user.last_login_at = datetime.utcnow()
+    await log_action(db, "login", f"{user.name} fez login (Microsoft)", user=user)
+    await db.commit()
     session_token = create_token(
         {"sub": str(user.id), "email": user.email, "role": user.role},
         timedelta(minutes=settings.access_token_expire_minutes),

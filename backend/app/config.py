@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     postgres_password: str = ""
     redis_password: str = ""
     database_url: str = "postgresql+asyncpg://hvac:hvac123@db:5432/hvacdb"
+    database_ssl: bool = False
     redis_url: str = "redis://redis:6379/0"
     brise_base_url: str = "https://brisev2.agst.com.br:8090/api/v2"
     brise_authkey_url: str = "https://brisev2.agst.com.br:8090/api/v2/request-authkey"

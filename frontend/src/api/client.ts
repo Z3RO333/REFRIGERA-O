@@ -92,3 +92,14 @@ export const digitalTwinApi = {
   zone:  (storeId: string, zoneKey: string) =>
     api.get(`/digital-twin/stores/${storeId}/zones/${zoneKey}`).then(r => r.data),
 }
+
+export const usersApi = {
+  list: () => api.get('/users').then(r => r.data),
+  updateRole: (id: string, role: string) => api.put(`/users/${id}/role`, { role }).then(r => r.data),
+  toggleActive: (id: string, active: boolean) => api.put(`/users/${id}/active`, { active }).then(r => r.data),
+}
+
+export const auditApi = {
+  list: (params?: { limit?: number; action_type?: string; store_id?: string }) =>
+    api.get('/audit', { params }).then(r => r.data),
+}

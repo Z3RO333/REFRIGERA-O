@@ -17,6 +17,8 @@ import ThermalComfortMap from './pages/ThermalComfortMap'
 import EquipmentOverview from './pages/EquipmentOverview'
 import Reports from './pages/Reports'
 import ModulePlaceholder from './pages/ModulePlaceholder'
+import UsersPage from './pages/Users'
+import ActivityLog from './pages/ActivityLog'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { status, setSession, logout } = useAuthStore()
@@ -24,7 +26,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (status !== 'checking') return
     authApi.me()
-      .then(user => setSession(user.role, user.name))
+      .then(user => setSession(user.role, user.name, user.email))
       .catch(() => logout())
   }, [status, setSession, logout])
 
@@ -54,7 +56,8 @@ export default function App() {
           <Route path="fornecedores" element={<ModulePlaceholder title="Fornecedores" columns={['Fornecedor', 'Especialidade', 'SLA', 'Chamados', 'Status']} />} />
           <Route path="relatorios" element={<Reports />} />
           <Route path="configuracoes" element={<ModulePlaceholder title="Configurações" columns={['Regra', 'Escopo', 'Valor', 'Atualizado em']} />} />
-          <Route path="usuarios" element={<ModulePlaceholder title="Usuários" columns={['Nome', 'Email', 'Perfil', 'Status']} />} />
+          <Route path="usuarios" element={<UsersPage />} />
+          <Route path="atividade" element={<ActivityLog />} />
           <Route path="stores/:storeId" element={<StoreView />} />
           <Route path="stores/:storeId/map/:sectorId" element={<FloorMap />} />
           <Route path="devices/:deviceId" element={<DeviceDetail />} />
