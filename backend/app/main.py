@@ -3,7 +3,7 @@ import logging
 from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.v1 import devices, alerts, history, kpis, stores, maintenance, auth, ai, zones, automation, digital_twin, users, audit
+from app.api.v1 import devices, alerts, history, kpis, stores, maintenance, auth, ai, zones, automation, digital_twin, users, audit, logs
 from app.api.v1.auth import get_current_user
 from app.models import zone as _zone_models  # noqa: F401 — ensure tables are created
 from app.models import audit as _audit_models  # noqa: F401
@@ -76,6 +76,7 @@ app.include_router(automation.router, prefix="/api/v1/automation", tags=["automa
 app.include_router(digital_twin.router, prefix="/api/v1/digital-twin", tags=["digital-twin"], dependencies=auth_required)
 app.include_router(users.router, prefix="/api/v1/users", tags=["users"], dependencies=auth_required)
 app.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"], dependencies=auth_required)
+app.include_router(logs.router, prefix="/api/v1/logs", tags=["logs"], dependencies=auth_required)
 app.include_router(ws_router.router, tags=["websocket"])
 
 @app.get("/health")

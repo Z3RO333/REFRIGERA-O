@@ -59,6 +59,8 @@ async def run_ai_analysis() -> None:
             await redis_client.set(cooldown_key, "1", ttl=EMAIL_COOLDOWN_SECONDS)
             alerts_buffered += 1
 
+        await _log_ai_analyses_to_db(analyses, device_info_map)
+
         logger.info(
             "AI analysis concluída: %d analisados, %d alertas adicionados ao buffer de email",
             len(analyses), alerts_buffered
@@ -136,6 +138,7 @@ async def _fetch_anomalous_devices() -> tuple[list[dict], dict[str, dict]]:
                 DeviceStatusLatest.accumulated_off_minutes,
                 DeviceParameters.setpoint_cool,
                 StoreSector.name.label("sector_name"),
+                StoreSector.store_id.label("store_id"),
                 Store.name.label("store_name"),
             )
             .join(DeviceStatusLatest, Device.id == DeviceStatusLatest.device_id)
@@ -146,6 +149,39 @@ async def _fetch_anomalous_devices() -> tuple[list[dict], dict[str, dict]]:
                    DeviceStatusLatest.status_classification.in_(ANOMALOUS_STATUSES))
         )
         rows = result.all()
+
+        # Mapa de zona por sector_name
+        from app.services.zone_controller import ZONES
+        from app.models.zone import ZoneAutomation
+        from sqlalchemy import or_
+
+        sector_to_zone = {}
+        for zone_cfg in ZONES.values():
+            for sname in zone_cfg.sector_names:
+                sector_to_zone[sname] = zone_cfg
+
+        # Temperatura média por zona/loja (para contexto dos vizinhos)
+        zone_avg_map: dict[tuple, float] = {}
+        for zone_cfg in ZONES.values():
+            avg_res = await session.execute(
+                select(func.avg(DeviceStatusLatest.temperature))
+                .join(Device, DeviceStatusLatest.device_id == Device.id)
+                .join(StoreSector, Device.sector_id == StoreSector.id)
+                .where(
+                    StoreSector.name.in_(zone_cfg.sector_names),
+                    DeviceStatusLatest.temperature.is_not(None),
+                )
+            )
+            avg_val = avg_res.scalar()
+            if avg_val is not None:
+                zone_avg_map[zone_cfg.key] = round(float(avg_val), 1)
+
+        # Modo de automação atual por (store_id, zone_key)
+        auto_res = await session.execute(select(ZoneAutomation))
+        automation_map: dict[tuple, str] = {
+            (str(a.store_id), a.zone_key): a.mode
+            for a in auto_res.scalars().all()
+        }
 
     devices_data: list[dict] = []
     device_info_map: dict[str, dict] = {}
@@ -199,10 +235,70 @@ async def _fetch_anomalous_devices() -> tuple[list[dict], dict[str, dict]]:
             "alerts_30d": alert_map.get(did, 0),
             "last_reading_at": row.updated_at.isoformat() if row.updated_at else None,
         }
+
+        # Contexto de zona
+        zone_cfg = sector_to_zone.get(row.sector_name or "")
+        if zone_cfg:
+            auto_mode = automation_map.get((str(row.store_id), zone_cfg.key), "manual")
+            info["zone"] = {
+                "store_id": str(row.store_id),
+                "zone_key": zone_cfg.key,
+                "zone_label": zone_cfg.label,
+                "ideal_min": zone_cfg.ideal_min,
+                "ideal_max": zone_cfg.ideal_max,
+                "avg_temperature": zone_avg_map.get(zone_cfg.key),
+                "automation_mode": auto_mode,
+                "zone_type": zone_cfg.zone_type,
+            }
+        else:
+            info["zone"] = None
+
         devices_data.append(info)
         device_info_map[did] = info
 
     return devices_data, device_info_map
+
+
+async def _log_ai_analyses_to_db(analyses, device_info_map: dict) -> None:
+    """Persiste análises de IA no audit_log para rastreabilidade permanente."""
+    from app.models.audit import AuditLog
+    try:
+        async with AsyncSessionLocal() as session:
+            for analysis in analyses:
+                if not analysis.issue_detected:
+                    continue
+                info = device_info_map.get(analysis.device_id, {})
+                zone = info.get("zone") or {}
+                entry = AuditLog(
+                    action_type="ai_analysis",
+                    origin="ai",
+                    severity=analysis.severity,
+                    device_name=analysis.device_name,
+                    store_name=info.get("store_name"),
+                    sector_name=info.get("sector_name"),
+                    zone_key=zone.get("zone_key"),
+                    description=analysis.diagnosis or analysis.root_cause,
+                    extra_data={
+                        "root_cause": analysis.root_cause,
+                        "recommended_action": analysis.recommended_action,
+                        "urgency_hours": analysis.urgency_hours,
+                        "email_worthy": analysis.email_worthy,
+                        "analysis_source": analysis.analysis_source,
+                        "temperature": info.get("temperature"),
+                        "setpoint_cool": info.get("setpoint_cool"),
+                        "delta_temp": info.get("delta_temp"),
+                        "efficiency_score": info.get("efficiency_score"),
+                        "zone_label": zone.get("zone_label"),
+                        "zone_ideal_min": zone.get("ideal_min"),
+                        "zone_ideal_max": zone.get("ideal_max"),
+                        "zone_avg_temp": zone.get("avg_temperature"),
+                        "automation_mode": zone.get("automation_mode"),
+                    },
+                )
+                session.add(entry)
+            await session.commit()
+    except Exception as exc:
+        logger.warning("Falha ao persistir análises de IA no audit_log: %s", exc)
 
 
 async def _cache_analysis(analysis, device_info: dict) -> None:

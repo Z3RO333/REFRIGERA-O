@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db
@@ -10,6 +11,14 @@ from app.api.v1.auth import get_current_user
 router = APIRouter()
 
 VALID_ROLES = {"VIEWER", "EDITOR", "ADMIN"}
+
+
+class UserRoleUpdate(BaseModel):
+    role: str
+
+
+class UserActiveUpdate(BaseModel):
+    active: bool
 
 
 def _user_dict(u: User) -> dict:
@@ -29,6 +38,8 @@ async def list_users(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[dict]:
+    if current_user.role != "ADMIN":
+        raise HTTPException(403, "Apenas administradores podem listar usuários")
     result = await db.execute(select(User).order_by(User.created_at.desc()))
     return [_user_dict(u) for u in result.scalars().all()]
 
@@ -36,7 +47,7 @@ async def list_users(
 @router.put("/{user_id}/role")
 async def update_user_role(
     user_id: uuid.UUID,
-    data: dict,
+    data: UserRoleUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> dict:
@@ -45,15 +56,14 @@ async def update_user_role(
     if current_user.id == user_id:
         raise HTTPException(400, "Não é possível alterar o próprio perfil")
 
-    role = data.get("role", "")
-    if role not in VALID_ROLES:
+    if data.role not in VALID_ROLES:
         raise HTTPException(400, f"Perfil inválido. Use: {', '.join(VALID_ROLES)}")
 
     user = await db.get(User, user_id)
     if not user:
         raise HTTPException(404, "Usuário não encontrado")
 
-    user.role = role
+    user.role = data.role
     await db.commit()
     return _user_dict(user)
 
@@ -61,7 +71,7 @@ async def update_user_role(
 @router.put("/{user_id}/active")
 async def toggle_user_active(
     user_id: uuid.UUID,
-    data: dict,
+    data: UserActiveUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> dict:
@@ -74,6 +84,6 @@ async def toggle_user_active(
     if not user:
         raise HTTPException(404, "Usuário não encontrado")
 
-    user.active = bool(data.get("active", True))
+    user.active = data.active
     await db.commit()
     return _user_dict(user)

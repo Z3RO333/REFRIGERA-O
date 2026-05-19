@@ -47,12 +47,13 @@ class DeviceAnalysis(BaseModel):
     device_id: str
     device_name: str
     issue_detected: bool = False
-    severity: str | None = None       # LOW | MEDIUM | HIGH | CRITICAL
-    root_cause: str = ""              # causa raiz provável
-    diagnosis: str = ""               # descrição do problema
-    recommended_action: str = ""      # ação recomendada ao técnico
-    urgency_hours: int = 48           # horas até necessitar ação (0=imediato, 8=hoje, 48=semana, 168=mês)
+    severity: str | None = None
+    root_cause: str = ""
+    diagnosis: str = ""
+    recommended_action: str = ""
+    urgency_hours: int = 48
     email_worthy: bool = False
+    analysis_source: str = "llm"  # "llm" | "fallback" | "deterministic"
 
     @field_validator("severity", mode="before")
     @classmethod
@@ -88,6 +89,7 @@ def analyze_no_reading(device: dict) -> DeviceAnalysis:
             recommended_action="Confirmar se o desligamento foi intencional. Se não, religar e verificar disjuntor e controle remoto.",
             urgency_hours=0 if is_crit else 24,
             email_worthy=is_crit,
+            analysis_source="deterministic",
         )
 
     return DeviceAnalysis(
@@ -100,6 +102,7 @@ def analyze_no_reading(device: dict) -> DeviceAnalysis:
         recommended_action="Verificar alimentação elétrica, conectividade Wi-Fi/Brise e estado físico do equipamento.",
         urgency_hours=2 if is_crit else 8,
         email_worthy=is_crit,
+        analysis_source="deterministic",
     )
 
 
@@ -132,7 +135,9 @@ async def _analyze_one(device: dict) -> DeviceAnalysis | None:
             return result
 
     logger.warning("LLM indisponível para %s — usando regras", device["device_name"])
-    return _fallback_analysis(device)
+    result = _fallback_analysis(device)
+    result.analysis_source = "fallback"
+    return result
 
 
 async def analyze_one_deep(device: dict) -> DeviceAnalysis | None:
@@ -191,15 +196,33 @@ def _build_prompt(device: dict) -> str:
     alerts_30d = device.get("alerts_30d", 0)
     uptime    = device.get("uptime_pct")
 
+    zone = device.get("zone") or {}
+    zone_label    = zone.get("zone_label") or device.get("sector_name", "?")
+    zone_ideal_min = zone.get("ideal_min")
+    zone_ideal_max = zone.get("ideal_max")
+    zone_avg      = zone.get("avg_temperature")
+    zone_mode     = zone.get("automation_mode", "manual")
+    zone_type     = zone.get("zone_type", "ABERTA")
+
+    # Delta em relação ao conforto da zona (positivo = acima do ideal)
+    zone_delta = round(temp - zone_ideal_max, 1) if temp is not None and zone_ideal_max is not None else None
+
     lines = [
         f"Equipamento: {device['device_name']}",
-        f"Local: {device.get('store_name','?')} › {device.get('sector_name','?')}",
+        f"Local: {device.get('store_name','?')} › {zone_label}",
         f"Ambiente crítico: {'SIM' if is_crit else 'NÃO'}",
         f"Status atual: {device['status']}",
         "",
-        "── Leitura atual ──",
+        "── Zona térmica ──",
+        f"Tipo de área: {zone_type}",
+        f"Faixa de conforto da zona: {f'{zone_ideal_min}–{zone_ideal_max}°C' if zone_ideal_min and zone_ideal_max else 'não configurada'}",
+        f"Temperatura média da zona: {f'{zone_avg:.1f}°C' if zone_avg is not None else 'sem dados'}",
+        f"Delta em relação ao conforto: {f'+{zone_delta}°C acima do limite' if zone_delta and zone_delta > 0 else (f'{zone_delta}°C abaixo' if zone_delta and zone_delta < 0 else 'dentro da faixa')}",
+        f"Modo de automação da zona: {zone_mode}",
+        "",
+        "── Leitura do equipamento ──",
         f"Temperatura: {f'{temp:.1f}°C' if temp is not None else '—'}",
-        f"Setpoint: {setpoint}°C  |  Delta: {f'+{delta}°C' if delta and delta > 0 else (f'{delta}°C' if delta is not None else '—')}",
+        f"Setpoint: {setpoint}°C  |  Delta do setpoint: {f'+{delta}°C' if delta and delta > 0 else (f'{delta}°C' if delta is not None else '—')}",
         f"Umidade: {f'{humidity:.0f}%' if humidity is not None else '—'}",
         f"Eficiência energética: {f'{round(eff*100)}%' if eff is not None else '—'}",
         f"BTU: {device.get('btu', '?')}",

@@ -27,4 +27,11 @@ class AuditLog(Base):
     new_value: Mapped[str | None] = mapped_column(String(100))
     extra_data: Mapped[dict | None] = mapped_column(JSONB)
 
+    # 'user' | 'ai' | 'automation' | 'system'
+    origin: Mapped[str | None] = mapped_column(String(20), index=True)
+    # 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'
+    severity: Mapped[str | None] = mapped_column(String(10), index=True)
+    sector_name: Mapped[str | None] = mapped_column(String(100))
+    store_name: Mapped[str | None] = mapped_column(String(100))
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)

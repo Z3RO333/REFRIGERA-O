@@ -80,7 +80,9 @@ async def run_zone_controller() -> None:
     """Avalia todas as zonas com automação ativa. Chamado pelo scheduler."""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
-            select(ZoneAutomation).where(ZoneAutomation.mode != "manual")
+            select(ZoneAutomation).where(
+                ZoneAutomation.mode.not_in(["manual", "maintenance"])
+            )
         )
         automations = result.scalars().all()
 
@@ -139,15 +141,32 @@ async def run_zone_verification() -> None:
 
 async def _check_guardrails(automation: ZoneAutomation) -> str | None:
     """Retorna motivo de bloqueio ou None se pode prosseguir."""
-    # 1. Kill switch global — para tudo imediatamente
+    # 1. Modo manutenção — bloqueia tudo; verifica expiração automática
+    if automation.mode == "maintenance":
+        if automation.blocked_until and datetime.utcnow() >= automation.blocked_until:
+            # Prazo expirou: retorna automaticamente para manual
+            automation.mode = "manual"
+            automation.blocked_reason = None
+            automation.blocked_until = None
+            automation.blocked_by_user_name = None
+            automation.blocked_at = None
+            # Nota: o caller (run_zone_controller) não usa session aqui; essa limpeza
+            # será persistida pelo _evaluate_zone que abre sua própria sessão.
+        else:
+            reason = automation.blocked_reason or "Zona em manutenção"
+            if automation.blocked_until:
+                reason += f" até {automation.blocked_until.strftime('%d/%m %H:%M')} UTC"
+            return reason
+
+    # 2. Kill switch global — para tudo imediatamente
     if await redis_client.exists(KILL_SWITCH_KEY):
         return "Kill switch global ativo — automação pausada"
 
-    # 2. Zona crítica — bloqueia execução automática (auto/semi)
+    # 3. Zona crítica — bloqueia execução automática (auto/semi)
     if automation.is_critical_zone and automation.mode in ("auto", "semi"):
         return f"Zona marcada como crítica — modo '{automation.mode}' bloqueado"
 
-    # 3. Janela de horário (sempre em horário de Manaus, UTC-4)
+    # 4. Janela de horário (sempre em horário de Manaus, UTC-4)
     now_manaus = datetime.now(tz=LOCAL_TZ)
     current_min = now_manaus.hour * 60 + now_manaus.minute
     start_min = automation.allowed_start_hour * 60 + automation.allowed_start_minute
@@ -255,6 +274,9 @@ async def _evaluate_zone(automation: ZoneAutomation) -> None:
         confidence = _confidence(avg_temp, zone, status, len(readable))
         reason = _build_reason(avg_temp, zone, status, best_device.device, direction)
 
+        # Captura ANTES de _execute_setpoint modificar params.setpoint_cool
+        setpoint_before = best_params.setpoint_cool
+
         action_status = "suggestion"
         block_reason = None
 
@@ -262,13 +284,13 @@ async def _evaluate_zone(automation: ZoneAutomation) -> None:
             # acquire_lock é atômico (SET NX EX) — evita race entre múltiplos workers
             if not await redis_client.acquire_lock(cooldown_key, ttl=ZONE_COOLDOWN_SECONDS):
                 return  # outro worker chegou primeiro entre o exists() e agora
-            ok = await _execute_setpoint(best_device.device, best_params, direction, session)
+            ok = await _execute_setpoint(best_device.device, best_params, direction, automation, session)
             if ok:
                 action_status = "pending_verification"
                 logger.info(
                     "Zone %s [%s]: %s → setpoint %d→%d (conf=%.0f%%)",
                     zone.key, automation.mode, best_device.device.name,
-                    best_params.setpoint_cool, new_setpoint, confidence * 100,
+                    setpoint_before, new_setpoint, confidence * 100,
                 )
             else:
                 action_status = "blocked"
@@ -285,7 +307,7 @@ async def _evaluate_zone(automation: ZoneAutomation) -> None:
             temp_before=round(avg_temp, 2),
             ideal_min=zone.ideal_min,
             ideal_max=zone.ideal_max,
-            setpoint_before=best_params.setpoint_cool,
+            setpoint_before=setpoint_before,
             setpoint_after=new_setpoint,
             reason=reason,
             confidence=confidence,
@@ -406,9 +428,13 @@ async def _execute_setpoint(
     device: Device,
     params: DeviceParameters,
     direction: str,
+    automation: ZoneAutomation,
     session: AsyncSession,
 ) -> bool:
-    new_setpoint = max(18, min(28, params.setpoint_cool + (1 if direction == "up" else -1)))
+    new_setpoint = max(
+        automation.setpoint_min,
+        min(automation.setpoint_max, params.setpoint_cool + (1 if direction == "up" else -1)),
+    )
 
     brise_params = {
         "modeDevice": 1,

@@ -19,6 +19,8 @@ import Reports from './pages/Reports'
 import ModulePlaceholder from './pages/ModulePlaceholder'
 import UsersPage from './pages/Users'
 import ActivityLog from './pages/ActivityLog'
+import AIAnalysisPage from './pages/AIAnalysisPage'
+import LogsPage from './pages/LogsPage'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { status, setSession, logout } = useAuthStore()
@@ -58,6 +60,8 @@ export default function App() {
           <Route path="configuracoes" element={<ModulePlaceholder title="Configurações" columns={['Regra', 'Escopo', 'Valor', 'Atualizado em']} />} />
           <Route path="usuarios" element={<UsersPage />} />
           <Route path="atividade" element={<ActivityLog />} />
+          <Route path="ia" element={<AIAnalysisPage />} />
+          <Route path="logs" element={<LogsPage />} />
           <Route path="stores/:storeId" element={<StoreView />} />
           <Route path="stores/:storeId/map/:sectorId" element={<FloorMap />} />
           <Route path="devices/:deviceId" element={<DeviceDetail />} />

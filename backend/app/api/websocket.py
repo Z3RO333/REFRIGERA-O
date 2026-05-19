@@ -33,7 +33,12 @@ manager = ConnectionManager()
 
 async def redis_listener():
     pub = redis_client.client.pubsub()
-    await pub.subscribe("device.reading.new", "alert.created", "alert.resolved")
+    await pub.subscribe(
+        "device.reading.new",
+        "alert.created",
+        "alert.resolved",
+        "zone.automation.mode.changed",
+    )
     async for message in pub.listen():
         if message["type"] == "message":
             try:

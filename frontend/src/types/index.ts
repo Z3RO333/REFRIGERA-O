@@ -127,7 +127,7 @@ export interface HistoryStats {
   estimated_cost?: number | null
 }
 
-export type ZoneMode = 'manual' | 'suggestion' | 'semi' | 'auto'
+export type ZoneMode = 'manual' | 'suggestion' | 'semi' | 'auto' | 'maintenance'
 export type ZoneType = 'ABERTA' | 'SALA_FECHADA'
 export type ZoneActionStatus =
   | 'suggestion'
@@ -184,6 +184,11 @@ export interface ZoneAutomationState {
   guardrail_active: boolean
   guardrail_reason: string | null
   reading_confidence: number
+  // manutenção
+  blocked_reason: string | null
+  blocked_until: string | null
+  blocked_by_user_name: string | null
+  blocked_at: string | null
 }
 
 export interface AutomationStatus {
@@ -255,6 +260,95 @@ export interface BriseSchedule {
   mode_ac: number | null
   fan_speed: number | null
   currently_active: boolean
+}
+
+// ── Logs & Rastreabilidade ─────────────────────────────────────────────────────
+
+export type LogEventType =
+  | 'temperature_change'
+  | 'device_power'
+  | 'mode_change'
+  | 'ai_analysis'
+  | 'ai_suggestion'
+  | 'automation_exec'
+  | 'guardrail_block'
+  | 'kill_switch'
+  | 'zone_trigger'
+
+export type LogOrigin = 'user' | 'ai' | 'automation' | 'system'
+
+export interface LogEntry {
+  id: string
+  source: 'audit' | 'automation'
+  event_type: LogEventType
+  origin: LogOrigin
+  created_at: string
+  store_id: string | null
+  store_name: string | null
+  zone_key: string | null
+  zone_label: string | null
+  sector_name: string | null
+  device_id: string | null
+  device_name: string | null
+  user_name: string | null
+  severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL' | null
+  status: string | null
+  summary: string
+  old_value: string | null
+  new_value: string | null
+  details: Record<string, unknown>
+}
+
+export interface LogsPage {
+  items: LogEntry[]
+  total: number
+  offset: number
+  limit: number
+}
+
+export interface LogKPIs {
+  ai_suggestions: number
+  auto_executed: number
+  verified_success: number
+  verified_failure: number
+  guardrail_blocks: number
+  manual_controls: number
+  ai_analyses: number
+  ai_critical: number
+  ai_high: number
+  mode_changes: number
+  kill_switches: number
+  avg_recovery_minutes: number | null
+  top_zones: { zone_key: string; zone_label: string; count: number }[]
+  top_devices: { device_id: string; device_name: string; count: number }[]
+}
+
+// ── Análise de IA ──────────────────────────────────────────────────────────────
+
+export interface AIAnalysis {
+  device_id: string
+  device_name: string
+  issue_detected: boolean
+  severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL' | null
+  root_cause: string
+  diagnosis: string
+  recommended_action: string
+  urgency_hours: number
+  email_worthy: boolean
+  analysis_source: 'llm' | 'fallback' | 'deterministic'
+  analyzed_at: string
+  temperature: number | null
+  setpoint_cool: number | null
+  store_name: string | null
+  sector_name: string | null
+}
+
+export interface AIStatus {
+  ai_analysis_enabled: boolean
+  ollama_url: string
+  ollama_model: string
+  ollama_available: boolean
+  email_enabled: boolean
 }
 
 export interface MaintenanceItem {

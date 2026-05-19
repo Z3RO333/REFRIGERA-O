@@ -9,8 +9,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.cache.redis_client import redis_client
-from app.db.session import get_db
+from app.db.session import get_db, AsyncSessionLocal
 from app.models.zone import ZoneAction, ZoneAutomation
+from app.models.audit import AuditLog
 from app.services.zone_controller import KILL_SWITCH_KEY
 
 router = APIRouter()
@@ -65,5 +66,19 @@ async def set_kill_switch(data: dict) -> dict:
         await redis_client.delete(KILL_SWITCH_KEY)
         await redis_client.delete(_KS_AT_KEY)
         await redis_client.delete(_KS_BY_KEY)
+
+    try:
+        async with AsyncSessionLocal() as session:
+            session.add(AuditLog(
+                action_type="kill_switch",
+                origin="user",
+                severity="HIGH" if activate else "LOW",
+                description=f"Kill switch {'ATIVADO' if activate else 'DESATIVADO'} por {activated_by}",
+                user_name=activated_by,
+                extra_data={"active": activate, "by": activated_by},
+            ))
+            await session.commit()
+    except Exception:
+        pass
 
     return {"kill_switch_active": activate, "by": activated_by}

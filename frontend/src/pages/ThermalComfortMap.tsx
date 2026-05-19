@@ -3,13 +3,14 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
   Activity, AlertTriangle, ArrowLeft, Bot, ChevronDown, ChevronUp, Clock,
-  Eye, EyeOff, PlayCircle, RefreshCw, Shield, ShieldOff, SlidersHorizontal,
-  Thermometer, TrendingDown, TrendingUp, Wind, Zap,
+  Eye, EyeOff, Lock, PlayCircle, RefreshCw, Shield, ShieldOff, SlidersHorizontal,
+  Thermometer, TrendingDown, TrendingUp, Wind, Wrench, Zap,
 } from 'lucide-react'
 import { automationApi, devicesApi, digitalTwinApi, storesApi, zonesApi } from '../api/client'
 import StatusBadge from '../components/StatusBadge'
 import DeviceMarker from '../components/map/DeviceMarker'
 import { cn, formatRelativeTime, formatTemp } from '../lib/utils'
+import { useAuthStore } from '../store/useAuthStore'
 import type { AutomationStatus, Device, DigitalTwinZone, Sector, ZoneAutomationState, ZoneMode, ZoneType } from '../types'
 
 type ThermalStatus = 'COLD' | 'COMFORT' | 'WARM' | 'HOT' | 'CRITICAL' | 'NO_READING'
@@ -798,11 +799,12 @@ function ZoneAlertRow({
   )
 }
 
-const ZONE_MODES: { key: ZoneMode; label: string; description: string }[] = [
-  { key: 'manual',     label: 'Manual',      description: 'Sem automação — só sugestões visuais.' },
-  { key: 'suggestion', label: 'Sugestão',    description: 'Registra sugestões, aguarda aprovação.' },
-  { key: 'semi',       label: 'Semi-auto',   description: 'Executa 1 ajuste/ciclo com verificação.' },
-  { key: 'auto',       label: 'Automático',  description: 'Avalia e executa automaticamente.' },
+const ZONE_MODES: { key: ZoneMode; label: string; description: string; adminOnly?: boolean }[] = [
+  { key: 'manual',      label: 'Manual',      description: 'Sem automação — só sugestões visuais.' },
+  { key: 'suggestion',  label: 'Sugestão',    description: 'Registra sugestões, aguarda aprovação.' },
+  { key: 'semi',        label: 'Semi-auto',   description: 'Executa 1 ajuste/ciclo com verificação.' },
+  { key: 'auto',        label: 'Automático',  description: 'Avalia e executa automaticamente.', adminOnly: true },
+  { key: 'maintenance', label: 'Manutenção',  description: 'Bloqueia toda automação até liberação explícita.', adminOnly: true },
 ]
 
 const ACTION_STATUS_META: Record<string, { label: string; color: string }> = {
@@ -833,6 +835,14 @@ function ZonePanel({
   const [manualLockedUntil, setManualLockedUntil] = useState(0)
   const [manualResult, setManualResult] = useState<{ targetSp: number; count: number } | null>(null)
   const [manualError, setManualError] = useState<string | null>(null)
+  const [maintenanceReason, setMaintenanceReason] = useState('')
+  const [maintenanceUntil, setMaintenanceUntil] = useState('')
+  const [showMaintenanceForm, setShowMaintenanceForm] = useState(false)
+
+  const { role } = useAuthStore()
+  const isAdmin  = role === 'ADMIN'
+  const isEditor = role === 'EDITOR' || isAdmin
+  const canWrite = isEditor  // VIEWER não pode escrever nada
 
   const meta = STATUS_META[zone.status as ThermalStatus]
 
@@ -899,10 +909,32 @@ function ZonePanel({
   const dailyCount = automation?.daily_count ?? 0
   const maxDaily = automation?.max_daily_adjustments ?? 6
   const consecFail = automation?.consecutive_failures ?? 0
+  const isInMaintenance = currentMode === 'maintenance'
 
   const handleMode = async (mode: ZoneMode) => {
+    if (!canWrite) return
+    if (mode === 'maintenance') {
+      setShowMaintenanceForm(true)
+      return
+    }
     setChangingMode(true)
     await onModeChange(mode).finally(() => setChangingMode(false))
+  }
+
+  const handleMaintenanceConfirm = async () => {
+    if (!maintenanceReason.trim()) return
+    setChangingMode(true)
+    setShowMaintenanceForm(false)
+    await zonesApi.setMode(storeId, zone.key, {
+      mode: 'maintenance',
+      blocked_reason: maintenanceReason.trim(),
+      blocked_until: maintenanceUntil || null,
+    }).finally(() => {
+      setChangingMode(false)
+      setMaintenanceReason('')
+      setMaintenanceUntil('')
+      onRefetch()
+    })
   }
 
   const handleTrigger = async () => {
@@ -937,31 +969,114 @@ function ZonePanel({
         <div className="p-3 space-y-3">
           {/* Seletor de modo */}
           <div>
-            <div className="mb-1.5 text-xs text-gray-500">Modo de operação</div>
+            <div className="mb-1.5 flex items-center justify-between">
+              <span className="text-xs text-gray-500">Modo de operação</span>
+              {!canWrite && (
+                <span className="flex items-center gap-1 text-xs text-gray-400">
+                  <Lock className="h-3 w-3" /> Somente leitura
+                </span>
+              )}
+            </div>
             <div className="grid grid-cols-2 gap-1">
-              {ZONE_MODES.map(m => (
-                <button
-                  key={m.key}
-                  type="button"
-                  disabled={changingMode}
-                  onClick={() => handleMode(m.key)}
-                  title={m.description}
-                  className={cn(
-                    'rounded-md px-2 py-1.5 text-xs font-medium transition-colors text-center',
-                    currentMode === m.key
-                      ? 'bg-purple-600 text-white'
-                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-400 dark:hover:bg-gray-700',
-                    changingMode && 'opacity-40 cursor-not-allowed',
-                  )}
-                >
-                  {m.label}
-                </button>
-              ))}
+              {ZONE_MODES.filter(m => !m.adminOnly || isAdmin).map(m => {
+                const isActive = currentMode === m.key
+                const isDisabled = changingMode || !canWrite
+                const tooltipText = !canWrite
+                  ? 'Sem permissão para alterar modos'
+                  : m.description
+                return (
+                  <button
+                    key={m.key}
+                    type="button"
+                    disabled={isDisabled}
+                    onClick={() => handleMode(m.key)}
+                    title={tooltipText}
+                    className={cn(
+                      'rounded-md px-2 py-1.5 text-xs font-medium transition-colors text-center',
+                      isActive
+                        ? m.key === 'maintenance'
+                          ? 'bg-orange-500 text-white'
+                          : 'bg-purple-600 text-white'
+                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-400 dark:hover:bg-gray-700',
+                      isDisabled && 'opacity-40 cursor-not-allowed',
+                    )}
+                  >
+                    {m.key === 'maintenance' && <Wrench className="mr-1 inline h-3 w-3" />}
+                    {m.label}
+                  </button>
+                )
+              })}
             </div>
             {ZONE_MODES.find(m => m.key === currentMode) && (
               <p className="mt-1 text-xs text-gray-400">{ZONE_MODES.find(m => m.key === currentMode)!.description}</p>
             )}
           </div>
+
+          {/* Banner de manutenção */}
+          {isInMaintenance && automation && (
+            <div className="rounded-lg border border-orange-300 bg-orange-50 p-2.5 dark:border-orange-800 dark:bg-orange-950/30">
+              <div className="flex items-start gap-2">
+                <Wrench className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-orange-500" />
+                <div className="min-w-0 flex-1 space-y-0.5">
+                  <p className="text-xs font-semibold text-orange-700 dark:text-orange-300">Zona em manutenção</p>
+                  {automation.blocked_reason && (
+                    <p className="text-xs text-orange-600 dark:text-orange-400">{automation.blocked_reason}</p>
+                  )}
+                  {automation.blocked_by_user_name && (
+                    <p className="text-xs text-orange-500 dark:text-orange-500">Por: {automation.blocked_by_user_name}</p>
+                  )}
+                  {automation.blocked_until && (
+                    <p className="text-xs text-orange-500 dark:text-orange-500">
+                      Até: {new Date(automation.blocked_until).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Formulário de manutenção */}
+          {showMaintenanceForm && (
+            <div className="rounded-lg border border-orange-300 bg-orange-50 p-3 dark:border-orange-800 dark:bg-orange-950/30 space-y-2">
+              <p className="text-xs font-semibold text-orange-700 dark:text-orange-300 flex items-center gap-1.5">
+                <Wrench className="h-3.5 w-3.5" /> Bloquear zona para manutenção
+              </p>
+              <div className="space-y-1.5">
+                <input
+                  type="text"
+                  placeholder="Motivo (obrigatório)"
+                  value={maintenanceReason}
+                  onChange={e => setMaintenanceReason(e.target.value)}
+                  className="w-full rounded-md border border-orange-300 bg-white px-2 py-1.5 text-xs text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-orange-400 dark:border-orange-700 dark:bg-gray-900 dark:text-gray-200"
+                />
+                <input
+                  type="datetime-local"
+                  value={maintenanceUntil}
+                  onChange={e => setMaintenanceUntil(e.target.value)}
+                  className="w-full rounded-md border border-orange-300 bg-white px-2 py-1.5 text-xs text-gray-800 focus:outline-none focus:ring-1 focus:ring-orange-400 dark:border-orange-700 dark:bg-gray-900 dark:text-gray-200"
+                  title="Liberação automática (opcional)"
+                />
+                <p className="text-xs text-orange-500">Liberação automática — deixe em branco para manutenção indefinida.</p>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  disabled={!maintenanceReason.trim() || changingMode}
+                  onClick={handleMaintenanceConfirm}
+                  className="flex-1 rounded-md bg-orange-500 px-2 py-1.5 text-xs font-medium text-white hover:bg-orange-400 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Confirmar bloqueio
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setShowMaintenanceForm(false); setMaintenanceReason(''); setMaintenanceUntil('') }}
+                  className="rounded-md bg-gray-200 px-2 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-300 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600"
+                >
+                  Cancelar
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Guardrails */}
           {automation && (

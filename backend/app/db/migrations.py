@@ -55,6 +55,22 @@ _STATEMENTS = [
        FOREIGN KEY (sector_id) REFERENCES store_sectors(id) ON DELETE SET NULL""",
     # último login de cada usuário
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMP",
+    # administrador inicial garantido (idempotente)
+    "UPDATE users SET role = 'ADMIN' WHERE email = 'gustavoandrade@bemol.com.br'",
+    # remove conta genérica de admin (idempotente)
+    "DELETE FROM users WHERE email = 'admin@bemol.com.br'",
+    # modo manutenção/bloqueado para zonas
+    "ALTER TABLE zone_automations ADD COLUMN IF NOT EXISTS blocked_reason TEXT",
+    "ALTER TABLE zone_automations ADD COLUMN IF NOT EXISTS blocked_until TIMESTAMP",
+    "ALTER TABLE zone_automations ADD COLUMN IF NOT EXISTS blocked_by_user_name VARCHAR(100)",
+    "ALTER TABLE zone_automations ADD COLUMN IF NOT EXISTS blocked_at TIMESTAMP",
+    # audit_logs enriquecido para rastreabilidade completa
+    "ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS origin VARCHAR(20)",
+    "ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS severity VARCHAR(10)",
+    "ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS sector_name VARCHAR(100)",
+    "ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS store_name VARCHAR(100)",
+    "CREATE INDEX IF NOT EXISTS ix_audit_logs_origin ON audit_logs (origin)",
+    "CREATE INDEX IF NOT EXISTS ix_audit_logs_severity ON audit_logs (severity)",
 ]
 
 

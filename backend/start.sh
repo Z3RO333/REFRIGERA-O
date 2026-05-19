@@ -17,5 +17,5 @@ echo "[startup] Starting uvicorn on port ${WEBSITES_PORT:-${PORT:-8000}}..."
 exec uvicorn app.main:app \
     --host 0.0.0.0 \
     --port "${WEBSITES_PORT:-${PORT:-8000}}" \
-    --workers 2 \
+    --workers 1 \
     --log-level info

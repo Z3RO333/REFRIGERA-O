@@ -153,6 +153,16 @@ async def control_device(
     if device.dnd:
         raise HTTPException(409, "Dispositivo em modo DND — comando bloqueado pelo equipamento")
 
+    # Resolve store/sector para enriquecer o audit_log
+    sector_store = await db.execute(
+        select(StoreSector, Store)
+        .join(Store, StoreSector.store_id == Store.id)
+        .where(StoreSector.id == device.sector_id)
+    )
+    sector_row = sector_store.first()
+    _sector = sector_row[0] if sector_row else None
+    _store  = sector_row[1] if sector_row else None
+
     current_params = await _get_current_parameters(device_id, device.brise_device_id, db)
     next_params = current_params.copy()
 
@@ -185,21 +195,28 @@ async def control_device(
             status.delta_temp = None
             status.updated_at = datetime.utcnow()
 
+    is_temp_action = "temperature" in command.action
+    old_sp = current_params.get("setpoint_cool")
+    new_sp = next_params.get("setpoint_cool")
     action_labels = {
-        "power_on": "ligou", "power_off": "desligou",
-        "temperature_up": f"aumentou setpoint → {next_params.get('setpoint_cool')}°C",
-        "temperature_down": f"reduziu setpoint → {next_params.get('setpoint_cool')}°C",
+        "power_on":         "ligou",
+        "power_off":        "desligou",
+        "temperature_up":   f"↑ setpoint {old_sp}°C → {new_sp}°C",
+        "temperature_down": f"↓ setpoint {old_sp}°C → {new_sp}°C",
     }
     label = action_labels.get(command.action, command.action)
     await log_action(
         db, "device_control",
-        f"{current_user.name} {label} '{device.name}'",
+        f"{current_user.name} {label} — {device.name}" + (f" [{_sector.name}]" if _sector else ""),
         user=current_user,
         device_id=device_id,
         device_name=device.name,
-        old_value=str(current_params.get("setpoint_cool")) if "temperature" in command.action else None,
-        new_value=str(next_params.get("setpoint_cool")) if "temperature" in command.action else None,
-        metadata={"action": command.action},
+        store_id=_store.id if _store else None,
+        store_name=_store.name if _store else None,
+        sector_name=_sector.name if _sector else None,
+        old_value=str(old_sp) if is_temp_action else None,
+        new_value=str(new_sp) if is_temp_action else None,
+        extra_data={"action": command.action, "step": command.step},
     )
     await db.commit()
     return {

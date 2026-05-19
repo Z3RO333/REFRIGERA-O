@@ -1,5 +1,5 @@
 import uuid
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db
@@ -35,8 +35,10 @@ async def list_audit(
     action_type: str | None = None,
     store_id: uuid.UUID | None = None,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ) -> list[dict]:
+    if current_user.role != "ADMIN":
+        raise HTTPException(403, "Apenas administradores podem visualizar o log de auditoria")
     q = select(AuditLog).order_by(AuditLog.created_at.desc()).limit(limit)
     if action_type:
         q = q.where(AuditLog.action_type == action_type)

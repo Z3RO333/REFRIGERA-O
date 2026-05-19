@@ -68,8 +68,14 @@ export const maintenanceApi = {
 
 export const zonesApi = {
   list: (storeId: string) => api.get(`/zones/${storeId}`).then(r => r.data),
-  setMode: (storeId: string, zoneKey: string, data: object) =>
-    api.put(`/zones/${storeId}/${zoneKey}/mode`, data).then(r => r.data),
+  setMode: (storeId: string, zoneKey: string, data: {
+    mode: string
+    blocked_reason?: string
+    blocked_until?: string | null
+    setpoint_min?: number
+    setpoint_max?: number
+    max_daily_adjustments?: number
+  }) => api.put(`/zones/${storeId}/${zoneKey}/mode`, data).then(r => r.data),
   history: (storeId: string, zoneKey: string, limit = 20) =>
     api.get(`/zones/${storeId}/${zoneKey}/history`, { params: { limit } }).then(r => r.data),
   trigger: (storeId: string, zoneKey: string) =>
@@ -102,4 +108,29 @@ export const usersApi = {
 export const auditApi = {
   list: (params?: { limit?: number; action_type?: string; store_id?: string }) =>
     api.get('/audit', { params }).then(r => r.data),
+}
+
+export const logsApi = {
+  list: (params?: {
+    limit?: number
+    offset?: number
+    store_id?: string
+    zone_key?: string
+    device_id?: string
+    user_name?: string
+    event_type?: string
+    origin?: string
+    severity?: string
+    status?: string
+    date_from?: string
+    date_to?: string
+  }) => api.get('/logs', { params }).then(r => r.data),
+  kpis: (params?: { store_id?: string; zone_key?: string; date_from?: string; date_to?: string }) =>
+    api.get('/logs/kpis', { params }).then(r => r.data),
+}
+
+export const aiApi = {
+  status: () => api.get('/ai/status').then(r => r.data),
+  analyses: () => api.get('/ai/analyses').then(r => r.data),
+  trigger: () => api.post('/ai/trigger').then(r => r.data),
 }

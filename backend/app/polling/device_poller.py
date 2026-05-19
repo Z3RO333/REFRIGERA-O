@@ -22,7 +22,13 @@ from app.rules.classifier import (
 )
 from app.rules.alert_generator import generate_alert_if_needed
 
-async def poll_device(device_id: uuid.UUID, brise_id: str, is_critical_env: bool):
+async def poll_device(
+    device_id: uuid.UUID,
+    brise_id: str,
+    is_critical_env: bool,
+    zone_ideal_min: float | None = None,
+    zone_ideal_max: float | None = None,
+):
     if not await acquire_polling_lock(device_id):
         return
     try:
@@ -63,6 +69,8 @@ async def poll_device(device_id: uuid.UUID, brise_id: str, is_critical_env: bool
                     last_reading_time=None,
                     consecutive_count=consecutive_count,
                     current_status=current_status,
+                    zone_ideal_min=zone_ideal_min,
+                    zone_ideal_max=zone_ideal_max,
                 )
                 if status == prev_status:
                     consecutive_count += 1
@@ -85,6 +93,8 @@ async def poll_device(device_id: uuid.UUID, brise_id: str, is_critical_env: bool
                     last_reading_time=last_reading_time,
                     consecutive_count=consecutive_count,
                     current_status=current_status,
+                    zone_ideal_min=zone_ideal_min,
+                    zone_ideal_max=zone_ideal_max,
                 )
                 consecutive_count = 0
 
@@ -196,19 +206,38 @@ async def poll_device(device_id: uuid.UUID, brise_id: str, is_critical_env: bool
         await release_polling_lock(device_id)
 
 async def poll_all_devices():
+    from app.models.store import StoreSector
+    from app.services.zone_controller import ZONES
+
+    # Mapa reverso: sector_name → (ideal_min, ideal_max)
+    sector_to_zone: dict[str, tuple[float, float]] = {}
+    for zone_cfg in ZONES.values():
+        for sector_name in zone_cfg.sector_names:
+            sector_to_zone[sector_name] = (zone_cfg.ideal_min, zone_cfg.ideal_max)
+
     async with AsyncSessionLocal() as session:
         result = await session.execute(
-            select(Device).where(
+            select(Device, StoreSector.name.label("sector_name"))
+            .outerjoin(StoreSector, Device.sector_id == StoreSector.id)
+            .where(
                 Device.active == True,
                 Device.brise_device_id.not_like("MANUAL-%"),
-                Device.source_url.is_(None),   # sensores externos têm poller próprio
+                Device.source_url.is_(None),
             )
         )
-        devices = result.scalars().all()
-    tasks = [
-        poll_device(d.id, d.brise_device_id, d.is_critical_environment)
-        for d in devices
-    ]
+        rows = result.all()
+
+    tasks = []
+    for device, sector_name in rows:
+        zone_range = sector_to_zone.get(sector_name or "")
+        tasks.append(poll_device(
+            device.id,
+            device.brise_device_id,
+            device.is_critical_environment,
+            zone_ideal_min=zone_range[0] if zone_range else None,
+            zone_ideal_max=zone_range[1] if zone_range else None,
+        ))
+    devices = [row[0] for row in rows]
     if tasks:
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for device, outcome in zip(devices, results):

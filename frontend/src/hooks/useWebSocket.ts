@@ -27,6 +27,10 @@ export function useWebSocket() {
             queryClient.invalidateQueries({ queryKey: ['alerts'] })
             queryClient.invalidateQueries({ queryKey: ['kpis'] })
           }
+          if (msg.channel === 'zone.automation.mode.changed') {
+            // Atualiza o estado de automação de todas as lojas em tempo real
+            queryClient.invalidateQueries({ queryKey: ['zones-automation'] })
+          }
         } catch {}
       }
 

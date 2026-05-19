@@ -68,6 +68,18 @@ async def get_active_user_from_token(token: str, db: AsyncSession) -> User:
     return user
 
 
+def require_role(*roles: str):
+    """Dependency factory: exige que o usuário tenha uma das roles informadas."""
+    async def _check(current_user: User = Depends(get_current_user)) -> User:
+        if current_user.role not in roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Permissão insuficiente. Requer: {', '.join(roles)}.",
+            )
+        return current_user
+    return _check
+
+
 async def get_current_user(
     authorization: str | None = Header(None),
     session_token: str | None = Cookie(None, alias=settings.auth_cookie_name),

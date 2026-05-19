@@ -28,11 +28,15 @@ class ZoneAutomation(Base):
     is_critical_zone: Mapped[bool] = mapped_column(Boolean, default=False)  # bloqueia auto/semi
 
     # ── Tipo de zona e bloqueio térmico ──────────────────────────────────────
-    # ABERTA: área ampla sem barreiras físicas relevantes
-    # SALA_FECHADA: sala com paredes — isolamento térmico, automação só com equipamento interno
     zone_type: Mapped[str] = mapped_column(String(20), default="ABERTA")
-    # Nível de confiança na leitura (0.0–1.0). Baixo quando não há sensor interno.
     reading_confidence: Mapped[float] = mapped_column(Float, default=1.0)
+
+    # ── Manutenção / bloqueio manual ─────────────────────────────────────────
+    # mode == "maintenance" → automação completamente suspensa até liberação explícita
+    blocked_reason: Mapped[str | None] = mapped_column(Text)
+    blocked_until: Mapped[datetime | None] = mapped_column(DateTime)
+    blocked_by_user_name: Mapped[str | None] = mapped_column(String(100))
+    blocked_at: Mapped[datetime | None] = mapped_column(DateTime)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
