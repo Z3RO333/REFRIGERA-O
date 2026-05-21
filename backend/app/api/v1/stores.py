@@ -7,6 +7,7 @@ from app.models.store import Store, StoreSector
 from app.models.device import Device, DeviceParameters, DeviceStatusLatest
 from app.models.user import User
 from app.api.v1.auth import require_role
+from app.schemas.store import FloorPlanUpdate, SectorCreate, StoreCreate
 
 router = APIRouter()
 
@@ -28,8 +29,10 @@ async def list_stores(db: AsyncSession = Depends(get_db)):
     stores = []
     for store, device_count, last_reading_at in result.all():
         code_name = f"{store.code} {store.name}".upper()
-        if store.code == "MATRIZ" or "ESCRIT" in code_name:
+        if "ESCRIT" in code_name:
             kind = "ESCRITORIO"
+        elif store.code == "MATRIZ" or "MATRIZ" in code_name:
+            kind = "MATRIZ"
         elif "FARMA" in code_name:
             kind = "FARMA"
         elif "CD" in code_name or "CENTRO" in code_name:
@@ -48,8 +51,8 @@ async def list_stores(db: AsyncSession = Depends(get_db)):
     return stores
 
 @router.post("", status_code=201)
-async def create_store(data: dict, db: AsyncSession = Depends(get_db), _: User = Depends(require_role("ADMIN"))):
-    store = Store(**data)
+async def create_store(data: StoreCreate, db: AsyncSession = Depends(get_db), _: User = Depends(require_role("ADMIN"))):
+    store = Store(**data.model_dump())
     db.add(store)
     await db.commit()
     await db.refresh(store)
@@ -100,18 +103,18 @@ async def get_store_sectors(store_id: uuid.UUID, db: AsyncSession = Depends(get_
     return [{"id": str(s.id), "name": s.name, "floor": s.floor, "floor_plan_url": s.floor_plan_url, "is_critical": s.is_critical} for s in sectors]
 
 @router.post("/{store_id}/sectors", status_code=201)
-async def create_sector(store_id: uuid.UUID, data: dict, db: AsyncSession = Depends(get_db), _: User = Depends(require_role("ADMIN"))):
-    sector = StoreSector(store_id=store_id, **data)
+async def create_sector(store_id: uuid.UUID, data: SectorCreate, db: AsyncSession = Depends(get_db), _: User = Depends(require_role("ADMIN"))):
+    sector = StoreSector(store_id=store_id, **data.model_dump())
     db.add(sector)
     await db.commit()
     await db.refresh(sector)
     return {"id": str(sector.id), "name": sector.name}
 
 @router.put("/{store_id}/sectors/{sector_id}/floor-plan")
-async def update_floor_plan(store_id: uuid.UUID, sector_id: uuid.UUID, data: dict, db: AsyncSession = Depends(get_db), _: User = Depends(require_role("ADMIN"))):
+async def update_floor_plan(store_id: uuid.UUID, sector_id: uuid.UUID, data: FloorPlanUpdate, db: AsyncSession = Depends(get_db), _: User = Depends(require_role("ADMIN"))):
     sector = await db.get(StoreSector, sector_id)
     if not sector or sector.store_id != store_id:
         raise HTTPException(404, "Setor não encontrado")
-    sector.floor_plan_url = data.get("floor_plan_url")
+    sector.floor_plan_url = data.floor_plan_url
     await db.commit()
     return {"message": "Planta atualizada"}

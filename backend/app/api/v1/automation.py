@@ -15,6 +15,7 @@ from app.models.audit import AuditLog
 from app.models.user import User
 from app.api.v1.auth import require_role
 from app.services.zone_controller import KILL_SWITCH_KEY
+from app.schemas.automation import KillSwitchUpdate
 
 router = APIRouter()
 
@@ -56,11 +57,11 @@ async def automation_status(db: AsyncSession = Depends(get_db)) -> dict:
 
 @router.post("/kill-switch")
 async def set_kill_switch(
-    data: dict,
+    data: KillSwitchUpdate,
     current_user: User = Depends(require_role("ADMIN")),
 ) -> dict:
     """Ativa ou desativa o kill switch global. Body: { active: bool }"""
-    activate: bool = bool(data.get("active", True))
+    activate = data.active
     activated_by: str = current_user.name
 
     if activate:
@@ -79,12 +80,15 @@ async def set_kill_switch(
                 origin="user",
                 severity="HIGH" if activate else "LOW",
                 description=f"Kill switch {'ATIVADO' if activate else 'DESATIVADO'} por {activated_by}",
+                user_id=current_user.id,
                 user_name=activated_by,
+                user_email=current_user.email,
                 extra_data={"active": activate, "by": activated_by},
             ))
             await session.commit()
-    except Exception:
-        pass
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("Falha ao auditar kill switch: %s", exc)
 
     await redis_client.publish("automation.kill_switch.changed", {
         "active": activate,

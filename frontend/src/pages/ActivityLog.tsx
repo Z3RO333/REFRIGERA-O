@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Activity, Bot, LogIn, SlidersHorizontal, Thermometer, Zap } from 'lucide-react'
+import { Activity, Bot, LogIn, SlidersHorizontal, Thermometer, Wrench, Zap } from 'lucide-react'
 import { auditApi } from '../api/client'
 import { cn, formatRelativeTime } from '../lib/utils'
 
@@ -23,6 +23,7 @@ const ACTION_META: Record<string, { label: string; icon: React.ReactNode; color:
   zone_mode_change: { label: 'Modo de zona',   icon: <SlidersHorizontal className="h-3.5 w-3.5" />, color: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400' },
   device_control:   { label: 'Controle AC',    icon: <Thermometer className="h-3.5 w-3.5" />,    color: 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400' },
   zone_trigger:     { label: 'Disparo IA',     icon: <Zap className="h-3.5 w-3.5" />,            color: 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400' },
+  zone_guardrails_change: { label: 'Guardrails', icon: <Wrench className="h-3.5 w-3.5" />,         color: 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-400' },
   ai_action:        { label: 'Ação da IA',     icon: <Bot className="h-3.5 w-3.5" />,            color: 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400' },
 }
 
@@ -31,6 +32,7 @@ const FILTER_OPTIONS = [
   { value: 'login', label: 'Logins' },
   { value: 'device_control', label: 'Controles AC' },
   { value: 'zone_mode_change', label: 'Modo de zona' },
+  { value: 'zone_guardrails_change', label: 'Guardrails' },
 ]
 
 export default function ActivityLog() {

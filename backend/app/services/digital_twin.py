@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.device import Device, DeviceStatusLatest
 from app.models.reading import DeviceReading
-from app.services.zone_controller import BLOCKED_STATUSES, ZONES, ZoneConfig, _classify
+from app.services.zone_controller import BLOCKED_STATUSES, ZONES, ZoneConfig, _classify, _load_all_custom_zones
 
 logger = logging.getLogger(__name__)
 
@@ -234,18 +234,28 @@ async def compute_zone_twin(
     stale_cut = now - timedelta(minutes=STALE_THRESHOLD_MINUTES)
 
     # ── 1. Estado atual ───────────────────────────────────────────────────────
-    result = await session.execute(
-        select(Device, DeviceStatusLatest)
-        .join(DeviceStatusLatest, Device.id == DeviceStatusLatest.device_id)
-        .join(StoreSector, Device.sector_id == StoreSector.id)
-        .where(
-            Device.active == True,
-            StoreSector.store_id == store_id,
-            StoreSector.name.in_(zone.sector_names),
+    if zone.device_ids is not None:
+        if not zone.device_ids:
+            rows = []
+        else:
+            result = await session.execute(
+                select(Device, DeviceStatusLatest)
+                .join(DeviceStatusLatest, Device.id == DeviceStatusLatest.device_id)
+                .where(Device.active == True, Device.id.in_(zone.device_ids))
+            )
+            rows = result.all()
+    else:
+        result = await session.execute(
+            select(Device, DeviceStatusLatest)
+            .join(DeviceStatusLatest, Device.id == DeviceStatusLatest.device_id)
+            .join(StoreSector, Device.sector_id == StoreSector.id)
+            .where(
+                Device.active == True,
+                StoreSector.store_id == store_id,
+                StoreSector.name.in_(zone.sector_names),
+            )
         )
-    )
-    rows = result.all()
-
+        rows = result.all()
     contributing: list[dict] = []
     device_ids: list[uuid.UUID] = []
     temps_now: list[float] = []
@@ -383,7 +393,14 @@ async def compute_zone_twin(
 async def compute_store_twin(store_id: uuid.UUID, session: AsyncSession) -> list[dict]:
     """Retorna digital twin de todas as zonas configuradas para a loja."""
     results = []
-    for zone in ZONES.values():
+    from app.models.custom_zone import CustomZone
+
+    custom_zones = await _load_all_custom_zones(session)
+    custom_keys_res = await session.execute(select(CustomZone.zone_key).where(CustomZone.store_id == store_id))
+    custom_keys = {row[0] for row in custom_keys_res.all()}
+    all_zones = {**ZONES, **{k: v for k, v in custom_zones.items() if k in custom_keys}}
+
+    for zone in all_zones.values():
         try:
             twin = await compute_zone_twin(store_id, zone, session)
             results.append(twin)

@@ -23,6 +23,7 @@ const EVENT_META: Record<string, {
   ai_suggestion:      { icon: <Bot className="h-3.5 w-3.5" />,          label: 'Sugestão IA',     color: 'text-violet-500', badge: 'bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300' },
   automation_exec:    { icon: <Activity className="h-3.5 w-3.5" />,     label: 'Automação',       color: 'text-green-600',  badge: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300' },
   guardrail_block:    { icon: <Shield className="h-3.5 w-3.5" />,       label: 'Bloqueio',        color: 'text-orange-600', badge: 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300' },
+  zone_guardrails_change: { icon: <Wrench className="h-3.5 w-3.5" />,     label: 'Guardrails',     color: 'text-cyan-600',   badge: 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300' },
   kill_switch:        { icon: <ShieldOff className="h-3.5 w-3.5" />,    label: 'Kill Switch',     color: 'text-red-600',    badge: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300' },
   zone_trigger:       { icon: <Zap className="h-3.5 w-3.5" />,          label: 'Gatilho Manual',  color: 'text-teal-600',   badge: 'bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-300' },
   alert_ack:          { icon: <Bell className="h-3.5 w-3.5" />,          label: 'Alerta Ack',      color: 'text-yellow-600', badge: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300' },

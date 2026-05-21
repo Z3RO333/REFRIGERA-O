@@ -11,7 +11,43 @@ logger = logging.getLogger(__name__)
 
 _STATEMENTS = [
     # devices
+    "ALTER TABLE devices ADD COLUMN IF NOT EXISTS enable_fan BOOLEAN NOT NULL DEFAULT true",
+    "ALTER TABLE devices ADD COLUMN IF NOT EXISTS enable_heat BOOLEAN NOT NULL DEFAULT false",
     "ALTER TABLE devices ADD COLUMN IF NOT EXISTS dnd BOOLEAN NOT NULL DEFAULT false",
+    "ALTER TABLE devices ADD COLUMN IF NOT EXISTS time_zone INTEGER NOT NULL DEFAULT -4",
+    "ALTER TABLE devices ADD COLUMN IF NOT EXISTS group_level1 VARCHAR(50)",
+    "ALTER TABLE devices ADD COLUMN IF NOT EXISTS group_level2 VARCHAR(50)",
+    "ALTER TABLE devices ADD COLUMN IF NOT EXISTS group_level3 VARCHAR(50)",
+    "ALTER TABLE devices ADD COLUMN IF NOT EXISTS group_level4 VARCHAR(50)",
+    "ALTER TABLE devices ADD COLUMN IF NOT EXISTS position_x FLOAT",
+    "ALTER TABLE devices ADD COLUMN IF NOT EXISTS position_y FLOAT",
+    "ALTER TABLE devices ADD COLUMN IF NOT EXISTS polling_interval INTEGER NOT NULL DEFAULT 300",
+    "ALTER TABLE devices ADD COLUMN IF NOT EXISTS is_critical_environment BOOLEAN NOT NULL DEFAULT false",
+    "ALTER TABLE devices ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT true",
+    "ALTER TABLE devices ADD COLUMN IF NOT EXISTS last_maintenance TIMESTAMP",
+    "ALTER TABLE devices ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP",
+    # stores / sectors
+    "ALTER TABLE stores ADD COLUMN IF NOT EXISTS address TEXT",
+    "ALTER TABLE stores ADD COLUMN IF NOT EXISTS city VARCHAR(100)",
+    "ALTER TABLE stores ADD COLUMN IF NOT EXISTS state VARCHAR(2)",
+    "ALTER TABLE stores ADD COLUMN IF NOT EXISTS timezone INTEGER NOT NULL DEFAULT -4",
+    "ALTER TABLE stores ADD COLUMN IF NOT EXISTS latitude FLOAT",
+    "ALTER TABLE stores ADD COLUMN IF NOT EXISTS longitude FLOAT",
+    "ALTER TABLE stores ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT true",
+    "ALTER TABLE stores ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP",
+    "ALTER TABLE store_sectors ADD COLUMN IF NOT EXISTS floor INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE store_sectors ADD COLUMN IF NOT EXISTS area_m2 FLOAT",
+    "ALTER TABLE store_sectors ADD COLUMN IF NOT EXISTS floor_plan_url TEXT",
+    "ALTER TABLE store_sectors ADD COLUMN IF NOT EXISTS is_critical BOOLEAN NOT NULL DEFAULT false",
+    # device_parameters
+    "ALTER TABLE device_parameters ADD COLUMN IF NOT EXISTS mode_device INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE device_parameters ADD COLUMN IF NOT EXISTS mode_ac INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE device_parameters ADD COLUMN IF NOT EXISTS fan_speed INTEGER NOT NULL DEFAULT 2",
+    "ALTER TABLE device_parameters ADD COLUMN IF NOT EXISTS setpoint_cool INTEGER NOT NULL DEFAULT 24",
+    "ALTER TABLE device_parameters ADD COLUMN IF NOT EXISTS setpoint_heat INTEGER NOT NULL DEFAULT 20",
+    "ALTER TABLE device_parameters ADD COLUMN IF NOT EXISTS eco_cool INTEGER NOT NULL DEFAULT 22",
+    "ALTER TABLE device_parameters ADD COLUMN IF NOT EXISTS eco_heat INTEGER NOT NULL DEFAULT 18",
+    "ALTER TABLE device_parameters ADD COLUMN IF NOT EXISTS synced_at TIMESTAMP",
     # device_status_latest
     "ALTER TABLE device_status_latest ADD COLUMN IF NOT EXISTS accumulated_on_minutes BIGINT",
     "ALTER TABLE device_status_latest ADD COLUMN IF NOT EXISTS accumulated_off_minutes BIGINT",
@@ -29,6 +65,7 @@ _STATEMENTS = [
     # device_readings
     "ALTER TABLE device_readings ADD COLUMN IF NOT EXISTS accumulated_on_minutes BIGINT",
     "ALTER TABLE device_readings ADD COLUMN IF NOT EXISTS accumulated_off_minutes BIGINT",
+    "ALTER TABLE device_readings ADD COLUMN IF NOT EXISTS raw_payload JSONB",
     # sensores externos HTTP (Pró-Digital etc.)
     "ALTER TABLE devices ADD COLUMN IF NOT EXISTS source_url TEXT",
     # raio de influência no mapa térmico
@@ -99,6 +136,70 @@ async def run_migrations() -> None:
     async with engine.begin() as conn:
         for stmt in _STATEMENTS:
             await conn.execute(text(stmt))
+
+
+async def seed_floor_plans() -> None:
+    """Vincula plantas baixas e áreas de setores aos respectivos stores pelo nome."""
+    from app.models.store import Store, StoreSector
+
+    # (padrão_store_name, floor_plan_url, {setor_name: area_m2})
+    _PLANS = [
+        (
+            "MATRIZ",
+            "/floorplans/farma-matriz.png",
+            {},
+        ),
+        (
+            "DOM PEDRO",
+            "/floorplans/farma-dom-pedro.jpg",
+            {
+                "Salão": 132.06,
+                "Medicamentos": 21.62,
+                "Reserva": 16.85,
+                "Copa": 3.79,
+                "Consultório": 3.79,
+                "WC": 2.16,
+                "ADM": 2.16,
+            },
+        ),
+        (
+            "BOULEVARD",
+            "/floorplans/farma-boulevard.jpg",
+            {
+                "Salão": 254.55,        # 146,33 (frente) + 108,22 (fundo)
+                "Medicamentos": 20.29,
+                "Consultório": 2.99,
+                "DML": 1.90,
+                "Copa": 1.96,
+                "WC": 2.73,
+                "ADM": 5.28,            # 3,89 (fundo) + 1,39 (frente)
+                "Reserva": 9.93,
+            },
+        ),
+        (
+            "FLORES",
+            "/floorplans/farma-flores.jpg",
+            {},
+        ),
+    ]
+
+    async with AsyncSessionLocal() as session:
+        for name_pattern, plan_url, sector_areas in _PLANS:
+            stores_result = await session.execute(
+                select(Store).where(Store.name.ilike(f"%{name_pattern}%"))
+            )
+            matched_stores = stores_result.scalars().all()
+            for store in matched_stores:
+                sectors_result = await session.execute(
+                    select(StoreSector).where(StoreSector.store_id == store.id)
+                )
+                sectors = sectors_result.scalars().all()
+                for sector in sectors:
+                    sector.floor_plan_url = plan_url
+                    if sector.name in sector_areas:
+                        sector.area_m2 = sector_areas[sector.name]
+        await session.commit()
+    logger.info("Plantas baixas de setores sincronizadas")
 
 
 async def seed_external_sensors() -> None:

@@ -6,10 +6,11 @@ import { kpiApi, storesApi } from '../api/client'
 import { cn, formatRelativeTime, formatTemp } from '../lib/utils'
 import type { Store } from '../types'
 
-const KIND_OPTIONS = ['TODAS', 'ESCRITORIO', 'LOJA', 'FARMA', 'CD']
+const KIND_OPTIONS = ['TODAS', 'MATRIZ', 'ESCRITORIO', 'LOJA', 'FARMA', 'CD']
 
 const KIND_LABELS: Record<string, string> = {
   TODAS: 'Todas',
+  MATRIZ: 'Matriz',
   ESCRITORIO: 'Escritórios',
   LOJA: 'Lojas',
   FARMA: 'Farma',
@@ -202,5 +203,6 @@ function Metric({ icon, label, value, tone }: { icon?: React.ReactNode; label: s
 
 function kindLabel(kind?: string) {
   if (kind === 'ESCRITORIO') return 'Escritório'
+  if (kind === 'MATRIZ') return 'Matriz'
   return kind || 'LOJA'
 }

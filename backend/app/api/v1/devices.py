@@ -7,7 +7,10 @@ from app.db.session import get_db
 from app.models.device import Device, DeviceParameters, DeviceStatusLatest
 from app.models.store import StoreSector, Store
 from app.brise.client import brise_client
-from app.schemas.device import DeviceControlCommand, DeviceMetadataUpdate, DeviceParametersUpdate, DevicePositionUpdate
+from app.schemas.device import (
+    DeviceControlCommand, DeviceCreate, DeviceMetadataUpdate, DeviceParametersUpdate,
+    DevicePositionUpdate, ExternalSensorCreate,
+)
 from app.cache.device_cache import get_device_status
 from app.security.network import validate_sensor_url
 from app.models.user import User
@@ -113,6 +116,8 @@ async def update_device_parameters(
         raise HTTPException(404, "Dispositivo não encontrado")
     if device.dnd:
         raise HTTPException(409, "Dispositivo em modo DND — ajuste manual bloqueado pelo equipamento")
+    if device.source_url is not None:
+        raise HTTPException(409, "Sensor externo não recebe comandos Brise")
     brise_params = {
         "modeDevice": params.mode_device,
         "modeAC": params.mode_ac,
@@ -153,6 +158,8 @@ async def control_device(
         raise HTTPException(404, "Dispositivo não encontrado")
     if device.dnd:
         raise HTTPException(409, "Dispositivo em modo DND — comando bloqueado pelo equipamento")
+    if device.source_url is not None:
+        raise HTTPException(409, "Sensor externo não recebe comandos Brise")
 
     # Resolve store/sector para enriquecer o audit_log
     sector_store = await db.execute(
@@ -186,19 +193,12 @@ async def control_device(
     brise_params = _to_brise_params(next_params)
     confirmed = await brise_client.put_parameters(device.brise_device_id, brise_params)
 
-    await _persist_device_parameters(device_id, next_params, db)
-
-    if command.action == "power_off":
-        status = await db.get(DeviceStatusLatest, device_id)
-        if status:
-            status.state = False
-            status.status_classification = "DESLIGADO"
-            status.delta_temp = None
-            status.updated_at = datetime.utcnow()
-
     is_temp_action = "temperature" in command.action
+    is_power_action = command.action in {"power_on", "power_off"}
     old_sp = current_params.get("setpoint_cool")
     new_sp = next_params.get("setpoint_cool")
+    old_power = current_params.get("mode_device")
+    new_power = next_params.get("mode_device")
     action_labels = {
         "power_on":         "ligou",
         "power_off":        "desligou",
@@ -206,6 +206,47 @@ async def control_device(
         "temperature_down": f"↓ setpoint {old_sp}°C → {new_sp}°C",
     }
     label = action_labels.get(command.action, command.action)
+
+    from app.cache.redis_client import redis_client as _rc
+    if not confirmed:
+        await log_action(
+            db, "device_control",
+            f"{current_user.name} tentou {label} — {device.name}, mas a Brise API recusou/falhou"
+            + (f" [{_sector.name}]" if _sector else ""),
+            user=current_user,
+            device_id=device_id,
+            device_name=device.name,
+            store_id=_store.id if _store else None,
+            store_name=_store.name if _store else None,
+            sector_name=_sector.name if _sector else None,
+            old_value=str(old_sp) if is_temp_action else (str(old_power) if is_power_action else None),
+            new_value=str(new_sp) if is_temp_action else (str(new_power) if is_power_action else None),
+            extra_data={"action": command.action, "step": command.step, "confirmed": False},
+            severity="HIGH",
+        )
+        await db.commit()
+        await _rc.publish("device.command.failed", {
+            "device_id": str(device_id),
+            "device_name": device.name,
+            "action": command.action,
+            "confirmed": False,
+            "by": current_user.name,
+        })
+        raise HTTPException(503, "Falha ao comunicar com a Brise API")
+
+    await _persist_device_parameters(device_id, next_params, db)
+
+    if command.action in {"power_on", "power_off"}:
+        status = await db.get(DeviceStatusLatest, device_id)
+        if status:
+            status.state = command.action == "power_on"
+            if command.action == "power_off":
+                status.status_classification = "DESLIGADO"
+                status.delta_temp = None
+            elif status.status_classification == "DESLIGADO":
+                status.status_classification = "SEM_LEITURA"
+            status.updated_at = datetime.utcnow()
+
     await log_action(
         db, "device_control",
         f"{current_user.name} {label} — {device.name}" + (f" [{_sector.name}]" if _sector else ""),
@@ -215,25 +256,23 @@ async def control_device(
         store_id=_store.id if _store else None,
         store_name=_store.name if _store else None,
         sector_name=_sector.name if _sector else None,
-        old_value=str(old_sp) if is_temp_action else None,
-        new_value=str(new_sp) if is_temp_action else None,
-        extra_data={"action": command.action, "step": command.step},
+        old_value=str(old_sp) if is_temp_action else (str(old_power) if is_power_action else None),
+        new_value=str(new_sp) if is_temp_action else (str(new_power) if is_power_action else None),
+        extra_data={"action": command.action, "step": command.step, "confirmed": True},
     )
     await db.commit()
 
-    from app.cache.redis_client import redis_client as _rc
-    _event_channel = "device.command.sent" if confirmed else "device.command.failed"
-    await _rc.publish(_event_channel, {
+    await _rc.publish("device.command.sent", {
         "device_id": str(device_id),
         "device_name": device.name,
         "action": command.action,
-        "confirmed": confirmed,
+        "confirmed": True,
         "by": current_user.name,
     })
 
     return {
         "message": "Comando enviado",
-        "confirmed": confirmed,
+        "confirmed": True,
         "parameters": next_params,
     }
 
@@ -321,18 +360,30 @@ def _format_schedule(s) -> dict:
 
 
 @router.post("/{device_id}/sync")
-async def force_sync(device_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def force_sync(
+    device_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_role("EDITOR", "ADMIN")),
+):
     from app.polling.device_poller import poll_device
     device = await db.get(Device, device_id)
     if not device:
         raise HTTPException(404, "Dispositivo não encontrado")
     import asyncio
-    asyncio.create_task(poll_device(device_id, device.brise_device_id, device.is_critical_environment))
+    if device.source_url is not None:
+        from app.polling.external_sensors_poller import _poll_one
+        asyncio.create_task(_poll_one(device))
+    else:
+        asyncio.create_task(poll_device(device_id, device.brise_device_id, device.is_critical_environment))
     return {"message": "Sincronização iniciada"}
 
 @router.post("", status_code=201)
-async def create_device(data: dict, db: AsyncSession = Depends(get_db)):
-    device = Device(**data)
+async def create_device(
+    data: DeviceCreate,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_role("ADMIN")),
+):
+    device = Device(**data.model_dump())
     db.add(device)
     await db.commit()
     await db.refresh(device)
@@ -441,8 +492,9 @@ async def _get_device_parameters_row(device_id: uuid.UUID, db: AsyncSession) -> 
 
 @router.post("/external-sensor")
 async def register_external_sensor(
-    payload: dict,
+    payload: ExternalSensorCreate,
     db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_role("ADMIN")),
 ):
     """
     Cadastra um sensor externo (HTTP/JSON) como dispositivo virtual.
@@ -454,8 +506,8 @@ async def register_external_sensor(
         setpoint_cool   int  opcional    — setpoint padrão (padrão: 24)
         is_critical     bool opcional    — ambiente crítico (padrão: false)
     """
-    name = (payload.get("name") or "").strip()
-    source_url = (payload.get("source_url") or "").strip().rstrip("/")
+    name = payload.name.strip()
+    source_url = payload.source_url.strip().rstrip("/")
     if not name or not source_url:
         raise HTTPException(400, "name e source_url são obrigatórios")
 
@@ -475,24 +527,22 @@ async def register_external_sensor(
         raise HTTPException(409, f"Sensor já cadastrado: {ext_id}")
 
     sector_id = None
-    if payload.get("sector_id"):
-        try:
-            sector_id = uuid.UUID(payload["sector_id"])
-        except ValueError:
-            raise HTTPException(400, "sector_id inválido")
+    if payload.sector_id:
+        sector_id = payload.sector_id
 
     device = Device(
         brise_device_id=ext_id,
         sector_id=sector_id,
         name=name,
         source_url=source_url,
-        is_critical_environment=bool(payload.get("is_critical", False)),
+        is_critical_environment=payload.is_critical,
+        influence_radius_m=payload.influence_radius_m,
         active=True,
     )
     db.add(device)
     await db.flush()
 
-    setpoint = int(payload.get("setpoint_cool") or 24)
+    setpoint = payload.setpoint_cool
     db.add(DeviceParameters(device_id=device.id, setpoint_cool=setpoint))
 
     await db.commit()

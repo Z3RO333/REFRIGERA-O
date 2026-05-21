@@ -13,7 +13,7 @@ from app.models import custom_zone as _custom_zone_models  # noqa: F401
 from app.api import websocket as ws_router
 from app.api.websocket import start_redis_listener
 from app.db.session import engine, Base
-from app.db.migrations import run_migrations, seed_external_sensors
+from app.db.migrations import run_migrations, seed_external_sensors, seed_floor_plans
 from app.cache.redis_client import redis_client
 from app.config import settings
 from app.polling.scheduler import start_scheduler, stop_scheduler
@@ -47,6 +47,7 @@ async def lifespan(app: FastAPI):
         await conn.run_sync(Base.metadata.create_all)
     await run_migrations()
     await seed_external_sensors()
+    await seed_floor_plans()
     await start_scheduler()
     await start_redis_listener()
     yield

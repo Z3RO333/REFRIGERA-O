@@ -56,6 +56,7 @@ async def poll_device(
             )
             consecutive_count = (status_row.consecutive_readings_count or 0) if status_row else 0
             current_status = status_row.status_classification if status_row else None
+            prev_state = status_row.state if status_row else None
 
             if variables:
                 prev_status = current_status
@@ -97,6 +98,15 @@ async def poll_device(
                     zone_ideal_max=zone_ideal_max,
                 )
                 consecutive_count = 0
+
+            if variables and prev_state is not None and variables.state != prev_state:
+                cycling_key = f"device:cycling:{device_id}"
+                count = await redis_client.incr(cycling_key)
+                if count == 1:
+                    await redis_client.expire(cycling_key, 3600)
+                if count > 10:
+                    status = "COMPRESSOR_CYCLING"
+                    logger.warning("Device %s detectado como CICLANDO (%d trocas/hora)", device_id, count)
 
             on_min  = variables.ON  if variables else None
             off_min = variables.OFF if variables else None
@@ -149,19 +159,6 @@ async def poll_device(
                     updated_at=datetime.utcnow(),
                 )
                 session.add(new_status)
-
-            # Detecção de compressor ciclando (troca de estado excessiva)
-            if variables and status_row and variables.state != status_row.state:
-                cycling_key = f"device:cycling:{device_id}"
-                # Incrementa contador de trocas de estado (expira em 1h)
-                count = await redis_client.incr(cycling_key)
-                if count == 1:
-                    await redis_client.expire(cycling_key, 3600)
-
-                # Se mudou de estado mais de 10 vezes em 1 hora, força status de CICLANDO
-                if count > 10:
-                    status = "COMPRESSOR_CYCLING"
-                    logger.warning(f"Device {device_id} detectado como CICLANDO ({count} trocas/hora)")
 
             alert_data = generate_alert_if_needed(
                 device_id=device_id,

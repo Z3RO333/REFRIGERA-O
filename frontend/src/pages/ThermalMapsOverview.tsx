@@ -68,7 +68,7 @@ function ThermalStoreCard({ store }: { store: Store }) {
         <div className="min-w-0">
           <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase text-blue-500">
             <Thermometer className="h-4 w-4" />
-            {store.kind || 'LOJA'}
+            {store.kind === 'ESCRITORIO' ? 'Escritório' : store.kind === 'MATRIZ' ? 'Matriz' : store.kind || 'LOJA'}
           </div>
           <h2 className="truncate text-base font-semibold text-gray-900 group-hover:text-blue-600 dark:text-white dark:group-hover:text-blue-400">
             {store.name}

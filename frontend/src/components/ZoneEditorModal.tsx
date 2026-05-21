@@ -31,9 +31,9 @@ export default function ZoneEditorModal({ storeId, editZone, onClose }: Props) {
     enabled: !!storeId,
   })
 
-  // Filtra sensores externos e mostra só ACs reais
+  // Filtra sensores externos e mostra ACs reais, inclusive desligados.
   const actionableDevices = useMemo(
-    () => devices.filter(d => !d.is_external_sensor && d.status !== 'DESLIGADO'),
+    () => devices.filter(d => !d.is_external_sensor),
     [devices]
   )
 

@@ -17,6 +17,7 @@ from app.models.zone import ZoneAction, ZoneAutomation
 from app.models.user import User
 from app.api.v1.auth import get_current_user, require_role
 from app.services.audit_service import log_action
+from app.schemas.zone import CustomZoneCreate, CustomZoneUpdate, ZoneGuardrailsUpdate, ZoneModeUpdate
 from app.services.zone_controller import (
     KILL_SWITCH_KEY,
     ZONE_COOLDOWN_SECONDS,
@@ -230,7 +231,7 @@ async def list_zones(store_id: uuid.UUID, db: AsyncSession = Depends(get_db)) ->
 async def set_zone_mode(
     store_id: uuid.UUID,
     zone_key: str,
-    data: dict,
+    data: ZoneModeUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> dict:
@@ -243,7 +244,7 @@ async def set_zone_mode(
     if current_user.role == "VIEWER":
         raise HTTPException(403, "Visualizadores não podem alterar o modo de automação.")
 
-    mode = data.get("mode", "manual")
+    mode = data.mode
 
     if current_user.role == "EDITOR" and mode not in _EDITOR_MODES:
         raise HTTPException(
@@ -260,28 +261,24 @@ async def set_zone_mode(
     old_mode = automation.mode
     automation.mode = mode
 
-    if "setpoint_min" in data:
-        automation.setpoint_min = int(data["setpoint_min"])
-    if "setpoint_max" in data:
-        automation.setpoint_max = int(data["setpoint_max"])
-    if "max_daily_adjustments" in data:
-        automation.max_daily_adjustments = int(data["max_daily_adjustments"])
-    if "priority" in data and data["priority"] in {"conforto", "economia", "estabilidade", "manutencao"}:
-        automation.priority = data["priority"]
+    fields_set = data.model_fields_set
+    new_min = data.setpoint_min if "setpoint_min" in fields_set else automation.setpoint_min
+    new_max = data.setpoint_max if "setpoint_max" in fields_set else automation.setpoint_max
+    if new_min >= new_max:
+        raise HTTPException(400, "setpoint_min deve ser menor que setpoint_max")
+    automation.setpoint_min = new_min
+    automation.setpoint_max = new_max
+    if "max_daily_adjustments" in fields_set and data.max_daily_adjustments is not None:
+        automation.max_daily_adjustments = data.max_daily_adjustments
+    if data.priority is not None:
+        automation.priority = data.priority
 
     # Campos de manutenção
     if mode == "maintenance":
-        automation.blocked_reason = data.get("blocked_reason") or "Manutenção solicitada."
+        automation.blocked_reason = data.blocked_reason or "Manutenção solicitada."
         automation.blocked_by_user_name = current_user.name
         automation.blocked_at = datetime.utcnow()
-        raw_until = data.get("blocked_until")
-        if raw_until:
-            try:
-                automation.blocked_until = datetime.fromisoformat(raw_until.replace("Z", "+00:00")).replace(tzinfo=None)
-            except ValueError:
-                raise HTTPException(400, "blocked_until com formato inválido. Use ISO 8601.")
-        else:
-            automation.blocked_until = None
+        automation.blocked_until = data.blocked_until.replace(tzinfo=None) if data.blocked_until else None
     else:
         # Saindo de manutenção: limpa os campos de bloqueio
         if old_mode == "maintenance":
@@ -317,7 +314,7 @@ async def set_zone_mode(
     }
     await redis_client.publish("zone.automation.mode.changed", event_payload)
 
-    return {"zone_key": zone_key, "mode": mode}
+    return {"zone_key": zone_key, "mode": mode, "priority": automation.priority}
 
 
 @router.get("/{store_id}/{zone_key}/history")
@@ -361,6 +358,15 @@ async def trigger_zone(
         raise HTTPException(500, f"Erro ao avaliar zona: {exc}")
 
     last_action = await get_zone_last_action(store_id, zone_key, db)
+    await log_action(
+        db, "zone_trigger",
+        f"{current_user.name} disparou avaliação da zona '{zone_cfg.label}'",
+        user=current_user,
+        store_id=store_id,
+        zone_key=zone_key,
+        extra_data={"last_action_id": str(last_action.id) if last_action else None},
+    )
+    await db.commit()
     return {
         "triggered": True,
         "last_action": _action_dict(last_action) if last_action else None,
@@ -371,7 +377,7 @@ async def trigger_zone(
 async def update_zone_guardrails(
     store_id: uuid.UUID,
     zone_key: str,
-    data: dict,
+    data: ZoneGuardrailsUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role("ADMIN")),
 ) -> dict:
@@ -390,22 +396,30 @@ async def update_zone_guardrails(
         except (ValueError, IndexError):
             raise HTTPException(400, f"Horário inválido '{val}'. Use HH:MM (ex: 07:30)")
 
-    if "allowed_start_time" in data:
-        h, m = _parse_time(data["allowed_start_time"])
+    if data.allowed_start_time is not None:
+        h, m = _parse_time(data.allowed_start_time)
         automation.allowed_start_hour, automation.allowed_start_minute = h, m
 
-    if "allowed_end_time" in data:
-        h, m = _parse_time(data["allowed_end_time"])
+    if data.allowed_end_time is not None:
+        h, m = _parse_time(data.allowed_end_time)
         automation.allowed_end_hour, automation.allowed_end_minute = h, m
 
-    if "is_critical_zone" in data:
-        automation.is_critical_zone = bool(data["is_critical_zone"])
+    if data.is_critical_zone is not None:
+        automation.is_critical_zone = data.is_critical_zone
 
     start_total = automation.allowed_start_hour * 60 + automation.allowed_start_minute
     end_total   = automation.allowed_end_hour   * 60 + automation.allowed_end_minute
     if start_total >= end_total:
         raise HTTPException(400, "Horário de início deve ser anterior ao de fim")
 
+    await log_action(
+        db, "zone_guardrails_change",
+        f"Guardrails da zona '{zone_key}' atualizados por {current_user.name}",
+        user=current_user,
+        store_id=store_id,
+        zone_key=zone_key,
+        extra_data=data.model_dump(exclude_unset=True),
+    )
     await db.commit()
     return {
         "zone_key": zone_key,
@@ -479,32 +493,16 @@ async def list_custom_zones(store_id: uuid.UUID, db: AsyncSession = Depends(get_
 @router.post("/{store_id}/custom")
 async def create_custom_zone(
     store_id: uuid.UUID,
-    data: dict,
+    data: CustomZoneCreate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role("EDITOR", "ADMIN")),
 ) -> dict:
     """Cria zona personalizada e sua automação inicial."""
-    name = str(data.get("name", "")).strip()
-    if not name:
-        raise HTTPException(400, "Nome da zona é obrigatório")
-
-    ideal_min = int(data.get("ideal_min", 20))
-    ideal_max = int(data.get("ideal_max", 24))
-    if ideal_min >= ideal_max:
-        raise HTTPException(400, "ideal_min deve ser menor que ideal_max")
-
-    zone_type = str(data.get("zone_type", "ABERTA"))
-    if zone_type not in ("ABERTA", "SALA_FECHADA"):
-        raise HTTPException(400, "zone_type inválido")
-
-    device_ids_raw: list[str] = data.get("device_ids", [])
-    if not device_ids_raw:
-        raise HTTPException(400, "Selecione pelo menos um equipamento")
-
-    try:
-        device_ids = [uuid.UUID(d) for d in device_ids_raw]
-    except ValueError:
-        raise HTTPException(400, "device_ids inválidos")
+    name = data.name.strip()
+    ideal_min = data.ideal_min
+    ideal_max = data.ideal_max
+    zone_type = data.zone_type
+    device_ids = data.device_ids
 
     # Valida que os devices pertencem à loja
     valid = await db.execute(
@@ -513,15 +511,8 @@ async def create_custom_zone(
         .where(StoreSector.store_id == store_id, Device.id.in_(device_ids))
     )
     valid_ids = {r[0] for r in valid.all()}
-    # Inclui também devices sem setor mas que estão na loja (via DeviceStatusLatest join)
-    if not valid_ids:
-        # Fallback: aceita se device existe e está ativo
-        fallback = await db.execute(
-            select(Device.id).where(Device.active == True, Device.id.in_(device_ids))
-        )
-        valid_ids = {r[0] for r in fallback.all()}
-    if not valid_ids:
-        raise HTTPException(400, "Nenhum dos equipamentos informados é válido para esta loja")
+    if valid_ids != set(device_ids):
+        raise HTTPException(400, "Todos os equipamentos da zona devem pertencer à loja informada")
 
     zone_key = _zone_key_from_name(name)
     cz = CustomZone(
@@ -543,7 +534,7 @@ async def create_custom_zone(
     automation = ZoneAutomation(
         store_id=store_id,
         zone_key=zone_key,
-        mode=str(data.get("mode", "manual")),
+        mode=data.mode,
         setpoint_min=ideal_min - 2,
         setpoint_max=ideal_max + 2,
     )
@@ -558,7 +549,7 @@ async def create_custom_zone(
 async def update_custom_zone(
     store_id: uuid.UUID,
     zone_key: str,
-    data: dict,
+    data: CustomZoneUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role("EDITOR", "ADMIN")),
 ) -> dict:
@@ -570,22 +561,28 @@ async def update_custom_zone(
     if not cz:
         raise HTTPException(404, "Zona personalizada não encontrada")
 
-    if "name" in data and str(data["name"]).strip():
-        cz.name = str(data["name"]).strip()
-    if "ideal_min" in data:
-        cz.ideal_min = int(data["ideal_min"])
-    if "ideal_max" in data:
-        cz.ideal_max = int(data["ideal_max"])
-    if "zone_type" in data and data["zone_type"] in ("ABERTA", "SALA_FECHADA"):
-        cz.zone_type = data["zone_type"]
+    fields_set = data.model_fields_set
+    if "name" in fields_set and data.name is not None:
+        cz.name = data.name.strip()
+    if "ideal_min" in fields_set and data.ideal_min is not None:
+        cz.ideal_min = data.ideal_min
+    if "ideal_max" in fields_set and data.ideal_max is not None:
+        cz.ideal_max = data.ideal_max
+    if cz.ideal_min >= cz.ideal_max:
+        raise HTTPException(400, "ideal_min deve ser menor que ideal_max")
+    if "zone_type" in fields_set and data.zone_type is not None:
+        cz.zone_type = data.zone_type
 
-    if "device_ids" in data:
-        try:
-            new_ids = [uuid.UUID(d) for d in data["device_ids"]]
-        except ValueError:
-            raise HTTPException(400, "device_ids inválidos")
-        if not new_ids:
-            raise HTTPException(400, "Selecione pelo menos um equipamento")
+    if "device_ids" in fields_set and data.device_ids is not None:
+        new_ids = data.device_ids
+        valid = await db.execute(
+            select(Device.id)
+            .join(StoreSector, Device.sector_id == StoreSector.id)
+            .where(StoreSector.store_id == store_id, Device.id.in_(new_ids))
+        )
+        valid_ids = {r[0] for r in valid.all()}
+        if valid_ids != set(new_ids):
+            raise HTTPException(400, "Todos os equipamentos da zona devem pertencer à loja informada")
         await db.execute(
             CustomZoneDevice.__table__.delete().where(CustomZoneDevice.zone_id == cz.id)
         )

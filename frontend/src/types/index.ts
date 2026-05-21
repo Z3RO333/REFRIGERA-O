@@ -47,7 +47,7 @@ export interface Store {
   name: string
   code: string
   city: string | null
-  kind?: 'LOJA' | 'FARMA' | 'CD' | 'ESCRITORIO'
+  kind?: 'LOJA' | 'FARMA' | 'CD' | 'ESCRITORIO' | 'MATRIZ'
   device_count?: number
   last_reading_at?: string | null
 }
@@ -277,6 +277,7 @@ export type LogEventType =
   | 'guardrail_block'
   | 'kill_switch'
   | 'zone_trigger'
+  | 'zone_guardrails_change'
   | 'alert_ack'
   | 'alert_resolve'
 

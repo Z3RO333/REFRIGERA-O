@@ -143,9 +143,16 @@ export default function ThermalComfortMap() {
 
   const handleKillSwitch = async (activate: boolean) => {
     setTogglingKillSwitch(true)
-    await automationApi.setKillSwitch(activate).finally(() => setTogglingKillSwitch(false))
-    await refetchAutoStatus()
-    await refetchZones()
+    setActionMessage('')
+    try {
+      await automationApi.setKillSwitch(activate)
+      await refetchAutoStatus()
+      await refetchZones()
+    } catch {
+      setActionMessage('Não foi possível alterar o kill switch.')
+    } finally {
+      setTogglingKillSwitch(false)
+    }
   }
 
   const floorPlanUrl = sectors.find((s: Sector) => s.floor === selectedFloor && s.floor_plan_url)?.floor_plan_url ?? null
@@ -298,8 +305,14 @@ export default function ThermalComfortMap() {
 
   const handleModeChange = async (mode: ZoneMode) => {
     if (!storeId || !activeZoneKey) return
-    await zonesApi.setMode(storeId, activeZoneKey, { mode })
-    refetchZones()
+    setActionMessage('Alterando modo da zona...')
+    try {
+      await zonesApi.setMode(storeId, activeZoneKey, { mode })
+      setActionMessage('Modo da zona atualizado.')
+      await refetchZones()
+    } catch {
+      setActionMessage('Não foi possível alterar o modo da zona.')
+    }
   }
 
   const handleTrigger = async () => {

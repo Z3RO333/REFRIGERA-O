@@ -68,6 +68,7 @@ export default function Dashboard() {
   const farmaCount = activeStores.filter((store: Store) => store.kind === 'FARMA').length
   const storeCount = activeStores.filter((store: Store) => store.kind === 'LOJA').length
   const officeCount = activeStores.filter((store: Store) => store.kind === 'ESCRITORIO').length
+  const matrizCount = activeStores.filter((store: Store) => store.kind === 'MATRIZ').length
 
   return (
     <div className="space-y-6">
@@ -75,7 +76,7 @@ export default function Dashboard() {
         <div>
           <h1 className="text-lg font-semibold text-gray-900 dark:text-white">Cockpit de Refrigeração</h1>
           <p className="text-xs text-gray-500">
-            {selectedStore ? `${unitLabel} • ${kindLabel(selectedStore.kind)} • ${selectedStore.device_count ?? 0} equipamentos` : `${storeCount} lojas • ${officeCount} escritórios • ${farmaCount} farmas • ${cdCount} CDs • ${kpis?.total_devices ?? 0} equipamentos monitorados`}
+            {selectedStore ? `${unitLabel} • ${kindLabel(selectedStore.kind)} • ${selectedStore.device_count ?? 0} equipamentos` : `${matrizCount > 0 ? `${matrizCount} matriz • ` : ''}${storeCount} lojas • ${officeCount} escritórios • ${farmaCount} farmas • ${cdCount > 0 ? `${cdCount} CDs • ` : ''}${kpis?.total_devices ?? 0} equipamentos monitorados`}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -323,5 +324,6 @@ function StoreRow({
 
 function kindLabel(kind?: string) {
   if (kind === 'ESCRITORIO') return 'Escritório'
+  if (kind === 'MATRIZ') return 'Matriz'
   return kind || 'LOJA'
 }

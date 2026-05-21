@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 # Cooldown entre emails do mesmo device (evita spam)
 EMAIL_COOLDOWN_SECONDS = 3600  # 1 hora
+AI_ANALYSIS_LOCK_SECONDS = 900  # evita análises duplicadas por trigger/polling concorrente
 
 # Statuses que merecem análise
 ANOMALOUS_STATUSES = {"ATENÇÃO", "CRÍTICO", "BAIXA_EFICIÊNCIA", "SEM_LEITURA", "DESLIGADO"}
@@ -29,6 +30,11 @@ ANOMALOUS_STATUSES = {"ATENÇÃO", "CRÍTICO", "BAIXA_EFICIÊNCIA", "SEM_LEITURA
 async def run_ai_analysis() -> None:
     """Ponto de entrada do job — chamado após poll_all_devices."""
     if not settings.ai_analysis_enabled:
+        return
+
+    lock_key = "ai:analysis:lock"
+    if not await redis_client.acquire_lock(lock_key, ttl=AI_ANALYSIS_LOCK_SECONDS):
+        logger.debug("AI analysis: execução ignorada, lock ativo")
         return
 
     from app.ai.analyzer import analyze_anomalies
@@ -68,6 +74,8 @@ async def run_ai_analysis() -> None:
         )
     except Exception as exc:
         logger.error("Erro no job de análise de IA: %s", exc, exc_info=True)
+    finally:
+        await redis_client.release_lock(lock_key)
 
 
 from sqlalchemy import select, func

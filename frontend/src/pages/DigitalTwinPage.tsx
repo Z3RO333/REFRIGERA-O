@@ -311,6 +311,7 @@ export default function DigitalTwinPage() {
   const { name: userName } = useAuthStore()
   const [storeId, setStoreId] = useState<string>('')
   const [pendingTrigger, setPendingTrigger] = useState<string | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
 
   const { data: stores } = useQuery<Store[]>({
     queryKey: ['stores'],
@@ -365,22 +366,36 @@ export default function DigitalTwinPage() {
   const killSwitchMutation = useMutation({
     mutationFn: (active: boolean) =>
       automationApi.setKillSwitch(active, userName ?? 'operador'),
+    onMutate: () => setActionError(null),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['automation-status'] }),
+    onError: (err: any) => {
+      setActionError(err?.response?.data?.detail ?? 'Não foi possível alterar o kill switch.')
+    },
   })
 
   // Mode change
   const modeChangeMutation = useMutation({
     mutationFn: ({ zoneKey, mode }: { zoneKey: string; mode: string }) =>
       zonesApi.setMode(selectedStoreId!, zoneKey, { mode }),
+    onMutate: () => setActionError(null),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['zones-automation', selectedStoreId] })
+    },
+    onError: (err: any) => {
+      setActionError(err?.response?.data?.detail ?? 'Não foi possível alterar o modo da zona.')
     },
   })
 
   // Zone trigger
   const triggerMutation = useMutation({
     mutationFn: (zoneKey: string) => zonesApi.trigger(selectedStoreId!, zoneKey),
-    onMutate: (zoneKey) => setPendingTrigger(zoneKey),
+    onMutate: (zoneKey) => {
+      setActionError(null)
+      setPendingTrigger(zoneKey)
+    },
+    onError: (err: any) => {
+      setActionError(err?.response?.data?.detail ?? 'Não foi possível disparar a avaliação da zona.')
+    },
     onSettled: () => {
       setPendingTrigger(null)
       setTimeout(() => {
@@ -443,6 +458,13 @@ export default function DigitalTwinPage() {
           </div>
         </div>
       </div>
+
+      {actionError && (
+        <div className="flex items-center gap-2 px-6 py-2 bg-red-50 dark:bg-red-950/40 border-b border-red-200 dark:border-red-800">
+          <AlertTriangle className="h-4 w-4 text-red-600 shrink-0" />
+          <span className="text-sm text-red-700 dark:text-red-300 font-medium">{actionError}</span>
+        </div>
+      )}
 
       {/* Kill switch banner */}
       {ks && (

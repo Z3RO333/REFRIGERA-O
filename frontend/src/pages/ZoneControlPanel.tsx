@@ -347,6 +347,7 @@ export default function ZoneControlPanel() {
   const [triggeringKey, setTriggeringKey] = useState<string | null>(null)
   const [editorOpen, setEditorOpen] = useState(false)
   const [editingZone, setEditingZone] = useState<CustomZone | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
 
   // Lojas disponíveis
   const { data: stores = [] } = useQuery<Store[]>({
@@ -456,9 +457,13 @@ export default function ZoneControlPanel() {
   // Mutação: deletar zona customizada
   const deleteMutation = useMutation({
     mutationFn: (zoneKey: string) => customZonesApi.delete(storeId, zoneKey),
+    onMutate: () => setActionError(null),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['custom-zones', storeId] })
       qc.invalidateQueries({ queryKey: ['zones-automation', storeId] })
+    },
+    onError: (err: any) => {
+      setActionError(err?.response?.data?.detail ?? 'Não foi possível remover a zona.')
     },
   })
 
@@ -466,20 +471,28 @@ export default function ZoneControlPanel() {
   const modeMutation = useMutation({
     mutationFn: ({ zoneKey, mode, priority }: { zoneKey: string; mode: string; priority?: string }) =>
       zonesApi.setMode(storeId, zoneKey, { mode, ...(priority ? { priority } : {}) }),
+    onMutate: () => setActionError(null),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['zones-automation', storeId] })
+    },
+    onError: (err: any) => {
+      setActionError(err?.response?.data?.detail ?? 'Não foi possível alterar o modo da zona.')
     },
   })
 
   // Mutação: trigger manual
   const triggerMutation = useMutation({
     mutationFn: (zoneKey: string) => zonesApi.trigger(storeId, zoneKey),
+    onMutate: () => setActionError(null),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['zones-automation', storeId] })
       qc.invalidateQueries({ queryKey: ['digital-twin', storeId] })
       setTriggeringKey(null)
     },
-    onError: () => setTriggeringKey(null),
+    onError: (err: any) => {
+      setActionError(err?.response?.data?.detail ?? 'Não foi possível disparar a avaliação da zona.')
+      setTriggeringKey(null)
+    },
   })
 
   const isLoading = autoLoading || twinLoading
@@ -539,6 +552,13 @@ export default function ZoneControlPanel() {
           </button>
         </div>
       </div>
+
+      {actionError && (
+        <div className="flex items-start gap-3 px-4 py-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800/60 rounded-xl">
+          <AlertTriangle className="h-5 w-5 text-red-600 dark:text-red-400 shrink-0 mt-0.5" />
+          <p className="text-sm text-red-700 dark:text-red-300">{actionError}</p>
+        </div>
+      )}
 
       {/* ── Banner kill switch ── */}
       {killSwitchActive && (
