@@ -128,6 +128,7 @@ export interface HistoryStats {
 }
 
 export type ZoneMode = 'manual' | 'suggestion' | 'semi' | 'auto' | 'maintenance'
+export type ZonePriority = 'conforto' | 'economia' | 'estabilidade' | 'manutencao'
 export type ZoneType = 'ABERTA' | 'SALA_FECHADA'
 export type ZoneActionStatus =
   | 'suggestion'
@@ -184,6 +185,7 @@ export interface ZoneAutomationState {
   guardrail_active: boolean
   guardrail_reason: string | null
   reading_confidence: number
+  priority: ZonePriority
   // manutenção
   blocked_reason: string | null
   blocked_until: string | null
@@ -241,6 +243,7 @@ export interface DigitalTwinZone {
   predicted_temp_60m: number | null
   risk_level: RiskLevel
   confidence: number
+  early_warning: boolean
   contributing_devices: DigitalTwinDevice[]
   recommended_action: string
   explanation: string
@@ -274,6 +277,8 @@ export type LogEventType =
   | 'guardrail_block'
   | 'kill_switch'
   | 'zone_trigger'
+  | 'alert_ack'
+  | 'alert_resolve'
 
 export type LogOrigin = 'user' | 'ai' | 'automation' | 'system'
 
@@ -318,6 +323,8 @@ export interface LogKPIs {
   ai_high: number
   mode_changes: number
   kill_switches: number
+  alert_acks: number
+  alert_resolves: number
   avg_recovery_minutes: number | null
   top_zones: { zone_key: string; zone_label: string; count: number }[]
   top_devices: { device_id: string; device_name: string; count: number }[]
@@ -349,6 +356,41 @@ export interface AIStatus {
   ollama_model: string
   ollama_available: boolean
   email_enabled: boolean
+}
+
+export type AISeverity = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'
+
+export interface ZoneAIAnalysis {
+  zone_key: string
+  zone_label: string
+  store_id: string
+  issue_detected: boolean
+  severity: AISeverity | null
+  root_cause: string
+  diagnosis: string
+  recommended_action: string
+  urgency_hours: number
+  analysis_source: 'llm' | 'fallback' | 'deterministic'
+  devices_analyzed: number
+  zone_status: string
+  trend_c_per_hour: number | null
+  analyzed_at: string
+}
+
+export interface CustomZone {
+  id: string
+  store_id: string
+  zone_key: string
+  name: string
+  zone_type: ZoneType
+  ideal_min: number
+  ideal_max: number
+  created_by_name: string | null
+  device_ids: string[]
+  current_temp: number | null
+  temp_status: string
+  created_at: string
+  is_custom: true
 }
 
 export interface MaintenanceItem {

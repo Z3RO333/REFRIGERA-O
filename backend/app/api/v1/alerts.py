@@ -1,27 +1,16 @@
 import uuid
 from datetime import datetime
-from typing import Optional
-from fastapi import APIRouter, Depends, Header, Query
-from jose import jwt, JWTError
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.config import settings
 from app.db.session import get_db
 from app.models.alert import Alert
 from app.models.device import Device
 from app.models.store import StoreSector, Store
+from app.models.user import User
 from app.schemas.alert import AlertAck
-
-
-def _extract_user_email(authorization: Optional[str]) -> str:
-    if not authorization or not authorization.startswith("Bearer "):
-        return "operator"
-    try:
-        token = authorization.removeprefix("Bearer ")
-        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
-        return payload.get("email") or "operator"
-    except JWTError:
-        return "operator"
+from app.api.v1.auth import require_role
+from app.services.audit_service import log_action
 
 router = APIRouter()
 
@@ -81,27 +70,45 @@ async def acknowledge_alert(
     alert_id: uuid.UUID,
     body: AlertAck,
     db: AsyncSession = Depends(get_db),
-    authorization: Optional[str] = Header(None),
+    current_user: User = Depends(require_role("EDITOR", "ADMIN")),
 ):
+    from fastapi import HTTPException
     alert = await db.get(Alert, alert_id)
     if not alert:
-        from fastapi import HTTPException
         raise HTTPException(404, "Alerta não encontrado")
     alert.status = "ACK"
     alert.acked_at = datetime.utcnow()
-    alert.acked_by = _extract_user_email(authorization)
+    alert.acked_by = current_user.email
     if body.notes:
         alert.notes = body.notes
+    await log_action(
+        db, "alert_ack",
+        f"{current_user.name} reconheceu alerta {alert.alert_type} — {alert.severity}",
+        user=current_user,
+        device_id=alert.device_id,
+        extra_data={"alert_id": str(alert_id), "notes": body.notes},
+    )
     await db.commit()
     return {"message": "Alerta reconhecido"}
 
 @router.post("/{alert_id}/resolve")
-async def resolve_alert(alert_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def resolve_alert(
+    alert_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role("EDITOR", "ADMIN")),
+):
+    from fastapi import HTTPException
     alert = await db.get(Alert, alert_id)
     if not alert:
-        from fastapi import HTTPException
         raise HTTPException(404, "Alerta não encontrado")
     alert.status = "RESOLVED"
     alert.resolved_at = datetime.utcnow()
+    await log_action(
+        db, "alert_resolve",
+        f"{current_user.name} resolveu alerta {alert.alert_type} — {alert.severity}",
+        user=current_user,
+        device_id=alert.device_id,
+        extra_data={"alert_id": str(alert_id)},
+    )
     await db.commit()
     return {"message": "Alerta resolvido"}

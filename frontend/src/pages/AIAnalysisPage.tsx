@@ -2,10 +2,10 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Activity, AlertTriangle, Bot, CheckCircle, ChevronRight, Clock,
-  RefreshCw, Thermometer, Wifi, WifiOff, Wrench, Zap,
+  Cpu, RefreshCw, Thermometer, TrendingUp, Wifi, WifiOff, Wrench, Zap,
 } from 'lucide-react'
 import { aiApi } from '../api/client'
-import type { AIAnalysis, AIStatus } from '../types'
+import type { AIAnalysis, AIStatus, ZoneAIAnalysis } from '../types'
 import { cn, formatRelativeTime } from '../lib/utils'
 
 const SEV_META: Record<string, { label: string; bg: string; text: string; border: string; badge: string }> = {
@@ -102,8 +102,90 @@ function Section({ icon, title, children }: { icon: React.ReactNode; title: stri
   )
 }
 
+function ZoneAnalysisCard({ z, onTrigger, isPending }: {
+  z: ZoneAIAnalysis
+  onTrigger: (storeId: string, zoneKey: string) => void
+  isPending: boolean
+}) {
+  const m = SEV_META[z.severity || 'LOW']
+  const urg = URGENCY_LABEL(z.urgency_hours)
+  const [expanded, setExpanded] = useState(false)
+
+  return (
+    <div className={cn('rounded-xl border p-4 space-y-3 transition-shadow hover:shadow-md', m.bg, m.border)}>
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-1.5 mb-0.5 flex-wrap">
+            <span className={cn('rounded px-1.5 py-0.5 text-xs font-bold', m.badge)}>{m.label}</span>
+            <span className="rounded bg-indigo-100 dark:bg-indigo-900/30 px-1.5 py-0.5 text-xs font-medium text-indigo-700 dark:text-indigo-300">
+              Zona
+            </span>
+            <span className={cn('rounded px-1.5 py-0.5 text-xs font-medium',
+              z.analysis_source === 'llm'
+                ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300'
+                : 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400'
+            )}>
+              {z.analysis_source === 'llm' ? 'IA' : z.analysis_source === 'fallback' ? 'Regras' : 'Determinístico'}
+            </span>
+          </div>
+          <p className="font-semibold text-gray-900 dark:text-white truncate">{z.zone_label}</p>
+          <p className="text-xs text-gray-500">{z.devices_analyzed} dispositivo(s) · status {z.zone_status}</p>
+        </div>
+        <div className="shrink-0 text-right space-y-0.5">
+          {z.trend_c_per_hour !== null && (
+            <div className={cn('flex items-center gap-1 text-xs justify-end',
+              (z.trend_c_per_hour ?? 0) > 1 ? 'text-red-600' : (z.trend_c_per_hour ?? 0) < -1 ? 'text-green-600' : 'text-gray-500'
+            )}>
+              <TrendingUp className="h-3 w-3" />
+              {z.trend_c_per_hour !== null ? `${z.trend_c_per_hour > 0 ? '+' : ''}${z.trend_c_per_hour.toFixed(1)}°C/h` : '—'}
+            </div>
+          )}
+          <div className="flex items-center gap-1 text-xs text-gray-400 justify-end">
+            <Clock className="h-3 w-3" />
+            <span className={urg.cls}>{urg.label}</span>
+          </div>
+        </div>
+      </div>
+
+      <p className="text-xs text-gray-700 dark:text-gray-300 line-clamp-2">{z.diagnosis || z.root_cause}</p>
+
+      {expanded && (
+        <div className="space-y-2 pt-1 border-t border-gray-200 dark:border-gray-700">
+          <div>
+            <p className="text-xs font-semibold text-gray-500 uppercase mb-0.5">Causa raiz</p>
+            <p className="text-xs text-gray-700 dark:text-gray-300">{z.root_cause}</p>
+          </div>
+          <div>
+            <p className="text-xs font-semibold text-gray-500 uppercase mb-0.5">Ação recomendada</p>
+            <p className="text-xs font-medium text-gray-800 dark:text-gray-200">{z.recommended_action}</p>
+          </div>
+          <p className="text-xs text-gray-400">Analisado: {formatRelativeTime(z.analyzed_at)}</p>
+        </div>
+      )}
+
+      <div className="flex items-center justify-between pt-1">
+        <button
+          onClick={() => setExpanded(e => !e)}
+          className={cn('flex items-center gap-1 text-xs font-medium hover:underline', m.text)}
+        >
+          {expanded ? 'Recolher' : 'Ver detalhes'} <ChevronRight className={cn('h-3 w-3 transition-transform', expanded && 'rotate-90')} />
+        </button>
+        <button
+          onClick={() => onTrigger(z.store_id, z.zone_key)}
+          disabled={isPending}
+          className="flex items-center gap-1 text-xs text-gray-500 hover:text-purple-600 disabled:opacity-40"
+        >
+          <RefreshCw className={cn('h-3 w-3', isPending && 'animate-spin')} />
+          Re-analisar
+        </button>
+      </div>
+    </div>
+  )
+}
+
 export default function AIAnalysisPage() {
   const qc = useQueryClient()
+  const [tab, setTab] = useState<'devices' | 'zones'>('devices')
   const [selected, setSelected] = useState<AIAnalysis | null>(null)
   const [severityFilter, setSeverityFilter] = useState<string>('all')
 
@@ -124,6 +206,23 @@ export default function AIAnalysisPage() {
     onSuccess: () => setTimeout(() => qc.invalidateQueries({ queryKey: ['ai-analyses'] }), 5000),
   })
 
+  const { data: zoneAnalysesData, isLoading: isLoadingZones } = useQuery({
+    queryKey: ['ai-zone-analyses'],
+    queryFn: () => aiApi.zoneAnalyses(),
+    refetchInterval: 60_000,
+  })
+
+  const [pendingZone, setPendingZone] = useState<string | null>(null)
+  const triggerZoneMutation = useMutation({
+    mutationFn: ({ storeId, zoneKey }: { storeId: string; zoneKey: string }) =>
+      aiApi.analyzeZone(storeId, zoneKey),
+    onMutate: ({ zoneKey }) => setPendingZone(zoneKey),
+    onSettled: () => {
+      setPendingZone(null)
+      setTimeout(() => qc.invalidateQueries({ queryKey: ['ai-zone-analyses'] }), 8000)
+    },
+  })
+
   const analyses: AIAnalysis[] = analysesData?.analyses ?? []
   const sevOrder: Record<string, number> = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 }
   const sorted = [...analyses].sort((a, b) =>
@@ -137,6 +236,12 @@ export default function AIAnalysisPage() {
     acc[a.severity || 'LOW'] = (acc[a.severity || 'LOW'] || 0) + 1
     return acc
   }, {} as Record<string, number>)
+
+  const zoneAnalyses: ZoneAIAnalysis[] = zoneAnalysesData?.analyses ?? []
+  const zoneSorted = [...zoneAnalyses].sort((a, b) =>
+    (sevOrder[a.severity || 'LOW'] ?? 9) - (sevOrder[b.severity || 'LOW'] ?? 9)
+  )
+  const zoneFiltered = severityFilter === 'all' ? zoneSorted : zoneSorted.filter(z => z.severity === severityFilter)
 
   const ollama = statusData?.ollama_available
 
@@ -157,134 +262,225 @@ export default function AIAnalysisPage() {
             {ollama ? <Wifi className="h-3.5 w-3.5" /> : <WifiOff className="h-3.5 w-3.5" />}
             {ollama ? 'Ollama online' : 'Ollama offline'}
           </div>
-          <button
-            onClick={() => triggerMutation.mutate()}
-            disabled={triggerMutation.isPending}
-            className="flex items-center gap-1.5 rounded-lg bg-purple-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-purple-500 disabled:opacity-50"
-          >
-            {triggerMutation.isPending
-              ? <><RefreshCw className="h-3.5 w-3.5 animate-spin" /> Analisando…</>
-              : <><Zap className="h-3.5 w-3.5" /> Analisar agora</>
-            }
-          </button>
+          {tab === 'devices' && (
+            <button
+              onClick={() => triggerMutation.mutate()}
+              disabled={triggerMutation.isPending}
+              className="flex items-center gap-1.5 rounded-lg bg-purple-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-purple-500 disabled:opacity-50"
+            >
+              {triggerMutation.isPending
+                ? <><RefreshCw className="h-3.5 w-3.5 animate-spin" /> Analisando…</>
+                : <><Zap className="h-3.5 w-3.5" /> Analisar agora</>
+              }
+            </button>
+          )}
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-6 space-y-5">
-        {/* KPI summary */}
-        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
-          {(['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'] as const).map(sev => {
-            const m = SEV_META[sev]
-            const n = counts[sev] || 0
-            return (
-              <button
-                key={sev}
-                onClick={() => setSeverityFilter(severityFilter === sev ? 'all' : sev)}
-                className={cn(
-                  'rounded-xl border p-3 text-center transition-all',
-                  m.bg, m.border,
-                  severityFilter === sev ? 'ring-2 ring-offset-1 ring-purple-500' : ''
-                )}
-              >
-                <div className={cn('text-2xl font-bold', m.text)}>{n}</div>
-                <div className={cn('text-xs font-medium', m.text)}>{m.label}</div>
-              </button>
-            )
-          })}
-          <div className="rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 p-3 text-center">
-            <div className="text-2xl font-bold text-green-600 dark:text-green-400">{analysesData?.total ?? 0}</div>
-            <div className="text-xs font-medium text-gray-500">Analisados</div>
-          </div>
-        </div>
-
-        {/* Filtro rápido */}
-        {severityFilter !== 'all' && (
-          <div className="flex items-center gap-2">
-            <span className="text-sm text-gray-500">Filtrando por:</span>
-            <span className={cn('rounded px-2 py-0.5 text-xs font-bold', SEV_META[severityFilter]?.badge)}>
-              {SEV_META[severityFilter]?.label}
+      {/* Tabs */}
+      <div className="flex gap-1 px-6 pt-3 pb-0 border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900">
+        <button
+          onClick={() => setTab('devices')}
+          className={cn(
+            'flex items-center gap-1.5 px-3 py-2 text-sm font-medium rounded-t-lg border-b-2 transition-colors',
+            tab === 'devices'
+              ? 'border-purple-500 text-purple-600 dark:text-purple-400'
+              : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'
+          )}
+        >
+          <Thermometer className="h-4 w-4" />
+          Dispositivos
+          {analyses.length > 0 && (
+            <span className="rounded-full bg-purple-100 dark:bg-purple-900/40 px-1.5 py-0.5 text-xs text-purple-700 dark:text-purple-300">
+              {analyses.length}
             </span>
-            <button onClick={() => setSeverityFilter('all')} className="text-xs text-gray-400 hover:text-gray-600 underline">
-              limpar
-            </button>
-          </div>
-        )}
+          )}
+        </button>
+        <button
+          onClick={() => setTab('zones')}
+          className={cn(
+            'flex items-center gap-1.5 px-3 py-2 text-sm font-medium rounded-t-lg border-b-2 transition-colors',
+            tab === 'zones'
+              ? 'border-indigo-500 text-indigo-600 dark:text-indigo-400'
+              : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'
+          )}
+        >
+          <Cpu className="h-4 w-4" />
+          Zonas
+          {zoneAnalyses.length > 0 && (
+            <span className="rounded-full bg-indigo-100 dark:bg-indigo-900/40 px-1.5 py-0.5 text-xs text-indigo-700 dark:text-indigo-300">
+              {zoneAnalyses.length}
+            </span>
+          )}
+        </button>
+      </div>
 
-        {/* Lista de análises */}
-        {isLoading ? (
-          <div className="flex items-center justify-center py-20 text-gray-400">
-            <RefreshCw className="h-5 w-5 animate-spin mr-2" /> Carregando análises…
-          </div>
-        ) : filtered.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-20 text-gray-400">
-            <CheckCircle className="h-10 w-10 mb-3 text-green-400" />
-            <p className="font-medium text-gray-600 dark:text-gray-300">
-              {severityFilter !== 'all' ? `Nenhuma anomalia ${SEV_META[severityFilter]?.label.toLowerCase()}` : 'Nenhuma anomalia detectada'}
-            </p>
-            <p className="text-sm">Todos os equipamentos monitorados estão dentro da faixa normal.</p>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-            {filtered.map(a => {
-              const m = SEV_META[a.severity || 'LOW']
-              const urg = URGENCY_LABEL(a.urgency_hours)
-              const delta = a.temperature != null && a.setpoint_cool != null
-                ? a.temperature - a.setpoint_cool
-                : null
-              return (
-                <div key={a.device_id} className={cn('rounded-xl border p-4 space-y-3 transition-shadow hover:shadow-md', m.bg, m.border)}>
-                  {/* Cabeçalho */}
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-1.5 mb-0.5">
-                        <span className={cn('rounded px-1.5 py-0.5 text-xs font-bold', m.badge)}>{m.label}</span>
-                        {a.email_worthy && (
-                          <span className="rounded bg-red-100 dark:bg-red-900/30 px-1.5 py-0.5 text-xs text-red-600 dark:text-red-400 font-medium">Email</span>
-                        )}
-                        <span className={cn('rounded px-1.5 py-0.5 text-xs font-medium',
-                          a.analysis_source === 'llm'
-                            ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300'
-                            : 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400'
-                        )}>
-                          {a.analysis_source === 'llm' ? 'IA' : a.analysis_source === 'deterministic' ? 'Determinístico' : 'Regras'}
-                        </span>
-                      </div>
-                      <p className="font-semibold text-gray-900 dark:text-white truncate">{a.device_name}</p>
-                      <p className="text-xs text-gray-500 truncate">{a.store_name}{a.sector_name ? ` › ${a.sector_name}` : ''}</p>
-                    </div>
-                    <div className="shrink-0 text-right">
-                      <div className="flex items-center gap-1 text-xs text-gray-500">
-                        <Thermometer className="h-3 w-3" />
-                        {a.temperature != null ? `${a.temperature.toFixed(1)}°C` : '—'}
-                      </div>
-                      {delta != null && (
-                        <div className={cn('text-xs font-medium', delta > 3 ? 'text-red-600' : delta > 1 ? 'text-orange-500' : 'text-green-600')}>
-                          {delta > 0 ? '+' : ''}{delta.toFixed(1)}°C
+      <div className="flex-1 overflow-y-auto p-6 space-y-5">
+        {tab === 'devices' ? (
+          <>
+            {/* KPI summary */}
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+              {(['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'] as const).map(sev => {
+                const m = SEV_META[sev]
+                const n = counts[sev] || 0
+                return (
+                  <button
+                    key={sev}
+                    onClick={() => setSeverityFilter(severityFilter === sev ? 'all' : sev)}
+                    className={cn(
+                      'rounded-xl border p-3 text-center transition-all',
+                      m.bg, m.border,
+                      severityFilter === sev ? 'ring-2 ring-offset-1 ring-purple-500' : ''
+                    )}
+                  >
+                    <div className={cn('text-2xl font-bold', m.text)}>{n}</div>
+                    <div className={cn('text-xs font-medium', m.text)}>{m.label}</div>
+                  </button>
+                )
+              })}
+              <div className="rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 p-3 text-center">
+                <div className="text-2xl font-bold text-green-600 dark:text-green-400">{analysesData?.total ?? 0}</div>
+                <div className="text-xs font-medium text-gray-500">Analisados</div>
+              </div>
+            </div>
+
+            {/* Filtro rápido */}
+            {severityFilter !== 'all' && (
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-gray-500">Filtrando por:</span>
+                <span className={cn('rounded px-2 py-0.5 text-xs font-bold', SEV_META[severityFilter]?.badge)}>
+                  {SEV_META[severityFilter]?.label}
+                </span>
+                <button onClick={() => setSeverityFilter('all')} className="text-xs text-gray-400 hover:text-gray-600 underline">
+                  limpar
+                </button>
+              </div>
+            )}
+
+            {/* Lista de análises de dispositivos */}
+            {isLoading ? (
+              <div className="flex items-center justify-center py-20 text-gray-400">
+                <RefreshCw className="h-5 w-5 animate-spin mr-2" /> Carregando análises…
+              </div>
+            ) : filtered.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-20 text-gray-400">
+                <CheckCircle className="h-10 w-10 mb-3 text-green-400" />
+                <p className="font-medium text-gray-600 dark:text-gray-300">
+                  {severityFilter !== 'all' ? `Nenhuma anomalia ${SEV_META[severityFilter]?.label.toLowerCase()}` : 'Nenhuma anomalia detectada'}
+                </p>
+                <p className="text-sm">Todos os equipamentos monitorados estão dentro da faixa normal.</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                {filtered.map(a => {
+                  const m = SEV_META[a.severity || 'LOW']
+                  const urg = URGENCY_LABEL(a.urgency_hours)
+                  const delta = a.temperature != null && a.setpoint_cool != null
+                    ? a.temperature - a.setpoint_cool
+                    : null
+                  return (
+                    <div key={a.device_id} className={cn('rounded-xl border p-4 space-y-3 transition-shadow hover:shadow-md', m.bg, m.border)}>
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5 mb-0.5">
+                            <span className={cn('rounded px-1.5 py-0.5 text-xs font-bold', m.badge)}>{m.label}</span>
+                            {a.email_worthy && (
+                              <span className="rounded bg-red-100 dark:bg-red-900/30 px-1.5 py-0.5 text-xs text-red-600 dark:text-red-400 font-medium">Email</span>
+                            )}
+                            <span className={cn('rounded px-1.5 py-0.5 text-xs font-medium',
+                              a.analysis_source === 'llm'
+                                ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300'
+                                : 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400'
+                            )}>
+                              {a.analysis_source === 'llm' ? 'IA' : a.analysis_source === 'deterministic' ? 'Determinístico' : 'Regras'}
+                            </span>
+                          </div>
+                          <p className="font-semibold text-gray-900 dark:text-white truncate">{a.device_name}</p>
+                          <p className="text-xs text-gray-500 truncate">{a.store_name}{a.sector_name ? ` › ${a.sector_name}` : ''}</p>
                         </div>
-                      )}
+                        <div className="shrink-0 text-right">
+                          <div className="flex items-center gap-1 text-xs text-gray-500">
+                            <Thermometer className="h-3 w-3" />
+                            {a.temperature != null ? `${a.temperature.toFixed(1)}°C` : '—'}
+                          </div>
+                          {delta != null && (
+                            <div className={cn('text-xs font-medium', delta > 3 ? 'text-red-600' : delta > 1 ? 'text-orange-500' : 'text-green-600')}>
+                              {delta > 0 ? '+' : ''}{delta.toFixed(1)}°C
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      <p className="text-xs text-gray-700 dark:text-gray-300 line-clamp-2">{a.diagnosis || a.root_cause}</p>
+                      <div className="flex items-center justify-between pt-1">
+                        <div className="flex items-center gap-1 text-xs">
+                          <Clock className="h-3 w-3 text-gray-400" />
+                          <span className={urg.cls}>{urg.label}</span>
+                        </div>
+                        <button
+                          onClick={() => setSelected(a)}
+                          className={cn('flex items-center gap-1 text-xs font-medium hover:underline', m.text)}
+                        >
+                          Ver detalhes <ChevronRight className="h-3 w-3" />
+                        </button>
+                      </div>
                     </div>
-                  </div>
+                  )
+                })}
+              </div>
+            )}
+          </>
+        ) : (
+          <>
+            {/* Filtro rápido zonas */}
+            <div className="flex items-center gap-2 flex-wrap">
+              {(['all', 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW'] as const).map(sev => (
+                <button
+                  key={sev}
+                  onClick={() => setSeverityFilter(sev)}
+                  className={cn(
+                    'rounded-full px-3 py-1 text-xs font-medium border transition-all',
+                    sev === 'all'
+                      ? severityFilter === 'all'
+                        ? 'bg-indigo-600 text-white border-indigo-600'
+                        : 'border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-400'
+                      : severityFilter === sev
+                        ? cn(SEV_META[sev].badge, 'border-transparent')
+                        : cn(SEV_META[sev].bg, SEV_META[sev].border, SEV_META[sev].text)
+                  )}
+                >
+                  {sev === 'all' ? 'Todas' : SEV_META[sev].label}
+                  {sev !== 'all' && (
+                    <span className="ml-1">
+                      {zoneSorted.filter(z => z.severity === sev).length}
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
 
-                  {/* Diagnóstico */}
-                  <p className="text-xs text-gray-700 dark:text-gray-300 line-clamp-2">{a.diagnosis || a.root_cause}</p>
-
-                  {/* Footer */}
-                  <div className="flex items-center justify-between pt-1">
-                    <div className="flex items-center gap-1 text-xs">
-                      <Clock className="h-3 w-3 text-gray-400" />
-                      <span className={urg.cls}>{urg.label}</span>
-                    </div>
-                    <button
-                      onClick={() => setSelected(a)}
-                      className={cn('flex items-center gap-1 text-xs font-medium hover:underline', m.text)}
-                    >
-                      Ver detalhes <ChevronRight className="h-3 w-3" />
-                    </button>
-                  </div>
-                </div>
-              )
-            })}
-          </div>
+            {isLoadingZones ? (
+              <div className="flex items-center justify-center py-20 text-gray-400">
+                <RefreshCw className="h-5 w-5 animate-spin mr-2" /> Carregando análises de zona…
+              </div>
+            ) : zoneFiltered.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-20 text-gray-400">
+                <CheckCircle className="h-10 w-10 mb-3 text-green-400" />
+                <p className="font-medium text-gray-600 dark:text-gray-300">Nenhuma anomalia de zona detectada</p>
+                <p className="text-sm">As análises são geradas automaticamente a cada 30 minutos para zonas com anomalias.</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                {zoneFiltered.map(z => (
+                  <ZoneAnalysisCard
+                    key={`${z.store_id}:${z.zone_key}`}
+                    z={z}
+                    onTrigger={(storeId, zoneKey) => triggerZoneMutation.mutate({ storeId, zoneKey })}
+                    isPending={pendingZone === z.zone_key && triggerZoneMutation.isPending}
+                  />
+                ))}
+              </div>
+            )}
+          </>
         )}
       </div>
 

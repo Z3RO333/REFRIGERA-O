@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
-  Activity, AlertTriangle, Bot, ChevronDown, ChevronRight, Clock,
+  Activity, AlertTriangle, Bell, BellOff, Bot, ChevronDown, ChevronRight, Clock,
   RefreshCw, Search, Shield, ShieldOff, Thermometer, ToggleLeft, Wrench, Zap,
 } from 'lucide-react'
 import { logsApi, storesApi } from '../api/client'
@@ -25,6 +25,8 @@ const EVENT_META: Record<string, {
   guardrail_block:    { icon: <Shield className="h-3.5 w-3.5" />,       label: 'Bloqueio',        color: 'text-orange-600', badge: 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300' },
   kill_switch:        { icon: <ShieldOff className="h-3.5 w-3.5" />,    label: 'Kill Switch',     color: 'text-red-600',    badge: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300' },
   zone_trigger:       { icon: <Zap className="h-3.5 w-3.5" />,          label: 'Gatilho Manual',  color: 'text-teal-600',   badge: 'bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-300' },
+  alert_ack:          { icon: <Bell className="h-3.5 w-3.5" />,          label: 'Alerta Ack',      color: 'text-yellow-600', badge: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300' },
+  alert_resolve:      { icon: <BellOff className="h-3.5 w-3.5" />,       label: 'Alerta Resolvido', color: 'text-green-600',  badge: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300' },
 }
 
 const SEV_BADGE: Record<string, string> = {
@@ -312,14 +314,16 @@ export default function LogsPage() {
 
       {/* KPIs */}
       {kpis && (
-        <div className="px-6 py-4 grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3 bg-gray-50 dark:bg-gray-950 border-b border-gray-200 dark:border-gray-800">
-          <KPICard label="Sugestões IA"    value={kpis.ai_suggestions}   color="text-violet-600" />
-          <KPICard label="Auto executadas" value={kpis.auto_executed}     color="text-green-600" />
-          <KPICard label="Eficazes"        value={kpis.verified_success}  color="text-green-600" sub={`${kpis.auto_executed > 0 ? Math.round(kpis.verified_success / kpis.auto_executed * 100) : 0}%`} />
-          <KPICard label="Sem efeito"      value={kpis.verified_failure}  color="text-red-500" />
-          <KPICard label="Bloqueios"       value={kpis.guardrail_blocks}  color="text-orange-500" />
-          <KPICard label="Controles manuais" value={kpis.manual_controls} color="text-blue-600" />
-          <KPICard label="Análises IA"     value={kpis.ai_analyses}       color="text-violet-600" sub={`${kpis.ai_critical} críticas`} />
+        <div className="px-6 py-4 grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-5 xl:grid-cols-10 gap-3 bg-gray-50 dark:bg-gray-950 border-b border-gray-200 dark:border-gray-800">
+          <KPICard label="Sugestões IA"      value={kpis.ai_suggestions}   color="text-violet-600" />
+          <KPICard label="Auto executadas"   value={kpis.auto_executed}     color="text-green-600" />
+          <KPICard label="Eficazes"          value={kpis.verified_success}  color="text-green-600" sub={`${kpis.auto_executed > 0 ? Math.round(kpis.verified_success / kpis.auto_executed * 100) : 0}%`} />
+          <KPICard label="Sem efeito"        value={kpis.verified_failure}  color="text-red-500" />
+          <KPICard label="Bloqueios"         value={kpis.guardrail_blocks}  color="text-orange-500" />
+          <KPICard label="Controles manuais" value={kpis.manual_controls}   color="text-blue-600" />
+          <KPICard label="Análises IA"       value={kpis.ai_analyses}       color="text-violet-600" sub={`${kpis.ai_critical} críticas`} />
+          <KPICard label="Alertas ack"       value={kpis.alert_acks ?? 0}   color="text-yellow-600" />
+          <KPICard label="Alertas resolvidos" value={kpis.alert_resolves ?? 0} color="text-green-600" />
           <KPICard label="Recuperação média" value={kpis.avg_recovery_minutes != null ? `${kpis.avg_recovery_minutes}min` : '—'} color="text-teal-600" />
         </div>
       )}
@@ -337,6 +341,8 @@ export default function LogsPage() {
               <option value="automation_exec">Automação</option>
               <option value="guardrail_block">Bloqueio</option>
               <option value="kill_switch">Kill Switch</option>
+              <option value="alert_ack">Alerta Ack</option>
+              <option value="alert_resolve">Alerta Resolvido</option>
             </FilterSelect>
             <FilterSelect label="Origem" value={filters.origin} onChange={v => setFilters(f => ({ ...f, origin: v }))}>
               <option value="">Todas</option>

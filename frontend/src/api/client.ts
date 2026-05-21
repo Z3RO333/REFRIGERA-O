@@ -70,6 +70,7 @@ export const zonesApi = {
   list: (storeId: string) => api.get(`/zones/${storeId}`).then(r => r.data),
   setMode: (storeId: string, zoneKey: string, data: {
     mode: string
+    priority?: string
     blocked_reason?: string
     blocked_until?: string | null
     setpoint_min?: number
@@ -106,8 +107,16 @@ export const usersApi = {
 }
 
 export const auditApi = {
-  list: (params?: { limit?: number; action_type?: string; store_id?: string }) =>
-    api.get('/audit', { params }).then(r => r.data),
+  list: (params?: {
+    limit?: number
+    offset?: number
+    action_type?: string
+    origin?: string
+    severity?: string
+    store_id?: string
+    device_id?: string
+    user_name?: string
+  }) => api.get('/audit', { params }).then(r => r.data),
 }
 
 export const logsApi = {
@@ -129,8 +138,32 @@ export const logsApi = {
     api.get('/logs/kpis', { params }).then(r => r.data),
 }
 
+export const customZonesApi = {
+  list: (storeId: string) => api.get(`/zones/${storeId}/custom`).then(r => r.data),
+  create: (storeId: string, data: {
+    name: string
+    ideal_min: number
+    ideal_max: number
+    zone_type: string
+    device_ids: string[]
+    mode?: string
+  }) => api.post(`/zones/${storeId}/custom`, data).then(r => r.data),
+  update: (storeId: string, zoneKey: string, data: {
+    name?: string
+    ideal_min?: number
+    ideal_max?: number
+    zone_type?: string
+    device_ids?: string[]
+  }) => api.put(`/zones/${storeId}/custom/${zoneKey}`, data).then(r => r.data),
+  delete: (storeId: string, zoneKey: string) =>
+    api.delete(`/zones/${storeId}/custom/${zoneKey}`).then(r => r.data),
+}
+
 export const aiApi = {
   status: () => api.get('/ai/status').then(r => r.data),
   analyses: () => api.get('/ai/analyses').then(r => r.data),
   trigger: () => api.post('/ai/trigger').then(r => r.data),
+  zoneAnalyses: () => api.get('/ai/zone-analyses').then(r => r.data),
+  analyzeZone: (storeId: string, zoneKey: string) =>
+    api.post(`/ai/zones/${storeId}/${zoneKey}/analyze`).then(r => r.data),
 }

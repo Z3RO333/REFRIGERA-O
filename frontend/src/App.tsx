@@ -21,6 +21,8 @@ import UsersPage from './pages/Users'
 import ActivityLog from './pages/ActivityLog'
 import AIAnalysisPage from './pages/AIAnalysisPage'
 import LogsPage from './pages/LogsPage'
+import DigitalTwinPage from './pages/DigitalTwinPage'
+import ZoneControlPanel from './pages/ZoneControlPanel'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { status, setSession, logout } = useAuthStore()
@@ -61,6 +63,8 @@ export default function App() {
           <Route path="usuarios" element={<UsersPage />} />
           <Route path="atividade" element={<ActivityLog />} />
           <Route path="ia" element={<AIAnalysisPage />} />
+          <Route path="ambientes" element={<ZoneControlPanel />} />
+          <Route path="zonas" element={<DigitalTwinPage />} />
           <Route path="logs" element={<LogsPage />} />
           <Route path="stores/:storeId" element={<StoreView />} />
           <Route path="stores/:storeId/map/:sectorId" element={<FloorMap />} />

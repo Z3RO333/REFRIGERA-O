@@ -59,9 +59,13 @@ def _risk_level(status: str, trend: float | None) -> str:
     if status == "COLD":
         return "MEDIUM"
     if status == "COMFORT":
-        return "MEDIUM" if t > 1.5 else "LOW"
+        if t > 3.0:  return "HIGH"    # aquecimento muito rápido em zona confortável
+        if t > 1.5:  return "MEDIUM"
+        return "LOW"
     if status == "WARM":
-        return "HIGH" if t > 2.0 else "MEDIUM"
+        if t > 2.0:  return "HIGH"
+        if t < -1.0: return "LOW"     # WARM mas resfriando — tendência favorável
+        return "MEDIUM"
     if status == "HOT":
         return "CRITICAL" if t > 1.5 else "HIGH"
     if status == "CRITICAL":
@@ -324,9 +328,15 @@ async def compute_zone_twin(
     p30 = _predict(current_avg, trend_per_hour, 30)  if current_avg is not None else None
     p60 = _predict(current_avg, trend_per_hour, 60)  if current_avg is not None else None
 
-    # ── 4. Risco e confiança ──────────────────────────────────────────────────
+    # ── 4. Risco, confiança e alerta preemptivo ───────────────────────────────
     risk = _risk_level(current_status, trend_per_hour)
     confidence = _confidence_score(len(temps_now), hist_count, readings_fresh, variance, zone.zone_type)
+    # early_warning: zona OK agora mas em rota de colisão com o limite
+    early_warning = (
+        current_status == "COMFORT"
+        and trend_per_hour is not None
+        and trend_per_hour > 2.5
+    )
 
     # ── 5. Recomendação ───────────────────────────────────────────────────────
     rec_action, explanation = _recommendation(
@@ -361,6 +371,7 @@ async def compute_zone_twin(
         "predicted_temp_60m": p60,
         "risk_level": risk,
         "confidence": confidence,
+        "early_warning": early_warning,
         "contributing_devices": contributing,
         "recommended_action": rec_action,
         "explanation": explanation,

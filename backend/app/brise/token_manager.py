@@ -1,8 +1,11 @@
 import asyncio
+import logging
 import time
 import httpx
 from app.config import settings
 from app.cache.redis_client import redis_client
+
+logger = logging.getLogger(__name__)
 
 REDIS_TOKEN_KEY = "brise:token:access"
 REDIS_REFRESH_KEY = "brise:token:refresh"
@@ -11,7 +14,7 @@ REDIS_EXPIRY_KEY = "brise:token:expiry"
 
 class BriseTokenManager:
     """
-    Fluxo de autenticação Brise (dois passos descobertos via JS do reqwithlogin):
+    Fluxo de autenticação Brise (dois passos):
       1. POST /request-authkey  {username, password, grant_type:"authorization"}
          → {code: "..."}
       2. POST /exchange-code  {grant_type:"authorization_code", code, client_id, client_secret, redirect_uri}
@@ -30,6 +33,12 @@ class BriseTokenManager:
         if token and expiry and float(expiry) > time.time() + 300:
             return token
         return await self._acquire_token()
+
+    async def invalidate_token(self) -> None:
+        """Força a expiração do token em cache (chamado após 401 do servidor)."""
+        await redis_client.delete(REDIS_TOKEN_KEY)
+        await redis_client.delete(REDIS_EXPIRY_KEY)
+        logger.info("Brise token invalidado por resposta 401")
 
     async def _acquire_token(self) -> str:
         async with self._lock:
@@ -52,10 +61,14 @@ class BriseTokenManager:
                 refresh = await redis_client.get(REDIS_REFRESH_KEY)
                 if refresh:
                     try:
-                        return await self._exchange_refresh(refresh)
-                    except Exception:
-                        pass
-                return await self._full_auth()
+                        token = await self._exchange_refresh(refresh)
+                        logger.info("Brise token renovado via refresh_token")
+                        return token
+                    except Exception as exc:
+                        logger.warning("Refresh token Brise falhou (%s), tentando auth completo", exc)
+                token = await self._full_auth()
+                logger.info("Brise token obtido via auth completo")
+                return token
             finally:
                 if acquired:
                     await redis_client.release_lock("brise:token:refresh_lock")

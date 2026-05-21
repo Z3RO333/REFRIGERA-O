@@ -18,18 +18,42 @@ export function useWebSocket() {
 
       socket.onmessage = (event) => {
         try {
-          const msg = JSON.parse(event.data)
-          if (msg.channel === 'device.reading.new') {
+          const msg = JSON.parse(event.data) as { channel: string; data: Record<string, unknown> }
+          const ch = msg.channel
+
+          if (ch === 'device.reading.new') {
             queryClient.invalidateQueries({ queryKey: ['kpis'] })
             queryClient.invalidateQueries({ queryKey: ['store-devices'] })
+            queryClient.invalidateQueries({ queryKey: ['digital-twin'] })
           }
-          if (msg.channel === 'alert.created' || msg.channel === 'alert.resolved') {
+
+          if (ch === 'alert.created' || ch === 'alert.resolved') {
             queryClient.invalidateQueries({ queryKey: ['alerts'] })
             queryClient.invalidateQueries({ queryKey: ['kpis'] })
           }
-          if (msg.channel === 'zone.automation.mode.changed') {
-            // Atualiza o estado de automação de todas as lojas em tempo real
+
+          if (ch === 'zone.automation.mode.changed' || ch === 'zone.action.created') {
             queryClient.invalidateQueries({ queryKey: ['zones-automation'] })
+            queryClient.invalidateQueries({ queryKey: ['zone-history'] })
+            queryClient.invalidateQueries({ queryKey: ['digital-twin'] })
+          }
+
+          if (ch === 'ai.analysis.created') {
+            queryClient.invalidateQueries({ queryKey: ['ai-analyses'] })
+          }
+
+          if (ch === 'zone.ai_analysis.created') {
+            queryClient.invalidateQueries({ queryKey: ['ai-zone-analyses'] })
+          }
+
+          if (ch === 'automation.kill_switch.changed') {
+            queryClient.invalidateQueries({ queryKey: ['automation-status'] })
+            queryClient.invalidateQueries({ queryKey: ['zones-automation'] })
+          }
+
+          if (ch === 'device.command.sent' || ch === 'device.command.failed') {
+            queryClient.invalidateQueries({ queryKey: ['store-devices'] })
+            queryClient.invalidateQueries({ queryKey: ['device'] })
           }
         } catch {}
       }

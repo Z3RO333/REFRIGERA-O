@@ -71,6 +71,27 @@ _STATEMENTS = [
     "ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS store_name VARCHAR(100)",
     "CREATE INDEX IF NOT EXISTS ix_audit_logs_origin ON audit_logs (origin)",
     "CREATE INDEX IF NOT EXISTS ix_audit_logs_severity ON audit_logs (severity)",
+    # prioridade operacional por zona (conforto | economia | estabilidade | manutencao)
+    "ALTER TABLE zone_automations ADD COLUMN IF NOT EXISTS priority VARCHAR(20) NOT NULL DEFAULT 'conforto'",
+    # zonas personalizadas criadas pelo usuário
+    """CREATE TABLE IF NOT EXISTS custom_zones (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        store_id UUID NOT NULL REFERENCES stores(id),
+        zone_key VARCHAR(50) NOT NULL UNIQUE,
+        name VARCHAR(100) NOT NULL,
+        zone_type VARCHAR(20) NOT NULL DEFAULT 'ABERTA',
+        ideal_min INTEGER NOT NULL DEFAULT 20,
+        ideal_max INTEGER NOT NULL DEFAULT 24,
+        created_by_name VARCHAR(100),
+        created_at TIMESTAMP NOT NULL DEFAULT now(),
+        updated_at TIMESTAMP NOT NULL DEFAULT now()
+    )""",
+    """CREATE TABLE IF NOT EXISTS custom_zone_devices (
+        zone_id UUID NOT NULL REFERENCES custom_zones(id) ON DELETE CASCADE,
+        device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+        PRIMARY KEY (zone_id, device_id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS ix_custom_zones_store ON custom_zones (store_id)",
 ]
 
 

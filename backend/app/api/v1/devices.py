@@ -11,7 +11,7 @@ from app.schemas.device import DeviceControlCommand, DeviceMetadataUpdate, Devic
 from app.cache.device_cache import get_device_status
 from app.security.network import validate_sensor_url
 from app.models.user import User
-from app.api.v1.auth import get_current_user
+from app.api.v1.auth import get_current_user, require_role
 from app.services.audit_service import log_action
 
 router = APIRouter()
@@ -106,6 +106,7 @@ async def update_device_parameters(
     device_id: uuid.UUID,
     params: DeviceParametersUpdate,
     db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_role("EDITOR", "ADMIN")),
 ):
     device = await db.get(Device, device_id)
     if not device:
@@ -145,7 +146,7 @@ async def control_device(
     device_id: uuid.UUID,
     command: DeviceControlCommand,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_role("EDITOR", "ADMIN")),
 ):
     device = await db.get(Device, device_id)
     if not device:
@@ -219,6 +220,17 @@ async def control_device(
         extra_data={"action": command.action, "step": command.step},
     )
     await db.commit()
+
+    from app.cache.redis_client import redis_client as _rc
+    _event_channel = "device.command.sent" if confirmed else "device.command.failed"
+    await _rc.publish(_event_channel, {
+        "device_id": str(device_id),
+        "device_name": device.name,
+        "action": command.action,
+        "confirmed": confirmed,
+        "by": current_user.name,
+    })
+
     return {
         "message": "Comando enviado",
         "confirmed": confirmed,
@@ -226,7 +238,12 @@ async def control_device(
     }
 
 @router.put("/{device_id}/position")
-async def update_device_position(device_id: uuid.UUID, pos: DevicePositionUpdate, db: AsyncSession = Depends(get_db)):
+async def update_device_position(
+    device_id: uuid.UUID,
+    pos: DevicePositionUpdate,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_role("ADMIN")),
+):
     device = await db.get(Device, device_id)
     if not device:
         raise HTTPException(404, "Dispositivo não encontrado")
@@ -240,6 +257,7 @@ async def update_device_metadata(
     device_id: uuid.UUID,
     data: DeviceMetadataUpdate,
     db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_role("ADMIN")),
 ):
     device = await db.get(Device, device_id)
     if not device:

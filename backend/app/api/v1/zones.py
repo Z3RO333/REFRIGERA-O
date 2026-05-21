@@ -1,6 +1,8 @@
 import json
+import re
 import uuid
 from datetime import datetime, timedelta
+from statistics import mean
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
@@ -8,6 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.cache.redis_client import redis_client
 from app.db.session import get_db
+from app.models.custom_zone import CustomZone, CustomZoneDevice
+from app.models.device import Device, DeviceStatusLatest
+from app.models.store import StoreSector
 from app.models.zone import ZoneAction, ZoneAutomation
 from app.models.user import User
 from app.api.v1.auth import get_current_user, require_role
@@ -16,6 +21,7 @@ from app.services.zone_controller import (
     KILL_SWITCH_KEY,
     ZONE_COOLDOWN_SECONDS,
     ZONES,
+    ZoneConfig,
     _check_guardrails,
     _classify,
     _consecutive_failures,
@@ -100,12 +106,93 @@ def _automation_dict(
         "guardrail_active": guardrail_reason is not None,
         "guardrail_reason": guardrail_reason,
         "reading_confidence": automation.reading_confidence if automation else 1.0,
+        "priority": automation.priority if automation else "conforto",
         # manutenção
         "blocked_reason": automation.blocked_reason if automation else None,
         "blocked_until": automation.blocked_until.isoformat() if automation and automation.blocked_until else None,
         "blocked_by_user_name": automation.blocked_by_user_name if automation else None,
         "blocked_at": automation.blocked_at.isoformat() if automation and automation.blocked_at else None,
     }
+
+
+async def _custom_zone_config(
+    store_id: uuid.UUID,
+    zone_key: str,
+    db: AsyncSession,
+) -> ZoneConfig | None:
+    result = await db.execute(
+        select(
+            CustomZone.zone_key,
+            CustomZone.name,
+            CustomZone.ideal_min,
+            CustomZone.ideal_max,
+            CustomZone.zone_type,
+            CustomZoneDevice.device_id,
+        )
+        .outerjoin(CustomZoneDevice, CustomZone.id == CustomZoneDevice.zone_id)
+        .where(CustomZone.store_id == store_id, CustomZone.zone_key == zone_key)
+    )
+    rows = result.all()
+    if not rows:
+        return None
+
+    first = rows[0]
+    device_ids = [row.device_id for row in rows if row.device_id is not None]
+    return ZoneConfig(
+        key=first.zone_key,
+        label=first.name,
+        sector_names=[],
+        ideal_min=first.ideal_min,
+        ideal_max=first.ideal_max,
+        zone_type=first.zone_type,
+        device_ids=device_ids,
+    )
+
+
+async def _resolve_zone_config(
+    store_id: uuid.UUID,
+    zone_key: str,
+    db: AsyncSession,
+) -> ZoneConfig:
+    zone_cfg = ZONES.get(zone_key)
+    if zone_cfg:
+        return zone_cfg
+
+    custom_cfg = await _custom_zone_config(store_id, zone_key, db)
+    if custom_cfg:
+        return custom_cfg
+
+    raise HTTPException(404, "Zona não encontrada")
+
+
+async def _custom_zone_configs(store_id: uuid.UUID, db: AsyncSession) -> dict[str, ZoneConfig]:
+    result = await db.execute(
+        select(
+            CustomZone.zone_key,
+            CustomZone.name,
+            CustomZone.ideal_min,
+            CustomZone.ideal_max,
+            CustomZone.zone_type,
+            CustomZoneDevice.device_id,
+        )
+        .outerjoin(CustomZoneDevice, CustomZone.id == CustomZoneDevice.zone_id)
+        .where(CustomZone.store_id == store_id)
+    )
+    zones: dict[str, ZoneConfig] = {}
+    for zone_key, name, ideal_min, ideal_max, zone_type, device_id in result.all():
+        if zone_key not in zones:
+            zones[zone_key] = ZoneConfig(
+                key=zone_key,
+                label=name,
+                sector_names=[],
+                ideal_min=ideal_min,
+                ideal_max=ideal_max,
+                zone_type=zone_type,
+                device_ids=[],
+            )
+        if device_id is not None:
+            zones[zone_key].device_ids.append(device_id)  # type: ignore[union-attr]
+    return zones
 
 
 @router.get("/{store_id}")
@@ -117,7 +204,9 @@ async def list_zones(store_id: uuid.UUID, db: AsyncSession = Depends(get_db)) ->
     existing: dict[str, ZoneAutomation] = {a.zone_key: a for a in result.scalars().all()}
 
     zones_out: list[dict] = []
-    for zone_key, zone_cfg in ZONES.items():
+    all_zones = {**ZONES, **await _custom_zone_configs(store_id, db)}
+
+    for zone_key, zone_cfg in all_zones.items():
         automation = existing.get(zone_key)
 
         last_action = await get_zone_last_action(store_id, zone_key, db)
@@ -165,8 +254,7 @@ async def set_zone_mode(
     if mode not in _ADMIN_MODES:
         raise HTTPException(400, f"Modo inválido. Opções: {', '.join(sorted(_ADMIN_MODES))}")
 
-    if zone_key not in ZONES:
-        raise HTTPException(404, "Zona não encontrada")
+    zone_cfg = await _resolve_zone_config(store_id, zone_key, db)
 
     automation = await get_or_create_automation(store_id, zone_key, db)
     old_mode = automation.mode
@@ -178,6 +266,8 @@ async def set_zone_mode(
         automation.setpoint_max = int(data["setpoint_max"])
     if "max_daily_adjustments" in data:
         automation.max_daily_adjustments = int(data["max_daily_adjustments"])
+    if "priority" in data and data["priority"] in {"conforto", "economia", "estabilidade", "manutencao"}:
+        automation.priority = data["priority"]
 
     # Campos de manutenção
     if mode == "maintenance":
@@ -200,7 +290,7 @@ async def set_zone_mode(
             automation.blocked_by_user_name = None
             automation.blocked_at = None
 
-    zone_label = ZONES[zone_key].label
+    zone_label = zone_cfg.label
     await log_action(
         db, "zone_mode_change",
         f"Modo da zona '{zone_label}' alterado: {old_mode} → {mode}",
@@ -219,6 +309,7 @@ async def set_zone_mode(
         "zone_label": zone_label,
         "old_mode": old_mode,
         "new_mode": mode,
+        "priority": automation.priority,
         "changed_by": current_user.name,
         "changed_at": datetime.utcnow().isoformat(),
         "blocked_reason": automation.blocked_reason,
@@ -236,8 +327,7 @@ async def zone_history(
     limit: int = 20,
     db: AsyncSession = Depends(get_db),
 ) -> list[dict]:
-    if zone_key not in ZONES:
-        raise HTTPException(404, "Zona não encontrada")
+    await _resolve_zone_config(store_id, zone_key, db)
 
     result = await db.execute(
         select(ZoneAction)
@@ -256,8 +346,7 @@ async def trigger_zone(
     current_user: User = Depends(require_role("EDITOR", "ADMIN")),
 ) -> dict:
     """Dispara avaliação manual de uma zona (ignora cooldown). Requer EDITOR ou ADMIN."""
-    if zone_key not in ZONES:
-        raise HTTPException(404, "Zona não encontrada")
+    zone_cfg = await _resolve_zone_config(store_id, zone_key, db)
 
     automation = await get_or_create_automation(store_id, zone_key, db)
     if automation.mode == "maintenance":
@@ -267,7 +356,7 @@ async def trigger_zone(
     await redis_client.delete(_cooldown_key(store_id, zone_key))
 
     try:
-        await _evaluate_zone(automation)
+        await _evaluate_zone(automation, zone_override=zone_cfg)
     except Exception as exc:
         raise HTTPException(500, f"Erro ao avaliar zona: {exc}")
 
@@ -287,8 +376,7 @@ async def update_zone_guardrails(
     current_user: User = Depends(require_role("ADMIN")),
 ) -> dict:
     """Atualiza guardrails de uma zona. Requer ADMIN."""
-    if zone_key not in ZONES:
-        raise HTTPException(404, "Zona não encontrada")
+    await _resolve_zone_config(store_id, zone_key, db)
 
     automation = await get_or_create_automation(store_id, zone_key, db)
 
@@ -325,3 +413,226 @@ async def update_zone_guardrails(
         "allowed_end_time":   f"{automation.allowed_end_hour:02d}:{automation.allowed_end_minute:02d}",
         "is_critical_zone": automation.is_critical_zone,
     }
+
+
+# ── Zonas personalizadas (CRUD) ───────────────────────────────────────────────
+
+def _zone_key_from_name(name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower().strip()).strip("-")[:30]
+    return f"cz-{slug}-{uuid.uuid4().hex[:6]}"
+
+
+async def _cz_current_temp(cz: CustomZone, db: AsyncSession) -> tuple[float | None, str]:
+    """Retorna (temperatura_média, status_térmico) atual dos devices da zona."""
+    dev_ids_res = await db.execute(
+        select(CustomZoneDevice.device_id).where(CustomZoneDevice.zone_id == cz.id)
+    )
+    dev_ids = [r[0] for r in dev_ids_res.all()]
+    if not dev_ids:
+        return None, "NO_READING"
+    temps_res = await db.execute(
+        select(DeviceStatusLatest.temperature)
+        .join(Device, Device.id == DeviceStatusLatest.device_id)
+        .where(Device.active == True, Device.id.in_(dev_ids), DeviceStatusLatest.temperature.is_not(None))
+    )
+    temps = [float(r[0]) for r in temps_res.all()]
+    if not temps:
+        return None, "NO_READING"
+    avg = round(mean(temps), 1)
+    return avg, _classify(avg, cz.ideal_min, cz.ideal_max)
+
+
+def _cz_dict(cz: CustomZone, device_ids: list[uuid.UUID], current_temp: float | None, temp_status: str) -> dict:
+    return {
+        "id": str(cz.id),
+        "store_id": str(cz.store_id),
+        "zone_key": cz.zone_key,
+        "name": cz.name,
+        "zone_type": cz.zone_type,
+        "ideal_min": cz.ideal_min,
+        "ideal_max": cz.ideal_max,
+        "created_by_name": cz.created_by_name,
+        "created_at": cz.created_at.isoformat(),
+        "device_ids": [str(d) for d in device_ids],
+        "current_temp": current_temp,
+        "temp_status": temp_status,
+        "is_custom": True,
+    }
+
+
+@router.get("/{store_id}/custom")
+async def list_custom_zones(store_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> list[dict]:
+    """Lista zonas personalizadas com temperatura atual."""
+    result = await db.execute(select(CustomZone).where(CustomZone.store_id == store_id))
+    czs = result.scalars().all()
+    out = []
+    for cz in czs:
+        dev_res = await db.execute(
+            select(CustomZoneDevice.device_id).where(CustomZoneDevice.zone_id == cz.id)
+        )
+        dev_ids = [r[0] for r in dev_res.all()]
+        current_temp, temp_status = await _cz_current_temp(cz, db)
+        out.append(_cz_dict(cz, dev_ids, current_temp, temp_status))
+    return out
+
+
+@router.post("/{store_id}/custom")
+async def create_custom_zone(
+    store_id: uuid.UUID,
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role("EDITOR", "ADMIN")),
+) -> dict:
+    """Cria zona personalizada e sua automação inicial."""
+    name = str(data.get("name", "")).strip()
+    if not name:
+        raise HTTPException(400, "Nome da zona é obrigatório")
+
+    ideal_min = int(data.get("ideal_min", 20))
+    ideal_max = int(data.get("ideal_max", 24))
+    if ideal_min >= ideal_max:
+        raise HTTPException(400, "ideal_min deve ser menor que ideal_max")
+
+    zone_type = str(data.get("zone_type", "ABERTA"))
+    if zone_type not in ("ABERTA", "SALA_FECHADA"):
+        raise HTTPException(400, "zone_type inválido")
+
+    device_ids_raw: list[str] = data.get("device_ids", [])
+    if not device_ids_raw:
+        raise HTTPException(400, "Selecione pelo menos um equipamento")
+
+    try:
+        device_ids = [uuid.UUID(d) for d in device_ids_raw]
+    except ValueError:
+        raise HTTPException(400, "device_ids inválidos")
+
+    # Valida que os devices pertencem à loja
+    valid = await db.execute(
+        select(Device.id)
+        .join(StoreSector, Device.sector_id == StoreSector.id)
+        .where(StoreSector.store_id == store_id, Device.id.in_(device_ids))
+    )
+    valid_ids = {r[0] for r in valid.all()}
+    # Inclui também devices sem setor mas que estão na loja (via DeviceStatusLatest join)
+    if not valid_ids:
+        # Fallback: aceita se device existe e está ativo
+        fallback = await db.execute(
+            select(Device.id).where(Device.active == True, Device.id.in_(device_ids))
+        )
+        valid_ids = {r[0] for r in fallback.all()}
+    if not valid_ids:
+        raise HTTPException(400, "Nenhum dos equipamentos informados é válido para esta loja")
+
+    zone_key = _zone_key_from_name(name)
+    cz = CustomZone(
+        store_id=store_id,
+        zone_key=zone_key,
+        name=name,
+        zone_type=zone_type,
+        ideal_min=ideal_min,
+        ideal_max=ideal_max,
+        created_by_name=current_user.name,
+    )
+    db.add(cz)
+    await db.flush()
+
+    for dev_id in valid_ids:
+        db.add(CustomZoneDevice(zone_id=cz.id, device_id=dev_id))
+
+    # Cria automação inicial em modo manual
+    automation = ZoneAutomation(
+        store_id=store_id,
+        zone_key=zone_key,
+        mode=str(data.get("mode", "manual")),
+        setpoint_min=ideal_min - 2,
+        setpoint_max=ideal_max + 2,
+    )
+    db.add(automation)
+    await db.commit()
+
+    current_temp, temp_status = await _cz_current_temp(cz, db)
+    return _cz_dict(cz, list(valid_ids), current_temp, temp_status)
+
+
+@router.put("/{store_id}/custom/{zone_key}")
+async def update_custom_zone(
+    store_id: uuid.UUID,
+    zone_key: str,
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role("EDITOR", "ADMIN")),
+) -> dict:
+    """Atualiza nome, faixa de temperatura e equipamentos de uma zona personalizada."""
+    result = await db.execute(
+        select(CustomZone).where(CustomZone.zone_key == zone_key, CustomZone.store_id == store_id)
+    )
+    cz = result.scalar_one_or_none()
+    if not cz:
+        raise HTTPException(404, "Zona personalizada não encontrada")
+
+    if "name" in data and str(data["name"]).strip():
+        cz.name = str(data["name"]).strip()
+    if "ideal_min" in data:
+        cz.ideal_min = int(data["ideal_min"])
+    if "ideal_max" in data:
+        cz.ideal_max = int(data["ideal_max"])
+    if "zone_type" in data and data["zone_type"] in ("ABERTA", "SALA_FECHADA"):
+        cz.zone_type = data["zone_type"]
+
+    if "device_ids" in data:
+        try:
+            new_ids = [uuid.UUID(d) for d in data["device_ids"]]
+        except ValueError:
+            raise HTTPException(400, "device_ids inválidos")
+        if not new_ids:
+            raise HTTPException(400, "Selecione pelo menos um equipamento")
+        await db.execute(
+            CustomZoneDevice.__table__.delete().where(CustomZoneDevice.zone_id == cz.id)
+        )
+        for dev_id in new_ids:
+            db.add(CustomZoneDevice(zone_id=cz.id, device_id=dev_id))
+
+    # Sincroniza ideal_min/max na automação
+    auto_res = await db.execute(
+        select(ZoneAutomation).where(ZoneAutomation.zone_key == zone_key, ZoneAutomation.store_id == store_id)
+    )
+    auto = auto_res.scalar_one_or_none()
+    if auto:
+        auto.setpoint_min = cz.ideal_min - 2
+        auto.setpoint_max = cz.ideal_max + 2
+
+    await db.commit()
+
+    dev_res = await db.execute(
+        select(CustomZoneDevice.device_id).where(CustomZoneDevice.zone_id == cz.id)
+    )
+    dev_ids = [r[0] for r in dev_res.all()]
+    current_temp, temp_status = await _cz_current_temp(cz, db)
+    return _cz_dict(cz, dev_ids, current_temp, temp_status)
+
+
+@router.delete("/{store_id}/custom/{zone_key}")
+async def delete_custom_zone(
+    store_id: uuid.UUID,
+    zone_key: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role("EDITOR", "ADMIN")),
+) -> dict:
+    """Remove zona personalizada e sua automação."""
+    result = await db.execute(
+        select(CustomZone).where(CustomZone.zone_key == zone_key, CustomZone.store_id == store_id)
+    )
+    cz = result.scalar_one_or_none()
+    if not cz:
+        raise HTTPException(404, "Zona personalizada não encontrada")
+
+    # Remove automação associada
+    await db.execute(
+        ZoneAutomation.__table__.delete().where(
+            ZoneAutomation.zone_key == zone_key,
+            ZoneAutomation.store_id == store_id,
+        )
+    )
+    await db.delete(cz)
+    await db.commit()
+    return {"deleted": zone_key}

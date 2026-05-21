@@ -20,7 +20,6 @@ async def log_action(
     origin: str | None = None,
     severity: str | None = None,
     sector_name: str | None = None,
-    store_name: str | None = None,
 ) -> None:
     entry = AuditLog(
         user_id=user.id if user else None,

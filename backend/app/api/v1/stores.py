@@ -5,6 +5,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db
 from app.models.store import Store, StoreSector
 from app.models.device import Device, DeviceParameters, DeviceStatusLatest
+from app.models.user import User
+from app.api.v1.auth import require_role
 
 router = APIRouter()
 
@@ -46,7 +48,7 @@ async def list_stores(db: AsyncSession = Depends(get_db)):
     return stores
 
 @router.post("", status_code=201)
-async def create_store(data: dict, db: AsyncSession = Depends(get_db)):
+async def create_store(data: dict, db: AsyncSession = Depends(get_db), _: User = Depends(require_role("ADMIN"))):
     store = Store(**data)
     db.add(store)
     await db.commit()
@@ -98,7 +100,7 @@ async def get_store_sectors(store_id: uuid.UUID, db: AsyncSession = Depends(get_
     return [{"id": str(s.id), "name": s.name, "floor": s.floor, "floor_plan_url": s.floor_plan_url, "is_critical": s.is_critical} for s in sectors]
 
 @router.post("/{store_id}/sectors", status_code=201)
-async def create_sector(store_id: uuid.UUID, data: dict, db: AsyncSession = Depends(get_db)):
+async def create_sector(store_id: uuid.UUID, data: dict, db: AsyncSession = Depends(get_db), _: User = Depends(require_role("ADMIN"))):
     sector = StoreSector(store_id=store_id, **data)
     db.add(sector)
     await db.commit()
@@ -106,7 +108,7 @@ async def create_sector(store_id: uuid.UUID, data: dict, db: AsyncSession = Depe
     return {"id": str(sector.id), "name": sector.name}
 
 @router.put("/{store_id}/sectors/{sector_id}/floor-plan")
-async def update_floor_plan(store_id: uuid.UUID, sector_id: uuid.UUID, data: dict, db: AsyncSession = Depends(get_db)):
+async def update_floor_plan(store_id: uuid.UUID, sector_id: uuid.UUID, data: dict, db: AsyncSession = Depends(get_db), _: User = Depends(require_role("ADMIN"))):
     sector = await db.get(StoreSector, sector_id)
     if not sector or sector.store_id != store_id:
         raise HTTPException(404, "Setor não encontrado")

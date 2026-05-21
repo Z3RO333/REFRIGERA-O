@@ -4,6 +4,7 @@ Consulta devices com anomalias, envia ao Ollama para diagnóstico
 e dispara emails para severidades HIGH/CRITICAL.
 """
 import logging
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
@@ -296,6 +297,18 @@ async def _log_ai_analyses_to_db(analyses, device_info_map: dict) -> None:
                     },
                 )
                 session.add(entry)
+
+                if analysis.severity in ("HIGH", "CRITICAL"):
+                    await redis_client.publish("ai.analysis.created", {
+                        "device_id": analysis.device_id,
+                        "device_name": analysis.device_name,
+                        "severity": analysis.severity,
+                        "root_cause": analysis.root_cause,
+                        "analysis_source": analysis.analysis_source,
+                        "store_name": info.get("store_name"),
+                        "sector_name": info.get("sector_name"),
+                    })
+
             await session.commit()
     except Exception as exc:
         logger.warning("Falha ao persistir análises de IA no audit_log: %s", exc)
@@ -314,3 +327,145 @@ async def _cache_analysis(analysis, device_info: dict) -> None:
         "sector_name": device_info.get("sector_name"),
     }
     await redis_client.set(key, json.dumps(payload), ttl=86400)  # 24h
+
+
+# ── Análise de zona ───────────────────────────────────────────────────────────
+
+ZONE_COOLDOWN_SECONDS = 7200  # 2h por zona (evita re-análise desnecessária)
+
+
+async def run_zone_analysis() -> None:
+    """Analisa zonas com anomalias via LLM. Chamado pelo scheduler a cada 30 min."""
+    if not settings.ai_analysis_enabled:
+        return
+
+    from app.ai.analyzer import analyze_zone
+    from app.services.digital_twin import compute_store_twin
+
+    try:
+        async with AsyncSessionLocal() as session:
+            stores_res = await session.execute(select(Store).where(Store.active == True))
+            store_list = [(s.id, s.name) for s in stores_res.scalars().all()]
+
+        zones_analyzed = 0
+        for store_uuid, store_name in store_list:
+            async with AsyncSessionLocal() as session:
+                twins = await compute_store_twin(store_uuid, session)
+
+            for twin in twins:
+                status = twin.get("current_status", "NO_READING")
+                early  = twin.get("early_warning", False)
+                risk   = twin.get("risk_level", "LOW")
+
+                needs_analysis = (
+                    status in ("WARM", "HOT", "CRITICAL")
+                    or early
+                    or risk in ("HIGH", "CRITICAL")
+                )
+                if not needs_analysis:
+                    continue
+
+                cooldown_key = f"ai:zone_cd:{store_uuid}:{twin['zone_key']}"
+                if await redis_client.exists(cooldown_key):
+                    logger.debug("Zone cooldown ativo: %s/%s", store_uuid, twin["zone_key"])
+                    continue
+
+                analysis = await analyze_zone(twin)
+                await _cache_zone_analysis(analysis)
+                await _log_zone_analysis_to_db(analysis, twin, store_name)
+                await redis_client.set(cooldown_key, "1", ttl=ZONE_COOLDOWN_SECONDS)
+                zones_analyzed += 1
+
+        logger.info("Zone AI analysis: %d zona(s) analisada(s)", zones_analyzed)
+    except Exception as exc:
+        logger.error("Erro no job de análise de zonas: %s", exc, exc_info=True)
+
+
+async def trigger_zone_analysis(store_id_str: str, zone_key: str) -> None:
+    """Análise on-demand de zona específica (modelo pesado). Chamado pelo endpoint."""
+    if not settings.ai_analysis_enabled:
+        return
+
+    from app.ai.analyzer import analyze_zone_deep
+    from app.services.digital_twin import compute_zone_twin
+    from app.services.zone_controller import ZONES
+
+    try:
+        zone_cfg = ZONES.get(zone_key)
+        if not zone_cfg:
+            logger.warning("Zone key não encontrada: %s", zone_key)
+            return
+
+        store_uuid = uuid.UUID(store_id_str)
+        async with AsyncSessionLocal() as session:
+            twin = await compute_zone_twin(store_uuid, zone_cfg, session)
+
+        analysis = await analyze_zone_deep(twin)
+
+        # Remove cooldown para permitir re-análise imediata
+        await redis_client.delete(f"ai:zone_cd:{store_id_str}:{zone_key}")
+
+        await _cache_zone_analysis(analysis)
+
+        async with AsyncSessionLocal() as session:
+            store_res = await session.execute(select(Store).where(Store.id == store_uuid))
+            store = store_res.scalar_one_or_none()
+
+        await _log_zone_analysis_to_db(analysis, twin, store.name if store else None)
+        logger.info("On-demand zone analysis: %s/%s → %s", store_id_str, zone_key, analysis.severity)
+    except Exception as exc:
+        logger.error("Erro na análise on-demand da zona %s/%s: %s", store_id_str, zone_key, exc, exc_info=True)
+
+
+async def _cache_zone_analysis(analysis) -> None:
+    import json
+    key = f"ai:last_zone_analysis:{analysis.store_id}:{analysis.zone_key}"
+    payload = {
+        **analysis.model_dump(),
+        "analyzed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await redis_client.set(key, json.dumps(payload), ttl=86400)
+
+
+async def _log_zone_analysis_to_db(analysis, twin: dict, store_name: str | None) -> None:
+    from app.models.audit import AuditLog
+    try:
+        async with AsyncSessionLocal() as session:
+            entry = AuditLog(
+                action_type="ai_analysis",
+                origin="ai",
+                severity=analysis.severity,
+                store_name=store_name,
+                zone_key=analysis.zone_key,
+                description=f"[ZONA {analysis.zone_label}] {analysis.diagnosis or analysis.root_cause}",
+                extra_data={
+                    "zone_label": analysis.zone_label,
+                    "zone_status": analysis.zone_status,
+                    "trend_c_per_hour": analysis.trend_c_per_hour,
+                    "root_cause": analysis.root_cause,
+                    "recommended_action": analysis.recommended_action,
+                    "urgency_hours": analysis.urgency_hours,
+                    "analysis_source": analysis.analysis_source,
+                    "devices_analyzed": analysis.devices_analyzed,
+                    "current_avg_temp": twin.get("current_avg_temp"),
+                    "risk_level": twin.get("risk_level"),
+                    "confidence": twin.get("confidence"),
+                },
+            )
+            session.add(entry)
+
+            if analysis.severity in ("HIGH", "CRITICAL"):
+                await redis_client.publish("zone.ai_analysis.created", {
+                    "zone_key": analysis.zone_key,
+                    "zone_label": analysis.zone_label,
+                    "store_id": analysis.store_id,
+                    "severity": analysis.severity,
+                    "root_cause": analysis.root_cause,
+                    "zone_status": analysis.zone_status,
+                    "trend_c_per_hour": analysis.trend_c_per_hour,
+                    "analysis_source": analysis.analysis_source,
+                })
+
+            await session.commit()
+    except Exception as exc:
+        logger.warning("Falha ao persistir análise de zona: %s", exc)

@@ -29,6 +29,8 @@ from app.cache.redis_client import redis_client
 from app.db.session import AsyncSessionLocal
 from app.models.alert import Alert
 from app.models.device import Device, DeviceParameters, DeviceStatusLatest
+from app.models.reading import DeviceReading
+from app.models.store import StoreSector
 from app.models.zone import ZoneAction, ZoneAutomation
 
 logger = logging.getLogger(__name__)
@@ -56,6 +58,8 @@ class ZoneConfig:
     ideal_max: float
     # ABERTA: área ampla; SALA_FECHADA: sala com paredes — sem interpolação térmica externa
     zone_type: str = "ABERTA"
+    # Se definido, a zona usa IDs de device em vez de nomes de setor (zonas personalizadas)
+    device_ids: list[uuid.UUID] | None = None
 
 
 # ── Zonas abertas (departamentos amplos) ──────────────────────────────────────
@@ -85,16 +89,47 @@ async def run_zone_controller() -> None:
             )
         )
         automations = result.scalars().all()
+        # Pré-carrega zonas customizadas para evitar N+1
+        custom_zones = await _load_all_custom_zones(session)
 
     if not automations:
         return
 
+    all_zones: dict[str, ZoneConfig] = {**ZONES, **custom_zones}
+
     logger.info("Zone controller: avaliando %d zonas ativas", len(automations))
     for automation in automations:
+        zone = all_zones.get(automation.zone_key)
+        if not zone:
+            logger.warning("Zona '%s' sem configuração — ignorando", automation.zone_key)
+            continue
         try:
-            await _evaluate_zone(automation)
+            await _evaluate_zone(automation, zone_override=zone)
         except Exception as exc:
             logger.error("Erro ao avaliar zona %s: %s", automation.zone_key, exc, exc_info=True)
+
+
+async def _load_all_custom_zones(session: AsyncSession) -> dict[str, ZoneConfig]:
+    """Carrega todas as zonas personalizadas do banco em uma única query."""
+    from app.models.custom_zone import CustomZone, CustomZoneDevice
+    result = await session.execute(
+        select(
+            CustomZone.zone_key, CustomZone.name,
+            CustomZone.ideal_min, CustomZone.ideal_max, CustomZone.zone_type,
+            CustomZoneDevice.device_id,
+        ).outerjoin(CustomZoneDevice, CustomZone.id == CustomZoneDevice.zone_id)
+    )
+    zones: dict[str, ZoneConfig] = {}
+    for zone_key, name, ideal_min, ideal_max, zone_type, dev_id in result.all():
+        if zone_key not in zones:
+            zones[zone_key] = ZoneConfig(
+                key=zone_key, label=name, sector_names=[],
+                ideal_min=ideal_min, ideal_max=ideal_max,
+                zone_type=zone_type, device_ids=[],
+            )
+        if dev_id is not None:
+            zones[zone_key].device_ids.append(dev_id)  # type: ignore[union-attr]
+    return zones
 
 
 async def run_zone_verification() -> None:
@@ -183,10 +218,119 @@ async def is_kill_switch_active() -> bool:
     return await redis_client.exists(KILL_SWITCH_KEY)
 
 
+# ── Tendência térmica rápida ──────────────────────────────────────────────────
+
+async def _quick_trend(
+    store_id: uuid.UUID,
+    zone: ZoneConfig,
+    session: AsyncSession,
+    window_minutes: int = 30,
+) -> float | None:
+    """OLS slope (°C/hora) dos últimos `window_minutes` para a zona. None se dados insuficientes."""
+    now = datetime.utcnow()
+    cutoff = now - timedelta(minutes=window_minutes)
+
+    if zone.device_ids is not None:
+        device_ids = [d for d in zone.device_ids]
+    else:
+        dev_result = await session.execute(
+            select(Device.id)
+            .join(StoreSector, Device.sector_id == StoreSector.id)
+            .where(
+                Device.active == True,
+                StoreSector.store_id == store_id,
+                StoreSector.name.in_(zone.sector_names),
+                Device.source_url.is_(None),
+            )
+        )
+        device_ids = [row[0] for row in dev_result.all()]
+    if not device_ids:
+        return None
+
+    hist = await session.execute(
+        select(DeviceReading.time, DeviceReading.temperature)
+        .where(
+            DeviceReading.device_id.in_(device_ids),
+            DeviceReading.time >= cutoff,
+            DeviceReading.temperature.is_not(None),
+        )
+        .order_by(DeviceReading.time.asc())
+    )
+    hist_rows = hist.all()
+    if len(hist_rows) < 3:
+        return None
+
+    buckets: dict[int, list[float]] = {}
+    for t_row, temp in hist_rows:
+        b = int((t_row - cutoff).total_seconds() / 300)
+        buckets.setdefault(b, []).append(float(temp))
+
+    points = sorted([(b * 5.0, mean(ts)) for b, ts in buckets.items()])
+    if len(points) < 2:
+        return None
+
+    n = len(points)
+    sx  = sum(x for x, _ in points)
+    sy  = sum(y for _, y in points)
+    sxy = sum(x * y for x, y in points)
+    sx2 = sum(x * x for x, _ in points)
+    denom = n * sx2 - sx * sx
+    if abs(denom) < 1e-9:
+        return None
+    return round((n * sxy - sx * sy) / denom * 60, 2)
+
+
+def _step_size(status: str) -> int:
+    """Passo de ajuste de setpoint: 2°C para zona crítica, 1°C nos demais casos."""
+    return 2 if status == "CRITICAL" else 1
+
+
+async def _log_trending(
+    automation: ZoneAutomation,
+    zone: ZoneConfig,
+    avg_temp: float,
+    trend: float,
+    session: AsyncSession,
+) -> None:
+    """Registra suggestion quando zona está confortável mas aquecendo rapidamente."""
+    cooldown_key = f"zone:trend_suggestion:{automation.store_id}:{zone.key}"
+    if await redis_client.exists(cooldown_key):
+        return
+    await redis_client.set(cooldown_key, "1", ttl=1800)  # cooldown de 30 min para sugestões de tendência
+
+    minutes_to_warm = int((zone.ideal_max - avg_temp) / trend * 60) if trend > 0 else 0
+    session.add(ZoneAction(
+        store_id=automation.store_id,
+        zone_key=zone.key,
+        zone_label=zone.label,
+        temp_before=round(avg_temp, 2),
+        ideal_min=zone.ideal_min,
+        ideal_max=zone.ideal_max,
+        direction="down",
+        reason=(
+            f"Zona confortável ({avg_temp:.1f}°C) mas aquecendo a {trend:+.1f}°C/h. "
+            f"Previsão: exceder faixa ideal em ~{minutes_to_warm} min. Monitorar."
+        ),
+        confidence=round(min(trend / 4.0, 1.0), 2),
+        mode=automation.mode,
+        status="suggestion",
+    ))
+    await session.commit()
+
+    await redis_client.publish("zone.action.created", {
+        "store_id": str(automation.store_id),
+        "zone_key": zone.key,
+        "zone_label": zone.label,
+        "status": "suggestion",
+        "reason": "trending_warm",
+        "trend_c_per_hour": trend,
+    })
+
+
 # ── Avaliação de uma zona ─────────────────────────────────────────────────────
 
-async def _evaluate_zone(automation: ZoneAutomation) -> None:
-    zone = ZONES.get(automation.zone_key)
+async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig | None = None) -> None:
+    zone = zone_override or ZONES.get(automation.zone_key)
     if not zone:
         return
 
@@ -205,7 +349,7 @@ async def _evaluate_zone(automation: ZoneAutomation) -> None:
             and d.device.status_latest
             and d.device.status_latest.status_classification not in BLOCKED_STATUSES
             and not d.device.dnd
-            and not d.device.is_external_sensor  # sensores externos não recebem comandos
+            and not d.device.source_url  # sensores externos não recebem comandos
         ]
 
         if not readable:
@@ -225,7 +369,18 @@ async def _evaluate_zone(automation: ZoneAutomation) -> None:
         avg_temp = mean(temps)
         status = _classify(avg_temp, zone.ideal_min, zone.ideal_max)
 
+        # Tendência térmica (últimos 30 min)
+        trend = await _quick_trend(automation.store_id, zone, session)
+
         if status == "COMFORT":
+            # Zona confortável mas aquecendo rapidamente → suggestion preemptiva
+            if trend is not None and trend > 2.5:
+                await _log_trending(automation, zone, avg_temp, trend, session)
+            return
+
+        # Zona WARM mas já resfriando — dar tempo ao AC anterior de responder
+        if status == "WARM" and trend is not None and trend < -1.5:
+            logger.debug("Zone %s: WARM mas resfriando a %.1f°C/h — aguardando resposta", zone.key, trend)
             return
 
         # Cooldown — verificação rápida (leitura)
@@ -249,8 +404,70 @@ async def _evaluate_zone(automation: ZoneAutomation) -> None:
             await _raise_zone_alert(automation, zone, avg_temp, session)
             return
 
-        # Seleciona melhor device
-        best = _select_best_device(readable, status, params_map)
+        direction = "down" if status in ("WARM", "HOT", "CRITICAL") else "up"
+        step = _step_size(status)
+
+        power_on_candidate = _select_power_on_candidate(devices, params_map) if direction == "down" else None
+        if power_on_candidate is not None:
+            power_device, power_params = power_on_candidate
+            confidence = _confidence(avg_temp, zone, status, max(len(readable), 1))
+            reason = _build_power_on_reason(avg_temp, zone, status, power_device.device, trend)
+            setpoint_before = power_params.setpoint_cool
+            action_status = "suggestion"
+            block_reason = None
+
+            if automation.mode in ("auto", "semi"):
+                if not await redis_client.acquire_lock(cooldown_key, ttl=ZONE_COOLDOWN_SECONDS):
+                    return
+                ok = await _execute_power_on(power_device.device, power_params, session)
+                if ok:
+                    action_status = "pending_verification"
+                    logger.info(
+                        "Zone %s [%s]: ligando %s para resfriar zona (conf=%.0f%%)",
+                        zone.key, automation.mode, power_device.device.name, confidence * 100,
+                    )
+                else:
+                    action_status = "blocked"
+                    block_reason = "Falha ao ligar aparelho pela Brise API"
+                    await redis_client.release_lock(cooldown_key)
+
+            action = ZoneAction(
+                store_id=automation.store_id,
+                zone_key=zone.key,
+                zone_label=zone.label,
+                device_id=power_device.device.id,
+                device_name=power_device.device.name,
+                direction="down",
+                temp_before=round(avg_temp, 2),
+                ideal_min=zone.ideal_min,
+                ideal_max=zone.ideal_max,
+                setpoint_before=setpoint_before,
+                setpoint_after=setpoint_before,
+                reason=reason,
+                confidence=confidence,
+                mode=automation.mode,
+                status=action_status,
+                block_reason=block_reason,
+            )
+            session.add(action)
+            await session.commit()
+
+            await redis_client.publish("zone.action.created", {
+                "store_id": str(automation.store_id),
+                "zone_key": zone.key,
+                "zone_label": zone.label,
+                "device_name": power_device.device.name,
+                "direction": "down",
+                "status": action_status,
+                "confidence": round(confidence * 100),
+                "setpoint_before": setpoint_before,
+                "setpoint_after": setpoint_before,
+                "action": "power_on",
+            })
+            return
+
+        # Seleciona melhor device (com verificação de headroom de setpoint)
+        best = _select_best_device(readable, status, params_map, direction, automation.setpoint_min, automation.setpoint_max)
         if best is None:
             await _log_blocked(
                 automation, zone, avg_temp,
@@ -260,8 +477,7 @@ async def _evaluate_zone(automation: ZoneAutomation) -> None:
             return
 
         best_device, best_params = best
-        direction = "down" if status in ("WARM", "HOT", "CRITICAL") else "up"
-        new_setpoint = best_params.setpoint_cool + (1 if direction == "up" else -1)
+        new_setpoint = best_params.setpoint_cool + (step if direction == "up" else -step)
 
         if not (automation.setpoint_min <= new_setpoint <= automation.setpoint_max):
             await _log_blocked(
@@ -272,7 +488,7 @@ async def _evaluate_zone(automation: ZoneAutomation) -> None:
             return
 
         confidence = _confidence(avg_temp, zone, status, len(readable))
-        reason = _build_reason(avg_temp, zone, status, best_device.device, direction)
+        reason = _build_reason(avg_temp, zone, status, best_device.device, direction, trend)
 
         # Captura ANTES de _execute_setpoint modificar params.setpoint_cool
         setpoint_before = best_params.setpoint_cool
@@ -284,7 +500,7 @@ async def _evaluate_zone(automation: ZoneAutomation) -> None:
             # acquire_lock é atômico (SET NX EX) — evita race entre múltiplos workers
             if not await redis_client.acquire_lock(cooldown_key, ttl=ZONE_COOLDOWN_SECONDS):
                 return  # outro worker chegou primeiro entre o exists() e agora
-            ok = await _execute_setpoint(best_device.device, best_params, direction, automation, session)
+            ok = await _execute_setpoint(best_device.device, best_params, direction, automation, session, step=step)
             if ok:
                 action_status = "pending_verification"
                 logger.info(
@@ -318,11 +534,40 @@ async def _evaluate_zone(automation: ZoneAutomation) -> None:
         session.add(action)
         await session.commit()
 
+        await redis_client.publish("zone.action.created", {
+            "store_id": str(automation.store_id),
+            "zone_key": zone.key,
+            "zone_label": zone.label,
+            "device_name": best_device.device.name,
+            "direction": direction,
+            "status": action_status,
+            "confidence": round(confidence * 100),
+            "setpoint_before": setpoint_before,
+            "setpoint_after": new_setpoint,
+        })
+
 
 # ── Verificação de resultado ──────────────────────────────────────────────────
 
 async def _verify_action(action: ZoneAction, session: AsyncSession) -> None:
     zone = ZONES.get(action.zone_key)
+    if zone is None:
+        # Tenta carregar como zona customizada
+        from app.models.custom_zone import CustomZone, CustomZoneDevice
+        cz_res = await session.execute(
+            select(CustomZone).where(CustomZone.zone_key == action.zone_key)
+        )
+        cz = cz_res.scalar_one_or_none()
+        if cz:
+            dev_res = await session.execute(
+                select(CustomZoneDevice.device_id).where(CustomZoneDevice.zone_id == cz.id)
+            )
+            device_ids = [r[0] for r in dev_res.all()]
+            zone = ZoneConfig(
+                key=cz.zone_key, label=cz.name, sector_names=[],
+                ideal_min=cz.ideal_min, ideal_max=cz.ideal_max,
+                zone_type=cz.zone_type, device_ids=device_ids,
+            )
     if not zone:
         return
 
@@ -377,21 +622,30 @@ class _DeviceRow:
 async def _get_zone_devices(
     store_id: uuid.UUID, zone: ZoneConfig, session: AsyncSession
 ) -> tuple[list[_DeviceRow], dict[uuid.UUID, DeviceParameters]]:
-    from app.models.store import StoreSector
-    result = await session.execute(
-        select(Device, DeviceStatusLatest)
-        .join(DeviceStatusLatest, Device.id == DeviceStatusLatest.device_id)
-        .join(StoreSector, Device.sector_id == StoreSector.id)
-        .where(
-            Device.active == True,
-            StoreSector.store_id == store_id,
-            StoreSector.name.in_(zone.sector_names),
+    if zone.device_ids is not None:
+        # Zona personalizada: filtra por IDs de device
+        if not zone.device_ids:
+            return [], {}
+        result = await session.execute(
+            select(Device, DeviceStatusLatest)
+            .join(DeviceStatusLatest, Device.id == DeviceStatusLatest.device_id)
+            .where(Device.active == True, Device.id.in_(zone.device_ids))
         )
-    )
+    else:
+        # Zona padrão: filtra por nomes de setor
+        result = await session.execute(
+            select(Device, DeviceStatusLatest)
+            .join(DeviceStatusLatest, Device.id == DeviceStatusLatest.device_id)
+            .join(StoreSector, Device.sector_id == StoreSector.id)
+            .where(
+                Device.active == True,
+                StoreSector.store_id == store_id,
+                StoreSector.name.in_(zone.sector_names),
+            )
+        )
     rows = result.all()
     devices = [_DeviceRow(d, s) for d, s in rows]
 
-    # Fetch parameters
     if not devices:
         return [], {}
     device_ids = [r.device.id for r in devices]
@@ -406,10 +660,18 @@ def _select_best_device(
     readable: list[_DeviceRow],
     status: str,
     params_map: dict[uuid.UUID, DeviceParameters],
+    direction: str,
+    setpoint_min: int,
+    setpoint_max: int,
 ) -> tuple[_DeviceRow, DeviceParameters] | None:
+    going_down = direction == "down"
     candidates = [
         r for r in readable
-        if r.device.id in params_map and not r.device.source_url  # não é sensor externo
+        if r.device.id in params_map
+        and not r.device.source_url
+        # Headroom: device must have room to move in the desired direction
+        and (params_map[r.device.id].setpoint_cool > setpoint_min if going_down
+             else params_map[r.device.id].setpoint_cool < setpoint_max)
     ]
     if not candidates:
         return None
@@ -424,16 +686,72 @@ def _select_best_device(
     return best, params_map[best.device.id]
 
 
+def _select_power_on_candidate(
+    devices: list[_DeviceRow],
+    params_map: dict[uuid.UUID, DeviceParameters],
+) -> tuple[_DeviceRow, DeviceParameters] | None:
+    candidates = []
+    for row in devices:
+        params = params_map.get(row.device.id)
+        if params is None:
+            continue
+        if row.device.dnd or row.device.source_url:
+            continue
+        is_off = (
+            row.status.status_classification == "DESLIGADO"
+            or row.status.state is False
+            or params.mode_device == 0
+        )
+        if is_off:
+            candidates.append(row)
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda row: (row.device.btu or 0, row.device.name or ""), reverse=True)
+    best = candidates[0]
+    return best, params_map[best.device.id]
+
+
+async def _execute_power_on(
+    device: Device,
+    params: DeviceParameters,
+    session: AsyncSession,
+) -> bool:
+    brise_params = {
+        "modeDevice": 1,
+        "modeAC": 0,
+        "fanSpeed": params.fan_speed,
+        "setpointCool": params.setpoint_cool,
+        "setpointHeat": params.setpoint_heat,
+        "ecoCool": params.eco_cool,
+        "ecoHeat": params.eco_heat,
+    }
+
+    success = await brise_client.put_parameters(device.brise_device_id, brise_params)
+    if success:
+        params.mode_device = 1
+        params.mode_ac = 0
+        params.synced_at = datetime.utcnow()
+        if device.status_latest:
+            device.status_latest.state = True
+            device.status_latest.updated_at = datetime.utcnow()
+        await session.commit()
+    return success
+
+
 async def _execute_setpoint(
     device: Device,
     params: DeviceParameters,
     direction: str,
     automation: ZoneAutomation,
     session: AsyncSession,
+    step: int = 1,
 ) -> bool:
+    delta = step if direction == "up" else -step
     new_setpoint = max(
         automation.setpoint_min,
-        min(automation.setpoint_max, params.setpoint_cool + (1 if direction == "up" else -1)),
+        min(automation.setpoint_max, params.setpoint_cool + delta),
     )
 
     brise_params = {
@@ -524,7 +842,6 @@ async def _raise_zone_alert(
         return
     if device_id is None and automation is not None:
         # Pega qualquer device da zona para associar o alerta
-        from app.models.store import StoreSector
         res = await session.execute(
             select(Device.id)
             .join(StoreSector, Device.sector_id == StoreSector.id)
@@ -568,25 +885,48 @@ def _confidence(avg: float, zone: ZoneConfig, status: str, device_count: int) ->
     return round(base, 2)
 
 
+def _build_power_on_reason(
+    avg: float,
+    zone: ZoneConfig,
+    status: str,
+    device: Device,
+    trend: float | None = None,
+) -> str:
+    labels = {"WARM": "zona aquecendo", "HOT": "zona quente", "CRITICAL": "zona crítica"}
+    label = labels.get(status, status)
+    wall_note = (
+        " [SALA_FECHADA — aparelho interno da sala usado.]"
+        if zone.zone_type == "SALA_FECHADA" else ""
+    )
+    trend_note = f" Tendência {trend:+.1f}°C/h." if trend is not None else ""
+    return (
+        f"Temperatura média {avg:.1f}°C ({label}).{trend_note} "
+        f"Faixa ideal {zone.ideal_min}–{zone.ideal_max}°C. "
+        f"Ligar {device.name} desligado para aumentar capacidade de resfriamento da zona.{wall_note}"
+    )
+
+
 def _build_reason(
     avg: float,
     zone: ZoneConfig,
     status: str,
     device: Device,
     direction: str,
+    trend: float | None = None,
 ) -> str:
     direction_pt = "reduzir" if direction == "down" else "aumentar"
     labels = {"WARM": "zona aquecendo", "HOT": "zona quente", "CRITICAL": "zona crítica", "COLD": "zona fria"}
     label = labels.get(status, status)
     wall_note = (
-        " [SALA_FECHADA — aparelho interno da sala usado. "
-        "Influência de equipamentos externos ignorada por existir parede.]"
+        " [SALA_FECHADA — aparelho interno da sala usado.]"
         if zone.zone_type == "SALA_FECHADA" else ""
     )
+    trend_note = f" Tendência {trend:+.1f}°C/h." if trend is not None else ""
+    step = _step_size(status)
     return (
-        f"Temperatura média {avg:.1f}°C ({label}). "
+        f"Temperatura média {avg:.1f}°C ({label}).{trend_note} "
         f"Faixa ideal {zone.ideal_min}–{zone.ideal_max}°C. "
-        f"Ajuste via {device.name} para {direction_pt} 1°C no setpoint.{wall_note}"
+        f"Ajuste via {device.name} para {direction_pt} {step}°C no setpoint.{wall_note}"
     )
 
 

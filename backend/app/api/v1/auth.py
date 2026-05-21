@@ -342,7 +342,12 @@ async def register(
 ):
     user_count = await db.scalar(select(func.count(User.id))) or 0
     if user_count > 0:
-        await get_current_user(authorization=authorization, db=db)
+        caller = await get_current_user(authorization=authorization, db=db)
+        if caller.role != "ADMIN":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Apenas administradores podem cadastrar novos usuários.",
+            )
 
     result = await db.execute(select(User).where(User.email == data.email))
     if result.scalar_one_or_none():

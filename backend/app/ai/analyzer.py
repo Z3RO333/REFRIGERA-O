@@ -315,3 +315,225 @@ def _fallback_analysis(device: dict) -> DeviceAnalysis:
         urgency_hours=urgency,
         email_worthy=email,
     )
+
+
+# ── Análise de zona ───────────────────────────────────────────────────────────
+
+ZONE_SYSTEM_PROMPT = """Você é um especialista em diagnóstico de sistemas de climatização para ambientes comerciais.
+
+Seu papel é analisar o estado térmico de uma ZONA completa (grupo de setores com controle unificado) e identificar problemas, causas raiz e ações corretivas para o operador ou técnico.
+
+Conhecimentos aplicáveis:
+- A temperatura média da zona é a referência principal; avalie o estado coletivo, não individualmente
+- Tendência positiva (°C/hora) em zona QUENTE ou CRÍTICA exige ação imediata
+- SALA_FECHADA tem inércia térmica maior: problemas se acumulam lentamente mas são mais difíceis de reverter
+- Zona em modo manual sem ação do operador é risco operacional quando fora da faixa ideal
+- Alta variância entre dispositivos indica fluxo de ar desequilibrado ou falha pontual em um equipamento
+- Zona em early_warning (confortável mas aquecendo rapidamente) deve ser ajustada antes de sair da faixa
+- Dispositivos com eficiência < 60% são suspeitos de filtro sujo ou baixo nível de gás
+
+Responda SOMENTE com JSON puro, sem markdown, sem texto fora do JSON."""
+
+
+class ZoneAnalysis(BaseModel):
+    zone_key: str
+    zone_label: str
+    store_id: str
+    issue_detected: bool = False
+    severity: str | None = None
+    root_cause: str = ""
+    diagnosis: str = ""
+    recommended_action: str = ""
+    urgency_hours: int = 24
+    analysis_source: str = "llm"
+    devices_analyzed: int = 0
+    zone_status: str = ""
+    trend_c_per_hour: float | None = None
+
+    @field_validator("severity", mode="before")
+    @classmethod
+    def validate_severity(cls, v) -> str | None:
+        if not v:
+            return None
+        v = str(v).upper().strip()
+        return v if v in {"LOW", "MEDIUM", "HIGH", "CRITICAL"} else "MEDIUM"
+
+    @field_validator("urgency_hours", mode="before")
+    @classmethod
+    def validate_urgency(cls, v) -> int:
+        try:
+            return max(0, int(v))
+        except (TypeError, ValueError):
+            return 24
+
+
+async def analyze_zone(twin: dict) -> ZoneAnalysis:
+    """Análise LLM da zona com fallback para regras heurísticas."""
+    async with _SEM:
+        result = await _call_zone_llm(twin, model=settings.ollama_model, max_tokens=400)
+        if result:
+            return result
+
+    logger.warning("LLM indisponível para zona %s — usando fallback", twin.get("zone_label"))
+    return _fallback_zone_analysis(twin)
+
+
+async def analyze_zone_deep(twin: dict) -> ZoneAnalysis:
+    """Análise aprofundada de zona (modelo pesado, on-demand)."""
+    async with _SEM:
+        result = await _call_zone_llm(twin, model=settings.ollama_model_deep, max_tokens=600)
+        if result:
+            return result
+        result = await _call_zone_llm(twin, model=settings.ollama_model, max_tokens=400)
+        if result:
+            return result
+    return _fallback_zone_analysis(twin)
+
+
+async def _call_zone_llm(twin: dict, model: str, max_tokens: int) -> ZoneAnalysis | None:
+    msg = _build_zone_prompt(twin)
+    try:
+        async with httpx.AsyncClient(timeout=360) as client:
+            resp = await client.post(
+                f"{settings.ollama_url}/v1/chat/completions",
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": ZONE_SYSTEM_PROMPT},
+                        {"role": "user",   "content": msg},
+                    ],
+                    "temperature": 0.15,
+                    "max_tokens": max_tokens,
+                    "stream": False,
+                    "options": {"num_ctx": 4096},
+                },
+            )
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"]
+        return _parse_zone_response(content, twin)
+    except Exception as exc:
+        logger.warning("LLM %s falhou para zona %s: %s", model, twin.get("zone_label"), exc)
+        return None
+
+
+def _build_zone_prompt(twin: dict) -> str:
+    status    = twin.get("current_status", "NO_READING")
+    avg       = twin.get("current_avg_temp")
+    trend     = twin.get("trend_c_per_hour")
+    risk      = twin.get("risk_level", "LOW")
+    ideal_min = twin.get("ideal_min")
+    ideal_max = twin.get("ideal_max")
+    zone_type = twin.get("zone_type", "ABERTA")
+    early     = twin.get("early_warning", False)
+    confidence= twin.get("confidence", 0)
+    devices   = twin.get("contributing_devices", [])
+    p30       = twin.get("predicted_temp_30m")
+
+    active = [d for d in devices if not d.get("is_external_sensor") and d.get("status") not in ("DESLIGADO", "SEM_LEITURA")]
+    anomalous = [d for d in active if d.get("status") not in ("NORMAL",)]
+
+    lines = [
+        f"Zona: {twin.get('zone_label', twin.get('zone_key', '?'))}",
+        f"Tipo: {zone_type}",
+        f"Faixa de conforto: {f'{ideal_min}–{ideal_max}°C' if ideal_min and ideal_max else 'não configurada'}",
+        "",
+        "── Estado atual ──",
+        f"Temperatura média: {f'{avg:.1f}°C' if avg is not None else 'sem leitura'}",
+        f"Previsão 30 min: {f'{p30:.1f}°C' if p30 is not None else 'desconhecida'}",
+        f"Status da zona: {status}",
+        f"Tendência: {f'{trend:+.1f}°C/hora' if trend is not None else 'desconhecida'}",
+        f"Nível de risco: {risk}",
+        f"Alerta preemptivo: {'SIM — zona confortável mas aquecendo rapidamente' if early else 'Não'}",
+        f"Confiança da leitura: {round(confidence * 100)}%",
+        "",
+        f"── Dispositivos ({len(devices)} total, {len(active)} ACs ativos, {len(anomalous)} com anomalia) ──",
+    ]
+
+    for d in devices:
+        temp_s = f"{d['temperature']:.1f}°C" if d.get("temperature") is not None else "—"
+        eff_s  = f"{round(d['efficiency_score'] * 100)}%" if d.get("efficiency_score") is not None else "—"
+        ext    = " [sensor externo]" if d.get("is_external_sensor") else ""
+        lines.append(f"  • {d['name']}: {temp_s}, status={d['status']}, efic.={eff_s}{ext}")
+
+    schema = (
+        f'{{"zone_key":"{twin["zone_key"]}",'
+        f'"zone_label":"{twin.get("zone_label", twin["zone_key"])}",'
+        '"issue_detected":true,'
+        '"severity":"HIGH",'
+        '"root_cause":"causa raiz da anomalia térmica na zona em 1 frase",'
+        '"diagnosis":"descrição do problema coletivo observado na zona",'
+        '"recommended_action":"ação específica para o operador ou técnico",'
+        '"urgency_hours":4}'
+    )
+
+    lines += [
+        "",
+        "Com base no estado coletivo da zona, identifique o problema e retorne o JSON:",
+        schema,
+    ]
+
+    return "\n".join(lines)
+
+
+def _parse_zone_response(raw: str, twin: dict) -> ZoneAnalysis | None:
+    cleaned = re.sub(r"<think>[\s\S]*?</think>", "", raw, flags=re.IGNORECASE)
+    cleaned = re.sub(r"```(?:json)?", "", cleaned).strip()
+    match = re.search(r"\{[\s\S]*\}", cleaned)
+    if not match:
+        logger.debug("Sem JSON na resposta de zona %s: %r", twin.get("zone_label"), raw[:200])
+        return None
+    try:
+        data = json.loads(match.group())
+        data.setdefault("zone_key", twin["zone_key"])
+        data.setdefault("zone_label", twin.get("zone_label", twin["zone_key"]))
+        data.setdefault("store_id", twin["store_id"])
+        analysis = ZoneAnalysis(**data)
+        if not analysis.issue_detected or not analysis.severity:
+            return None
+        analysis.devices_analyzed = len(twin.get("contributing_devices", []))
+        analysis.zone_status = twin.get("current_status", "")
+        analysis.trend_c_per_hour = twin.get("trend_c_per_hour")
+        return analysis
+    except Exception as exc:
+        logger.debug("Parse zona falhou %s: %s", twin.get("zone_label"), exc)
+        return None
+
+
+def _fallback_zone_analysis(twin: dict) -> ZoneAnalysis:
+    status    = twin.get("current_status", "NO_READING")
+    risk      = twin.get("risk_level", "LOW")
+    avg       = twin.get("current_avg_temp")
+    trend     = twin.get("trend_c_per_hour") or 0.0
+    ideal_max = twin.get("ideal_max", 24)
+    devices   = twin.get("contributing_devices", [])
+    anomalous = [d for d in devices if d.get("status") not in ("NORMAL", "DESLIGADO", "SEM_LEITURA")]
+
+    if risk == "CRITICAL" or status == "CRITICAL":
+        severity, urgency = "CRITICAL", 0
+    elif risk == "HIGH" or status == "HOT":
+        severity, urgency = "HIGH", 2
+    elif risk == "MEDIUM" or status == "WARM":
+        severity, urgency = "MEDIUM", 8
+    else:
+        severity, urgency = "LOW", 24
+
+    temp_s = f"{avg:.1f}°C" if avg is not None else "desconhecida"
+
+    return ZoneAnalysis(
+        zone_key=twin["zone_key"],
+        zone_label=twin.get("zone_label", twin["zone_key"]),
+        store_id=twin["store_id"],
+        issue_detected=True,
+        severity=severity,
+        root_cause=(
+            f"LLM indisponível — {len(anomalous)} de {len(devices)} dispositivos com anomalia, "
+            f"tendência {trend:+.1f}°C/h."
+        ),
+        diagnosis=f"Zona {status} com temperatura média {temp_s} (ideal ≤ {ideal_max}°C).",
+        recommended_action=twin.get("recommended_action", "Verificar dispositivos da zona e ajustar setpoint."),
+        urgency_hours=urgency,
+        analysis_source="fallback",
+        devices_analyzed=len(devices),
+        zone_status=status,
+        trend_c_per_hour=twin.get("trend_c_per_hour"),
+    )

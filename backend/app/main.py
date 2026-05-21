@@ -5,14 +5,19 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1 import devices, alerts, history, kpis, stores, maintenance, auth, ai, zones, automation, digital_twin, users, audit, logs
 from app.api.v1.auth import get_current_user
+from app.db.session import AsyncSessionLocal
+from sqlalchemy import text
 from app.models import zone as _zone_models  # noqa: F401 — ensure tables are created
 from app.models import audit as _audit_models  # noqa: F401
+from app.models import custom_zone as _custom_zone_models  # noqa: F401
 from app.api import websocket as ws_router
+from app.api.websocket import start_redis_listener
 from app.db.session import engine, Base
 from app.db.migrations import run_migrations, seed_external_sensors
 from app.cache.redis_client import redis_client
 from app.config import settings
 from app.polling.scheduler import start_scheduler, stop_scheduler
+from app.brise.client import brise_client
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +48,10 @@ async def lifespan(app: FastAPI):
     await run_migrations()
     await seed_external_sensors()
     await start_scheduler()
+    await start_redis_listener()
     yield
     await stop_scheduler()
+    await brise_client.aclose()
     await redis_client.disconnect()
 
 app = FastAPI(
@@ -80,5 +87,27 @@ app.include_router(logs.router, prefix="/api/v1/logs", tags=["logs"], dependenci
 app.include_router(ws_router.router, tags=["websocket"])
 
 @app.get("/health")
-async def health():
+async def health_root():
     return {"status": "ok"}
+
+
+@app.get("/api/v1/health")
+async def health():
+    """Health check com verificação de DB e Redis."""
+    checks: dict[str, str] = {}
+
+    try:
+        async with AsyncSessionLocal() as session:
+            await session.execute(text("SELECT 1"))
+        checks["db"] = "ok"
+    except Exception as exc:
+        checks["db"] = f"error: {exc}"
+
+    try:
+        await redis_client.client.ping()
+        checks["redis"] = "ok"
+    except Exception as exc:
+        checks["redis"] = f"error: {exc}"
+
+    all_ok = all(v == "ok" for v in checks.values())
+    return {"status": "ok" if all_ok else "degraded", "checks": checks}

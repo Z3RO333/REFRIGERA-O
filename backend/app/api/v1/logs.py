@@ -40,6 +40,10 @@ def _audit_to_entry(a: AuditLog) -> dict:
         event_type = "kill_switch"
     elif action_type == "zone_trigger":
         event_type = "zone_trigger"
+    elif action_type == "alert_ack":
+        event_type = "alert_ack"
+    elif action_type == "alert_resolve":
+        event_type = "alert_resolve"
     else:
         event_type = action_type
 
@@ -161,10 +165,13 @@ async def list_logs(
 ) -> dict:
     """Retorna log unificado: audit_logs + zone_actions mesclados por timestamp."""
 
+    # Fetch enough rows to satisfy offset+limit from both sources
+    _fetch_limit = max(500, offset + limit + 50)
+
     # ── Audit logs ────────────────────────────────────────────────────────────
     audit_q = select(AuditLog).where(
         AuditLog.action_type.not_in(_SKIP_ACTION_TYPES)
-    ).order_by(AuditLog.created_at.desc()).limit(500)
+    ).order_by(AuditLog.created_at.desc()).limit(_fetch_limit)
 
     if store_id:
         audit_q = audit_q.where(AuditLog.store_id == store_id)
@@ -190,6 +197,8 @@ async def list_logs(
             "ai_analysis": ["ai_analysis"],
             "kill_switch": ["kill_switch"],
             "zone_trigger": ["zone_trigger"],
+            "alert_ack": ["alert_ack"],
+            "alert_resolve": ["alert_resolve"],
         }
         if event_type in type_map:
             audit_q = audit_q.where(AuditLog.action_type.in_(type_map[event_type]))
@@ -209,7 +218,7 @@ async def list_logs(
         .outerjoin(Store, ZoneAction.store_id == Store.id)
     )
     # Reaplicar filtros na query com join
-    zone_q_with_store = zone_q_with_store.order_by(ZoneAction.created_at.desc()).limit(500)
+    zone_q_with_store = zone_q_with_store.order_by(ZoneAction.created_at.desc()).limit(_fetch_limit)
     if store_id:
         zone_q_with_store = zone_q_with_store.where(ZoneAction.store_id == store_id)
     if zone_key:
@@ -305,12 +314,14 @@ async def log_kpis(
             q = q.where(AuditLog.severity == sev)
         return (await db.execute(q)).scalar() or 0
 
-    manual_controls = await _count_audit(["device_control"])
-    ai_analyses     = await _count_audit(["ai_analysis"])
-    mode_changes    = await _count_audit(["zone_mode_change"])
-    kill_switches   = await _count_audit(["kill_switch"])
-    ai_critical     = await _count_audit(["ai_analysis"], "CRITICAL")
-    ai_high         = await _count_audit(["ai_analysis"], "HIGH")
+    manual_controls  = await _count_audit(["device_control"])
+    ai_analyses      = await _count_audit(["ai_analysis"])
+    mode_changes     = await _count_audit(["zone_mode_change"])
+    kill_switches    = await _count_audit(["kill_switch"])
+    ai_critical      = await _count_audit(["ai_analysis"], "CRITICAL")
+    ai_high          = await _count_audit(["ai_analysis"], "HIGH")
+    alert_acks       = await _count_audit(["alert_ack"])
+    alert_resolves   = await _count_audit(["alert_resolve"])
 
     # Tempo médio de recuperação (verified_success com temp_before e temp_after)
     recovery_q = _zone_filter(
@@ -370,6 +381,8 @@ async def log_kpis(
         "ai_high": ai_high,
         "mode_changes": mode_changes,
         "kill_switches": kill_switches,
+        "alert_acks": alert_acks,
+        "alert_resolves": alert_resolves,
         "avg_recovery_minutes": avg_recovery_min,
         "top_zones": zone_top,
         "top_devices": device_top,

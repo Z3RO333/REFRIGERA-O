@@ -1,12 +1,29 @@
 import asyncio
 import json
+import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 from app.api.v1.auth import get_active_user_from_token
 from app.cache.redis_client import redis_client
 from app.config import settings
 from app.db.session import AsyncSessionLocal
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
+
+_CHANNELS = [
+    "device.reading.new",
+    "alert.created",
+    "alert.resolved",
+    "zone.automation.mode.changed",
+    "zone.action.created",
+    "automation.kill_switch.changed",
+    "ai.analysis.created",
+    "zone.ai_analysis.created",
+    "device.command.sent",
+    "device.command.failed",
+]
+
 
 class ConnectionManager:
     def __init__(self):
@@ -29,25 +46,33 @@ class ConnectionManager:
         for ws in dead:
             self.active.remove(ws)
 
+
 manager = ConnectionManager()
 
-async def redis_listener():
-    pub = redis_client.client.pubsub()
-    await pub.subscribe(
-        "device.reading.new",
-        "alert.created",
-        "alert.resolved",
-        "zone.automation.mode.changed",
-    )
-    async for message in pub.listen():
-        if message["type"] == "message":
-            try:
-                data = json.loads(message["data"])
-                await manager.broadcast({"channel": message["channel"], "data": data})
-            except Exception as e:
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.error(f"Erro ao processar mensagem do Redis para Websocket: {e}")
+
+async def start_redis_listener():
+    """Starts the single global Redis pub/sub listener. Called once from lifespan."""
+    asyncio.create_task(_redis_listener_loop())
+
+
+async def _redis_listener_loop():
+    """Runs forever in the background, reconnecting on error."""
+    while True:
+        try:
+            pub = redis_client.client.pubsub()
+            await pub.subscribe(*_CHANNELS)
+            logger.info("WebSocket Redis listener subscribed to %d channels", len(_CHANNELS))
+            async for message in pub.listen():
+                if message["type"] == "message":
+                    try:
+                        data = json.loads(message["data"])
+                        await manager.broadcast({"channel": message["channel"], "data": data})
+                    except Exception as e:
+                        logger.error("Erro ao processar mensagem Redis→WS: %s", e)
+        except Exception as e:
+            logger.error("Redis listener caiu, reconectando em 5s: %s", e)
+            await asyncio.sleep(5)
+
 
 @router.websocket("/ws/updates")
 async def websocket_endpoint(websocket: WebSocket):
@@ -74,10 +99,8 @@ async def websocket_endpoint(websocket: WebSocket):
             return
 
     await manager.connect(websocket, subprotocol="bearer" if uses_bearer_subprotocol else None)
-    listener_task = asyncio.create_task(redis_listener())
     try:
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
-        listener_task.cancel()

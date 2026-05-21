@@ -1,4 +1,12 @@
 node_modules/
-dist/
-.env
-.env.*
+src/
+public/
+*.ts
+*.tsx
+*.json
+*.md
+.env*
+vite.config.*
+tsconfig*
+tailwind*
+postcss*

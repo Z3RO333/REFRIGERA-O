@@ -27,6 +27,10 @@ class ZoneAutomation(Base):
     allowed_end_minute: Mapped[int] = mapped_column(Integer, default=30)    # 18:30
     is_critical_zone: Mapped[bool] = mapped_column(Boolean, default=False)  # bloqueia auto/semi
 
+    # ── Prioridade operacional ────────────────────────────────────────────────
+    # conforto | economia | estabilidade | manutencao
+    priority: Mapped[str] = mapped_column(String(20), default="conforto")
+
     # ── Tipo de zona e bloqueio térmico ──────────────────────────────────────
     zone_type: Mapped[str] = mapped_column(String(20), default="ABERTA")
     reading_confidence: Mapped[float] = mapped_column(Float, default=1.0)

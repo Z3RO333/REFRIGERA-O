@@ -12,6 +12,8 @@ from app.cache.redis_client import redis_client
 from app.db.session import get_db, AsyncSessionLocal
 from app.models.zone import ZoneAction, ZoneAutomation
 from app.models.audit import AuditLog
+from app.models.user import User
+from app.api.v1.auth import require_role
 from app.services.zone_controller import KILL_SWITCH_KEY
 
 router = APIRouter()
@@ -53,10 +55,13 @@ async def automation_status(db: AsyncSession = Depends(get_db)) -> dict:
 
 
 @router.post("/kill-switch")
-async def set_kill_switch(data: dict) -> dict:
-    """Ativa ou desativa o kill switch global. Body: { active: bool, reason?: str }"""
+async def set_kill_switch(
+    data: dict,
+    current_user: User = Depends(require_role("ADMIN")),
+) -> dict:
+    """Ativa ou desativa o kill switch global. Body: { active: bool }"""
     activate: bool = bool(data.get("active", True))
-    activated_by: str = str(data.get("by", "operador"))
+    activated_by: str = current_user.name
 
     if activate:
         await redis_client.set(KILL_SWITCH_KEY, "1")
@@ -80,5 +85,11 @@ async def set_kill_switch(data: dict) -> dict:
             await session.commit()
     except Exception:
         pass
+
+    await redis_client.publish("automation.kill_switch.changed", {
+        "active": activate,
+        "by": activated_by,
+        "at": datetime.utcnow().isoformat(),
+    })
 
     return {"kill_switch_active": activate, "by": activated_by}
