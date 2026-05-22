@@ -168,4 +168,6 @@ export const aiApi = {
   zoneAnalyses: () => api.get('/ai/zone-analyses').then(r => r.data),
   analyzeZone: (storeId: string, zoneKey: string) =>
     api.post(`/ai/zones/${storeId}/${zoneKey}/analyze`).then(r => r.data),
+  chatCommand: (message: string) => api.post('/ai/chat-command', { message }).then(r => r.data),
+  chatCommandPrompt: () => api.get('/ai/chat-command/prompt').then(r => r.data),
 }
