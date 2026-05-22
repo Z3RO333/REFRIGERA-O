@@ -25,6 +25,7 @@ export default function FloorPlanCanvas({
 }: Props) {
   const svgRef = useRef<SVGSVGElement>(null)
   const [dragging, setDragging] = useState<string | null>(null)
+  const [didDrag, setDidDrag] = useState(false)
   const [viewBox] = useState({ x: 0, y: 0, w: 800, h: 556 })
   const dirtySet = new Set(dirtyDeviceIds)
 
@@ -42,6 +43,7 @@ export default function FloorPlanCanvas({
     if (!editMode) return
     e.stopPropagation()
     setDragging(deviceId)
+    setDidDrag(false)
   }
 
   const handleMouseMove = (e: React.MouseEvent) => {
@@ -50,13 +52,17 @@ export default function FloorPlanCanvas({
     if (!point) return
     const x = Math.max(viewBox.x, Math.min(viewBox.x + viewBox.w, point.x))
     const y = Math.max(viewBox.y, Math.min(viewBox.y + viewBox.h, point.y))
+    setDidDrag(true)
     onDeviceMove?.(dragging, Math.round(x), Math.round(y))
   }
 
-  const handleMouseUp = () => setDragging(null)
+  const handleMouseUp = () => {
+    setDragging(null)
+    setTimeout(() => setDidDrag(false), 0)
+  }
 
   const handleCanvasClick = (e: React.MouseEvent) => {
-    if (!editMode || !placingDeviceName || dragging) return
+    if (!editMode || !placingDeviceName || dragging || didDrag) return
     const point = clientToSvgPoint(e)
     if (!point) return
     const x = Math.max(viewBox.x, Math.min(viewBox.x + viewBox.w, point.x))
