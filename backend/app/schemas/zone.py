@@ -39,6 +39,13 @@ class CustomZoneCreate(BaseModel):
     zone_type: ZoneType = "ABERTA"
     device_ids: list[uuid.UUID] = Field(min_length=1)
     mode: ZoneMode = "manual"
+    # posição visual na planta
+    x: float | None = None
+    y: float | None = None
+    w: float | None = None
+    h: float | None = None
+    floor: int = 1
+    color: str | None = None
 
     @model_validator(mode="after")
     def validate_temp_range(self):
@@ -53,6 +60,12 @@ class CustomZoneUpdate(BaseModel):
     ideal_max: int | None = Field(default=None, ge=16, le=30)
     zone_type: ZoneType | None = None
     device_ids: list[uuid.UUID] | None = None
+    x: float | None = None
+    y: float | None = None
+    w: float | None = None
+    h: float | None = None
+    floor: int | None = None
+    color: str | None = None
 
     @model_validator(mode="after")
     def validate_temp_range(self):

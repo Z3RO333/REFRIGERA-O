@@ -692,15 +692,13 @@ def _select_power_on_candidate(
 ) -> tuple[_DeviceRow, DeviceParameters] | None:
     candidates = []
     for row in devices:
-        params = params_map.get(row.device.id)
-        if params is None:
-            continue
         if row.device.dnd or row.device.source_url:
             continue
+        params = params_map.get(row.device.id)
         is_off = (
             row.status.status_classification == "DESLIGADO"
             or row.status.state is False
-            or params.mode_device == 0
+            or (params is not None and params.mode_device == 0)
         )
         if is_off:
             candidates.append(row)
@@ -710,7 +708,20 @@ def _select_power_on_candidate(
 
     candidates.sort(key=lambda row: (row.device.btu or 0, row.device.name or ""), reverse=True)
     best = candidates[0]
-    return best, params_map[best.device.id]
+    # Se não há params, cria um objeto temporário com defaults seguros para ligar
+    params = params_map.get(best.device.id)
+    if params is None:
+        params = DeviceParameters(
+            device_id=best.device.id,
+            mode_device=0,
+            mode_ac=0,
+            fan_speed=1,
+            setpoint_cool=22,
+            setpoint_heat=28,
+            eco_cool=False,
+            eco_heat=False,
+        )
+    return best, params
 
 
 async def _execute_power_on(
@@ -721,11 +732,11 @@ async def _execute_power_on(
     brise_params = {
         "modeDevice": 1,
         "modeAC": 0,
-        "fanSpeed": params.fan_speed,
-        "setpointCool": params.setpoint_cool,
-        "setpointHeat": params.setpoint_heat,
-        "ecoCool": params.eco_cool,
-        "ecoHeat": params.eco_heat,
+        "fanSpeed": params.fan_speed or 1,
+        "setpointCool": params.setpoint_cool or 22,
+        "setpointHeat": params.setpoint_heat or 28,
+        "ecoCool": params.eco_cool or False,
+        "ecoHeat": params.eco_heat or False,
     }
 
     success = await brise_client.put_parameters(device.brise_device_id, brise_params)
@@ -733,6 +744,9 @@ async def _execute_power_on(
         params.mode_device = 1
         params.mode_ac = 0
         params.synced_at = datetime.utcnow()
+        # Persiste o params se for novo (sem pk — device sem histórico de configuração)
+        if params.id is None:
+            session.add(params)
         if device.status_latest:
             device.status_latest.state = True
             device.status_latest.updated_at = datetime.utcnow()

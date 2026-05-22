@@ -386,6 +386,12 @@ export interface CustomZone {
   zone_type: ZoneType
   ideal_min: number
   ideal_max: number
+  x: number | null
+  y: number | null
+  w: number | null
+  h: number | null
+  floor: number
+  color: string | null
   created_by_name: string | null
   device_ids: string[]
   current_temp: number | null

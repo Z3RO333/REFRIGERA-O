@@ -129,6 +129,13 @@ _STATEMENTS = [
         PRIMARY KEY (zone_id, device_id)
     )""",
     "CREATE INDEX IF NOT EXISTS ix_custom_zones_store ON custom_zones (store_id)",
+    # posição visual da zona na planta (coordenadas SVG viewBox)
+    "ALTER TABLE custom_zones ADD COLUMN IF NOT EXISTS x FLOAT",
+    "ALTER TABLE custom_zones ADD COLUMN IF NOT EXISTS y FLOAT",
+    "ALTER TABLE custom_zones ADD COLUMN IF NOT EXISTS w FLOAT",
+    "ALTER TABLE custom_zones ADD COLUMN IF NOT EXISTS h FLOAT",
+    "ALTER TABLE custom_zones ADD COLUMN IF NOT EXISTS floor INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE custom_zones ADD COLUMN IF NOT EXISTS color VARCHAR(30)",
 ]
 
 
@@ -139,18 +146,23 @@ async def run_migrations() -> None:
 
 
 async def seed_floor_plans() -> None:
-    """Vincula plantas baixas e áreas de setores aos respectivos stores pelo nome."""
+    """Vincula plantas baixas e áreas de setores aos respectivos stores pelo code exato."""
     from app.models.store import Store, StoreSector
 
-    # (padrão_store_name, floor_plan_url, {setor_name: area_m2})
+    # (store_code_exato, floor_plan_url, {setor_name: area_m2})
     _PLANS = [
         (
             "MATRIZ",
+            "/floorplans/escritorio-matriz.jpg",
+            {},
+        ),
+        (
+            "FARMA_MATRIZ",
             "/floorplans/farma-matriz.png",
             {},
         ),
         (
-            "DOM PEDRO",
+            "FARMA_DOM_PEDRO",
             "/floorplans/farma-dom-pedro.jpg",
             {
                 "Salão": 132.06,
@@ -163,30 +175,30 @@ async def seed_floor_plans() -> None:
             },
         ),
         (
-            "BOULEVARD",
+            "FARMA_BOULEVARD",
             "/floorplans/farma-boulevard.jpg",
             {
-                "Salão": 254.55,        # 146,33 (frente) + 108,22 (fundo)
+                "Salão": 254.55,
                 "Medicamentos": 20.29,
                 "Consultório": 2.99,
                 "DML": 1.90,
                 "Copa": 1.96,
                 "WC": 2.73,
-                "ADM": 5.28,            # 3,89 (fundo) + 1,39 (frente)
+                "ADM": 5.28,
                 "Reserva": 9.93,
             },
         ),
         (
-            "FLORES",
+            "FARMA_FLORES",
             "/floorplans/farma-flores.jpg",
             {},
         ),
     ]
 
     async with AsyncSessionLocal() as session:
-        for name_pattern, plan_url, sector_areas in _PLANS:
+        for store_code, plan_url, sector_areas in _PLANS:
             stores_result = await session.execute(
-                select(Store).where(Store.name.ilike(f"%{name_pattern}%"))
+                select(Store).where(Store.code == store_code)
             )
             matched_stores = stores_result.scalars().all()
             for store in matched_stores:

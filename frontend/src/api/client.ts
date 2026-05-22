@@ -138,23 +138,25 @@ export const logsApi = {
     api.get('/logs/kpis', { params }).then(r => r.data),
 }
 
+interface ZonePosition { x?: number; y?: number; w?: number; h?: number; floor?: number; color?: string }
+
 export const customZonesApi = {
   list: (storeId: string) => api.get(`/zones/${storeId}/custom`).then(r => r.data),
   create: (storeId: string, data: {
     name: string
-    ideal_min: number
-    ideal_max: number
-    zone_type: string
+    ideal_min?: number
+    ideal_max?: number
+    zone_type?: string
     device_ids: string[]
     mode?: string
-  }) => api.post(`/zones/${storeId}/custom`, data).then(r => r.data),
+  } & ZonePosition) => api.post(`/zones/${storeId}/custom`, data).then(r => r.data),
   update: (storeId: string, zoneKey: string, data: {
     name?: string
     ideal_min?: number
     ideal_max?: number
     zone_type?: string
     device_ids?: string[]
-  }) => api.put(`/zones/${storeId}/custom/${zoneKey}`, data).then(r => r.data),
+  } & ZonePosition) => api.put(`/zones/${storeId}/custom/${zoneKey}`, data).then(r => r.data),
   delete: (storeId: string, zoneKey: string) =>
     api.delete(`/zones/${storeId}/custom/${zoneKey}`).then(r => r.data),
 }

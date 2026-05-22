@@ -65,7 +65,7 @@ class BriseClient:
                 logger.warning("Brise HTTP error em %s %s: %s", method, path, exc)
                 raise BriseAPIError(0, str(exc)) from exc
 
-            if resp.status_code == 204:
+            if resp.status_code in (202, 204) or not resp.content:
                 return None
 
             if resp.status_code == 401:

@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
-  Activity, AlertTriangle, Bot, ChevronDown, Clock, Pencil, Play, Plus,
+  Activity, AlertTriangle, Bot, ChevronDown, Clock, Pencil, Play,
   RefreshCw, Shield, ShieldOff, Thermometer, Trash2, TrendingDown,
   TrendingUp, Wind, Zap, Wifi,
 } from 'lucide-react'
 import { automationApi, customZonesApi, digitalTwinApi, storesApi, zonesApi } from '../api/client'
 import { cn, formatRelativeTime } from '../lib/utils'
 import { useAuthStore } from '../store/useAuthStore'
-import ZoneEditorModal from '../components/ZoneEditorModal'
 import type { CustomZone, DigitalTwinZone, Store, ZoneAutomationState, ZonePriority } from '../types'
 
 // ── Metadados de status térmico ───────────────────────────────────────────────
@@ -338,6 +338,7 @@ function ZoneCard({
 
 export default function ZoneControlPanel() {
   const { role } = useAuthStore()
+  const navigate = useNavigate()
   const qc = useQueryClient()
   const canEdit = role === 'EDITOR' || role === 'ADMIN'
   const canAdmin = role === 'ADMIN'
@@ -345,8 +346,6 @@ export default function ZoneControlPanel() {
   const [storeId, setStoreId] = useState<string>('')
   const [filterStatus, setFilterStatus] = useState<ThermalStatus | 'ALL'>('ALL')
   const [triggeringKey, setTriggeringKey] = useState<string | null>(null)
-  const [editorOpen, setEditorOpen] = useState(false)
-  const [editingZone, setEditingZone] = useState<CustomZone | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
 
   // Lojas disponíveis
@@ -525,13 +524,13 @@ export default function ZoneControlPanel() {
             </select>
           )}
 
-          {canEdit && (
+          {canEdit && storeId && (
             <button
-              onClick={() => { setEditingZone(null); setEditorOpen(true) }}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm font-medium transition-colors"
+              onClick={() => navigate(`/mapa-termico/${storeId}?editZones=1`)}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 hover:bg-violet-500 text-white rounded-lg text-sm font-medium transition-colors"
             >
-              <Plus className="h-4 w-4" />
-              Nova Zona
+              <Pencil className="h-4 w-4" />
+              Editar zonas no mapa
             </button>
           )}
 
@@ -636,7 +635,7 @@ export default function ZoneControlPanel() {
                 triggerMutation.mutate(twin.zone_key)
               }}
               isTriggerPending={triggeringKey === twin.zone_key && triggerMutation.isPending}
-              onEdit={() => { setEditingZone(customZone ?? null); setEditorOpen(true) }}
+              onEdit={() => navigate(`/mapa-termico/${storeId}?editZones=1&zone=${twin.zone_key}`)}
               onDelete={() => {
                 if (confirm(`Excluir a zona "${twin.zone_label}"?`)) {
                   deleteMutation.mutate(twin.zone_key)
@@ -647,14 +646,6 @@ export default function ZoneControlPanel() {
         </div>
       )}
 
-      {/* Modal de criação/edição de zona */}
-      {editorOpen && storeId && (
-        <ZoneEditorModal
-          storeId={storeId}
-          editZone={editingZone}
-          onClose={() => { setEditorOpen(false); setEditingZone(null) }}
-        />
-      )}
     </div>
   )
 }

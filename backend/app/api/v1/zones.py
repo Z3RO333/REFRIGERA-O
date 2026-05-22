@@ -465,6 +465,12 @@ def _cz_dict(cz: CustomZone, device_ids: list[uuid.UUID], current_temp: float | 
         "zone_type": cz.zone_type,
         "ideal_min": cz.ideal_min,
         "ideal_max": cz.ideal_max,
+        "x": cz.x,
+        "y": cz.y,
+        "w": cz.w,
+        "h": cz.h,
+        "floor": cz.floor,
+        "color": cz.color,
         "created_by_name": cz.created_by_name,
         "created_at": cz.created_at.isoformat(),
         "device_ids": [str(d) for d in device_ids],
@@ -522,6 +528,12 @@ async def create_custom_zone(
         zone_type=zone_type,
         ideal_min=ideal_min,
         ideal_max=ideal_max,
+        x=data.x,
+        y=data.y,
+        w=data.w,
+        h=data.h,
+        floor=data.floor,
+        color=data.color,
         created_by_name=current_user.name,
     )
     db.add(cz)
@@ -572,6 +584,9 @@ async def update_custom_zone(
         raise HTTPException(400, "ideal_min deve ser menor que ideal_max")
     if "zone_type" in fields_set and data.zone_type is not None:
         cz.zone_type = data.zone_type
+    for field in ("x", "y", "w", "h", "floor", "color"):
+        if field in fields_set:
+            setattr(cz, field, getattr(data, field))
 
     if "device_ids" in fields_set and data.device_ids is not None:
         new_ids = data.device_ids

@@ -5,7 +5,14 @@ from app.config import settings
 
 
 def _make_engine():
-    kwargs: dict = {"echo": False, "pool_pre_ping": True}
+    kwargs: dict = {
+        "echo": False,
+        "pool_pre_ping": True,
+        "pool_size": 3,          # conexões persistentes por processo
+        "max_overflow": 5,       # conexões extras em pico (total máx = 8)
+        "pool_timeout": 30,      # espera até 30s por uma conexão livre
+        "pool_recycle": 1800,    # recicla conexões a cada 30 min
+    }
     url = settings.database_url
     if settings.database_ssl:
         ctx = ssl.create_default_context()

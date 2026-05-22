@@ -1,14 +1,16 @@
-import { useMemo, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
   Activity, AlertTriangle, ArrowLeft, Bot, ChevronDown, ChevronUp, Clock,
-  Eye, EyeOff, Lock, PlayCircle, RefreshCw, Shield, ShieldOff, SlidersHorizontal,
+  Eye, EyeOff, Layers, Lock, Minus, PlayCircle, Plus, RefreshCw,
+  RotateCcw, Shield, ShieldOff, SlidersHorizontal,
   Thermometer, TrendingDown, TrendingUp, Wind, Wrench, Zap,
 } from 'lucide-react'
 import { automationApi, devicesApi, digitalTwinApi, storesApi, zonesApi } from '../api/client'
 import StatusBadge from '../components/StatusBadge'
 import DeviceMarker from '../components/map/DeviceMarker'
+import ZoneEditor from '../components/map/ZoneEditor'
 import { cn, formatRelativeTime, formatTemp } from '../lib/utils'
 import { useAuthStore } from '../store/useAuthStore'
 import type { AutomationStatus, Device, DigitalTwinZone, Sector, ZoneAutomationState, ZoneMode, ZoneType } from '../types'
@@ -57,6 +59,9 @@ const VIEWBOX = { w: 800, h: 556 }
 /** Pixels SVG por metro — escala aproximada para o Escritório Matriz */
 const M_TO_SVG = 14
 
+/** Resolução da grade IDW em pixels SVG */
+const GRID_CELL = 12
+
 // ── Definição de zonas com tipo (ABERTA | SALA_FECHADA) ──────────────────────
 // Coordenadas baseadas na planta 1.png (viewbox 800×556).
 // ABERTA: área ampla sem barreiras relevantes — interpolação térmica contínua.
@@ -96,13 +101,40 @@ const STATUS_META: Record<ThermalStatus, { label: string; color: string; fill: s
 export default function ThermalComfortMap() {
   const { storeId } = useParams<{ storeId: string }>()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   const [selectedFloor, setSelectedFloor] = useState(1)
   const [selectedZoneKey, setSelectedZoneKey] = useState<string | null>(null)
-  const [showEquipment, setShowEquipment] = useState(false)
-  const [showBriseLyr, setShowBriseLyr] = useState(true)
-  const [showSensorLyr, setShowSensorLyr] = useState(true)
+  const [layers, setLayers] = useState({
+    plant:    true,
+    heatmap:  true,
+    zones:    true,
+    sensors:  true,
+    devices:  false,
+    alerts:   true,
+  })
+  const [showLayers, setShowLayers] = useState(false)
+  const toggleLayer = (k: keyof typeof layers) => setLayers(l => ({ ...l, [k]: !l[k] }))
+
+  const editModeRef = useRef(false)
+  const [editMode, setEditMode] = useState(false)
+  const handleSetEditMode = useCallback((v: boolean | ((prev: boolean) => boolean)) => {
+    const next = typeof v === 'function' ? v(editModeRef.current) : v
+    editModeRef.current = next
+    setEditMode(next)
+  }, [])
+  const { transform, containerRef, hasMoved, zoom, resetView, containerHandlers } = useMapTransform(editModeRef)
+  const svgRef = useRef<SVGSVGElement>(null)
+
   const [statusFilter, setStatusFilter] = useState<ThermalStatus | 'ALL'>('ALL')
   const [actionMessage, setActionMessage] = useState('')
+
+  useEffect(() => {
+    if (searchParams.get('editZones') !== '1') return
+    handleSetEditMode(true)
+    const zoneKey = searchParams.get('zone')
+    if (zoneKey) setSelectedZoneKey(zoneKey)
+    setActionMessage('Modo edição ativo: arraste na planta para criar uma zona ou clique em uma zona existente para editar.')
+  }, [searchParams, handleSetEditMode])
   const [hoveredPoint, setHoveredPoint] = useState<HeatPoint | null>(null)
 
   const { data: devices = [], refetch: refetchDevices } = useQuery({
@@ -211,14 +243,14 @@ export default function ThermalComfortMap() {
       sourceType: 'zone' as SourceType,
     }))
 
-    const brisePoints: HeatPoint[] = showBriseLyr
+    const brisePoints: HeatPoint[] = layers.devices
       ? positionedDevices
           .filter((d: Device) => !d.is_external_sensor && d.temperature != null)
           .map((d: Device): HeatPoint => {
             const radiusM = d.influence_radius_m ?? 8
             const radiusPx = radiusM * M_TO_SVG
             const ideal = sectorIdealByName.get(d.sector_name || '')
-            const sensorsInSector = showSensorLyr
+            const sensorsInSector = layers.sensors
               ? (sectorGroups.get(d.sector_id ?? '')?.sensors ?? [])
               : []
 
@@ -263,7 +295,7 @@ export default function ThermalComfortMap() {
           })
       : []
 
-    const sensorPoints: HeatPoint[] = showSensorLyr
+    const sensorPoints: HeatPoint[] = layers.sensors
       ? positionedDevices
           .filter((d: Device) => d.is_external_sensor && d.temperature != null && !mergedSensorIds.has(d.id))
           .map((d: Device): HeatPoint => {
@@ -291,10 +323,14 @@ export default function ThermalComfortMap() {
 
     const all = [...finalZonePoints, ...brisePoints, ...sensorPoints]
     return statusFilter === 'ALL' ? all : all.filter(p => p.status === statusFilter)
-  }, [positionedDevices, showBriseLyr, showSensorLyr, statusFilter, visibleZones, zoneStates])
+  }, [positionedDevices, layers.devices, layers.sensors, statusFilter, visibleZones, zoneStates])
 
   const selectedZone = zoneStates.find(z => z.key === selectedZoneKey) ?? zoneStates[0] ?? null
   const avgStoreTemp = average(zoneStates.map(z => z.avgTemp).filter((v): v is number => v != null))
+
+  const floorConfig = useMemo(() => getFloorConfig(selectedFloor), [selectedFloor])
+  const thermalGrid = useMemo(() => buildThermalGrid(heatPoints, avgStoreTemp), [heatPoints, avgStoreTemp])
+
   const lastUpdate = newestDate(floorDevices.map((d: Device) => d.updated_at).filter(Boolean) as string[])
   const externalSensorsOnFloor = floorDevices.filter((d: Device) => d.is_external_sensor)
   const positionedSensors = externalSensorsOnFloor.filter((d: Device) => d.position_x != null)
@@ -367,28 +403,48 @@ export default function ThermalComfortMap() {
             </button>
           ))}
 
-          <button type="button" onClick={() => setShowBriseLyr(v => !v)}
-            className={cn('inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors',
-              showBriseLyr ? 'border-blue-500/40 bg-blue-500/10 text-blue-600 dark:text-blue-400' : 'border-gray-200 text-gray-400 hover:bg-gray-100 dark:border-gray-800 dark:hover:bg-gray-800'
-            )}>
-            <Wind className="h-3.5 w-3.5" />
-            Brise
-            {showBriseLyr ? <Eye className="h-3 w-3" /> : <EyeOff className="h-3 w-3" />}
-          </button>
+          {/* Layers dropdown */}
+          <div className="relative">
+            <button type="button" onClick={() => setShowLayers(v => !v)}
+              className={cn('inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors',
+                showLayers ? 'border-blue-600 bg-blue-600 text-white' : 'border-gray-200 text-gray-600 hover:bg-gray-100 dark:border-gray-800 dark:text-gray-400 dark:hover:bg-gray-800'
+              )}>
+              <Layers className="h-3.5 w-3.5" />
+              Camadas
+            </button>
+            {showLayers && (
+              <div className="absolute right-0 top-9 z-50 min-w-[180px] rounded-xl border border-gray-200 bg-white p-2 shadow-xl dark:border-gray-700 dark:bg-gray-900">
+                {([
+                  { key: 'plant',   label: 'Planta base',      icon: <SlidersHorizontal className="h-3 w-3" /> },
+                  { key: 'heatmap', label: 'Mapa de calor',     icon: <Wind className="h-3 w-3" /> },
+                  { key: 'zones',   label: 'Zonas térmicas',    icon: <Layers className="h-3 w-3" /> },
+                  { key: 'sensors', label: 'Sensores',          icon: <Thermometer className="h-3 w-3" /> },
+                  { key: 'devices', label: 'Equipamentos (AC)', icon: <Wind className="h-3 w-3" /> },
+                ] as const).map(({ key, label, icon }) => (
+                  <button key={key} type="button"
+                    onClick={() => toggleLayer(key)}
+                    className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-xs text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-800">
+                    {layers[key]
+                      ? <Eye className="h-3.5 w-3.5 text-blue-500" />
+                      : <EyeOff className="h-3.5 w-3.5 text-gray-400" />}
+                    <span className={layers[key] ? 'text-gray-900 dark:text-white' : 'text-gray-400'}>{label}</span>
+                    <span className="ml-auto">{icon}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
 
-          <button type="button" onClick={() => setShowSensorLyr(v => !v)}
-            className={cn('inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors',
-              showSensorLyr ? 'border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400' : 'border-gray-200 text-gray-400 hover:bg-gray-100 dark:border-gray-800 dark:hover:bg-gray-800'
+          <button
+            type="button"
+            onClick={() => handleSetEditMode(v => !v)}
+            className={cn(
+              'inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors',
+              editMode
+                ? 'border-violet-500 bg-violet-600 text-white hover:bg-violet-500'
+                : 'border-gray-200 text-gray-600 hover:bg-gray-100 dark:border-gray-800 dark:text-gray-400 dark:hover:bg-gray-800',
             )}>
-            <Thermometer className="h-3.5 w-3.5" />
-            Termômetros
-            {showSensorLyr ? <Eye className="h-3 w-3" /> : <EyeOff className="h-3 w-3" />}
-          </button>
-
-          <button type="button" onClick={() => setShowEquipment(v => !v)}
-            className="inline-flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-100 dark:border-gray-800 dark:text-gray-400 dark:hover:bg-gray-800">
-            {showEquipment ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-            Ícones
+            ✏ {editMode ? 'Sair do editor' : 'Editar zonas'}
           </button>
 
           <button type="button" onClick={() => navigate(`/lojas/${storeId}/mapa`)}
@@ -461,79 +517,140 @@ export default function ThermalComfortMap() {
 
       {/* ── Conteúdo principal ── */}
       <div className="grid flex-1 min-h-0 grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
-        {/* SVG do mapa */}
-        <div className="relative overflow-hidden rounded-xl border border-gray-200 bg-gray-100 shadow-inner dark:border-gray-800 dark:bg-gray-950">
+        {/* SVG do mapa — pan/zoom interativo */}
+        <div
+          ref={containerRef}
+          className="relative overflow-hidden rounded-xl border border-gray-200 bg-gray-950 shadow-inner dark:border-gray-800"
+          style={{ touchAction: 'none' }}
+          {...containerHandlers}
+          onClick={e => { if (hasMoved.current) { hasMoved.current = false; e.stopPropagation() } }}
+        >
           {!floorPlanUrl && (
             <div className="absolute inset-0 z-10 flex items-center justify-center text-sm text-gray-500">
               Planta não cadastrada para este andar
             </div>
           )}
-          <svg viewBox={`0 0 ${VIEWBOX.w} ${VIEWBOX.h}`} className="h-full w-full">
-            <defs>
-              <filter id="thermal-blur" x="-20%" y="-20%" width="140%" height="140%" colorInterpolationFilters="sRGB">
-                <feGaussianBlur stdDeviation="22" />
-              </filter>
-              <clipPath id="map-clip">
-                <rect x={0} y={0} width={VIEWBOX.w} height={VIEWBOX.h} />
-              </clipPath>
 
-              {/* Gradientes radiais — preenchimento denso até ~80% do raio, fade suave no final */}
-              {heatPoints.map(point => {
-                const color = thermalColor(point.temp)
-                return (
-                  <radialGradient key={point.key} id={`tg-${point.key}`} cx="50%" cy="50%" r="50%">
-                    <stop offset="0%"   stopColor={color} stopOpacity={point.opacity} />
-                    <stop offset="50%"  stopColor={color} stopOpacity={point.opacity * 0.80} />
-                    <stop offset="80%"  stopColor={color} stopOpacity={point.opacity * 0.40} />
-                    <stop offset="100%" stopColor={color} stopOpacity={0} />
-                  </radialGradient>
-                )
-              })}
+          {/* Controles de zoom */}
+          <div className="absolute right-2 top-2 z-20 flex flex-col gap-1">
+            <button type="button" onClick={e => { e.stopPropagation(); zoom(1.25) }}
+              className="flex h-7 w-7 items-center justify-center rounded-lg bg-gray-800/80 text-gray-300 backdrop-blur hover:bg-gray-700 hover:text-white">
+              <Plus className="h-3.5 w-3.5" />
+            </button>
+            <button type="button" onClick={e => { e.stopPropagation(); resetView() }}
+              title="Resetar zoom"
+              className="flex h-7 w-7 items-center justify-center rounded-lg bg-gray-800/80 text-gray-300 backdrop-blur hover:bg-gray-700 hover:text-white">
+              <RotateCcw className="h-3 w-3" />
+            </button>
+            <button type="button" onClick={e => { e.stopPropagation(); zoom(0.8) }}
+              className="flex h-7 w-7 items-center justify-center rounded-lg bg-gray-800/80 text-gray-300 backdrop-blur hover:bg-gray-700 hover:text-white">
+              <Minus className="h-3.5 w-3.5" />
+            </button>
+          </div>
+
+          {/* Indicador de zoom */}
+          {transform.scale !== 1 && (
+            <div className="absolute bottom-2 right-2 z-20 rounded-md bg-gray-800/80 px-2 py-0.5 text-[10px] text-gray-400 backdrop-blur">
+              {Math.round(transform.scale * 100)}%
+            </div>
+          )}
+
+          <svg
+            ref={svgRef}
+            viewBox={`0 0 ${VIEWBOX.w} ${VIEWBOX.h}`}
+            className="h-full w-full"
+            style={{
+              transform: `translate(${transform.x}px, ${transform.y}px) scale(${transform.scale})`,
+              transformOrigin: '0 0',
+              cursor: transform.dragging ? 'grabbing' : 'grab',
+              willChange: 'transform',
+            }}
+          >
+            <defs>
+              <clipPath id="floor-clip">
+                <rect x={floorConfig.imageX} y={floorConfig.imageY}
+                  width={floorConfig.imageW} height={floorConfig.imageH} />
+              </clipPath>
             </defs>
 
-            {/* Fundo */}
-            <rect width={VIEWBOX.w} height={VIEWBOX.h} fill="#F8FAFC" />
+            {/* 1. Fundo escuro */}
+            <rect width={VIEWBOX.w} height={VIEWBOX.h} fill="#0F172A" />
 
-            {/* Planta */}
-            {floorPlanUrl && (
-              <image href={floorPlanUrl} x={0} y={0} width={VIEWBOX.w} height={VIEWBOX.h}
-                preserveAspectRatio="xMidYMid meet" opacity={0.82} />
+            {/* 2. Grade térmica IDW */}
+            {layers.heatmap && (
+              <g clipPath="url(#floor-clip)" opacity={0.90}>
+                {thermalGrid.map((cell, i) => (
+                  <rect key={i} x={cell.x} y={cell.y}
+                    width={GRID_CELL + 1} height={GRID_CELL + 1}
+                    fill={cell.color} />
+                ))}
+              </g>
             )}
 
-            {/* Camada térmica — clipada ao viewbox para não vazar nas bordas */}
-            <g clipPath="url(#map-clip)" filter="url(#thermal-blur)" style={{ mixBlendMode: 'multiply' }} opacity={0.80}>
-              {heatPoints.map(point => (
-                <circle key={point.key} cx={point.x} cy={point.y} r={point.radius} fill={`url(#tg-${point.key})`} />
-              ))}
-            </g>
+            {/* 3. Planta por cima do calor */}
+            {layers.plant && floorPlanUrl && (
+              <image href={floorPlanUrl}
+                x={floorConfig.imageX} y={floorConfig.imageY}
+                width={floorConfig.imageW} height={floorConfig.imageH}
+                preserveAspectRatio="none"
+                opacity={0.58}
+              />
+            )}
 
-            {/* Zonas clicáveis */}
-            {visibleZones.map(zone => {
+            {/* 4. Zonas — borda colorida + label de temperatura */}
+            {layers.zones && visibleZones.map(zone => {
               const meta = STATUS_META[zone.status]
+              const isSelected = zone.key === selectedZoneKey
               return (
-                <g key={zone.key} onClick={() => { setSelectedZoneKey(zone.key); setActionMessage('') }} style={{ cursor: 'pointer' }}>
-                  <rect x={zone.x} y={zone.y} width={zone.w} height={zone.h} fill="transparent" pointerEvents="all" />
+                <g key={zone.key}
+                  onClick={() => { setSelectedZoneKey(zone.key); setActionMessage('') }}
+                  style={{ cursor: 'pointer' }}>
+                  {/* Borda colorida da zona */}
+                  <rect x={zone.x} y={zone.y} width={zone.w} height={zone.h}
+                    fill={isSelected ? `${meta.color}22` : 'transparent'}
+                    stroke={isSelected ? meta.color : `${meta.color}88`}
+                    strokeWidth={isSelected ? 2 : 1}
+                    strokeDasharray={zone.zone_type === 'SALA_FECHADA' ? '4 2' : undefined}
+                    rx={3}
+                    pointerEvents="all" />
+                  {/* Label da zona */}
+                  <text
+                    x={zone.x + zone.w / 2} y={zone.y + 12}
+                    textAnchor="middle" fontSize={9} fontWeight="600"
+                    fill={meta.color} opacity={0.9}
+                    style={{ pointerEvents: 'none', userSelect: 'none' }}>
+                    {zone.label}
+                  </text>
+                  {zone.avgTemp != null && (
+                    <text
+                      x={zone.x + zone.w / 2} y={zone.y + 23}
+                      textAnchor="middle" fontSize={10} fontWeight="700"
+                      fill="#F1F5F9" opacity={0.85}
+                      style={{ pointerEvents: 'none', userSelect: 'none' }}>
+                      {formatTemp(zone.avgTemp)}
+                    </text>
+                  )}
                   <title>{zone.label} — {zone.avgTemp != null ? formatTemp(zone.avgTemp) : 'Sem leitura'} — {meta.label}</title>
                 </g>
               )
             })}
 
-            {/* Sem leituras */}
+            {/* 5. Mensagem quando sem leituras */}
             {heatPoints.length === 0 && floorPlanUrl && (
               <g pointerEvents="none">
-                <rect width={VIEWBOX.w} height={VIEWBOX.h} fill="rgba(107,114,128,0.16)" />
-                <text x={VIEWBOX.w / 2} y={VIEWBOX.h / 2} textAnchor="middle" fontSize={14} fontWeight={700} fill="#4B5563">
+                <rect width={VIEWBOX.w} height={VIEWBOX.h} fill="rgba(15,23,42,0.55)" />
+                <text x={VIEWBOX.w / 2} y={VIEWBOX.h / 2} textAnchor="middle" fontSize={14} fontWeight={700} fill="#94A3B8">
                   Sem leituras para gerar o campo térmico
                 </text>
               </g>
             )}
 
-            {/* Ícones (ACs e sensores) */}
-            {showEquipment && positionedDevices.map((d: Device) => (
+            {/* 6. Ícones (ACs e sensores) */}
+            {layers.devices && positionedDevices.map((d: Device) => (
               <DeviceMarker key={d.id} device={d} onClick={() => undefined} scale={0.78} />
             ))}
 
-            {/* Labels de temperatura flutuantes */}
+            {/* 7. Labels de temperatura */}
             <g pointerEvents="none">
               {heatPoints
                 .filter(p => p.sourceType !== 'zone' && p.temp != null)
@@ -545,7 +662,7 @@ export default function ThermalComfortMap() {
                   const dot = point.sourceType === 'sensor' ? '#F59E0B' : point.sourceType === 'merged' ? '#A78BFA' : '#60A5FA'
                   return (
                     <g key={`lbl-${point.key}`} transform={`translate(${tx},${ty})`}>
-                      <rect width={tw} height={16} rx={4} fill="rgba(15,23,42,0.72)" />
+                      <rect width={tw} height={16} rx={4} fill="rgba(15,23,42,0.82)" />
                       <circle cx={6} cy={8} r={2.5} fill={dot} />
                       <text x={tw / 2 + 2} y={11.5} textAnchor="middle" fontSize={9} fontWeight="600" fill="#F1F5F9" fontFamily="ui-monospace,monospace">
                         {label}
@@ -555,7 +672,7 @@ export default function ThermalComfortMap() {
                 })}
             </g>
 
-            {/* Áreas de hit para tooltip */}
+            {/* 8. Áreas de hit para tooltip */}
             {heatPoints
               .filter(p => p.sourceType !== 'zone')
               .map(point => (
@@ -569,7 +686,7 @@ export default function ThermalComfortMap() {
                 />
               ))}
 
-            {/* Tooltip SVG */}
+            {/* 9. Tooltip SVG */}
             {hoveredPoint && (() => {
               const isMerged = hoveredPoint.sourceType === 'merged'
               const sources = hoveredPoint.mergedSources ?? []
@@ -604,6 +721,19 @@ export default function ThermalComfortMap() {
                 </g>
               )
             })()}
+
+            {/* 10. Zonas customizadas + editor */}
+            {storeId && (
+              <ZoneEditor
+                storeId={storeId}
+                floor={selectedFloor}
+                editMode={editMode}
+                svgRef={svgRef}
+                viewbox={VIEWBOX}
+                transform={transform}
+                onZoneClick={key => { setSelectedZoneKey(key); setActionMessage('') }}
+              />
+            )}
           </svg>
         </div>
 
@@ -638,14 +768,15 @@ export default function ThermalComfortMap() {
       </div>
 
       {/* Legenda */}
-      <div className="flex flex-wrap items-center gap-4 text-xs text-gray-500">
-        <div className="flex items-center gap-1.5"><div className="h-3 w-3 rounded-full" style={{ background: '#1D4ED8' }} />≤19°C</div>
-        <div className="flex items-center gap-1.5"><div className="h-3 w-3 rounded-full" style={{ background: '#00A6D6' }} />21°C</div>
-        <div className="flex items-center gap-1.5"><div className="h-3 w-3 rounded-full" style={{ background: '#16A34A' }} />23°C</div>
-        <div className="flex items-center gap-1.5"><div className="h-3 w-3 rounded-full" style={{ background: '#FACC15' }} />25°C</div>
-        <div className="flex items-center gap-1.5"><div className="h-3 w-3 rounded-full" style={{ background: '#FB923C' }} />27°C</div>
-        <div className="flex items-center gap-1.5"><div className="h-3 w-3 rounded-full" style={{ background: '#DC2626' }} />&gt;27°C</div>
-        <span className="ml-auto">Raio padrão: 8m — {M_TO_SVG}px/m</span>
+      <div className="flex flex-wrap items-center gap-3 text-xs text-gray-500">
+        <span className="font-medium text-gray-400">Escala:</span>
+        <div className="flex items-center gap-1.5"><div className="h-2.5 w-6 rounded" style={{ background: '#1D4ED8' }} />&lt;19° Frio</div>
+        <div className="flex items-center gap-1.5"><div className="h-2.5 w-6 rounded" style={{ background: '#00A6D6' }} />21° Fresco</div>
+        <div className="flex items-center gap-1.5"><div className="h-2.5 w-6 rounded" style={{ background: '#16A34A' }} />23° Ideal</div>
+        <div className="flex items-center gap-1.5"><div className="h-2.5 w-6 rounded" style={{ background: '#FACC15' }} />25° Atenção</div>
+        <div className="flex items-center gap-1.5"><div className="h-2.5 w-6 rounded" style={{ background: '#FB923C' }} />27° Quente</div>
+        <div className="flex items-center gap-1.5"><div className="h-2.5 w-6 rounded" style={{ background: '#DC2626' }} />&gt;27° Crítico</div>
+        <span className="ml-auto text-gray-400">IDW {GRID_CELL}px/célula</span>
       </div>
     </div>
   )
@@ -1615,7 +1746,201 @@ function DigitalTwinPanel({ twin }: { twin: DigitalTwinZone | undefined }) {
   )
 }
 
+/* ── useMapTransform — pan, zoom, touch ── */
+
+function useMapTransform(editModeRef?: React.RefObject<boolean>) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [transform, setTransform] = useState({ x: 0, y: 0, scale: 1, dragging: false })
+  const cur = useRef(transform)
+  cur.current = transform
+
+  const isDragging = useRef(false)
+  const startPos   = useRef({ x: 0, y: 0 })
+  const hasMoved   = useRef(false)
+  const pinchDist  = useRef(0)
+
+  const MIN = 0.3
+  const MAX = 8
+
+  const clamp = (s: number) => Math.min(MAX, Math.max(MIN, s))
+
+  const zoomAt = useCallback((factor: number, cx: number, cy: number) => {
+    setTransform(t => {
+      const ns = clamp(t.scale * factor)
+      const r  = ns / t.scale
+      return { ...t, scale: ns, x: cx - (cx - t.x) * r, y: cy - (cy - t.y) * r }
+    })
+  }, [])
+
+  const zoom = useCallback((factor: number) => {
+    const el = containerRef.current
+    if (!el) return
+    const { width, height } = el.getBoundingClientRect()
+    zoomAt(factor, width / 2, height / 2)
+  }, [zoomAt])
+
+  const resetView = useCallback(() =>
+    setTransform({ x: 0, y: 0, scale: 1, dragging: false }), [])
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const handler = (e: WheelEvent) => {
+      e.preventDefault()
+      const r = el.getBoundingClientRect()
+      zoomAt(e.deltaY < 0 ? 1.12 : 1 / 1.12, e.clientX - r.left, e.clientY - r.top)
+    }
+    el.addEventListener('wheel', handler, { passive: false })
+    return () => el.removeEventListener('wheel', handler)
+  }, [zoomAt])
+
+  const onMouseDown = useCallback((e: React.MouseEvent) => {
+    if (e.button !== 0) return
+    isDragging.current = true
+    hasMoved.current   = false
+    startPos.current   = { x: e.clientX - cur.current.x, y: e.clientY - cur.current.y }
+    setTransform(t => ({ ...t, dragging: true }))
+  }, [])
+
+  const onMouseMove = useCallback((e: React.MouseEvent) => {
+    if (!isDragging.current) return
+    const nx = e.clientX - startPos.current.x
+    const ny = e.clientY - startPos.current.y
+    if (Math.abs(nx - cur.current.x) + Math.abs(ny - cur.current.y) > 3)
+      hasMoved.current = true
+    setTransform(t => ({ ...t, x: nx, y: ny }))
+  }, [])
+
+  const onMouseUp = useCallback(() => {
+    isDragging.current = false
+    setTransform(t => ({ ...t, dragging: false }))
+  }, [])
+
+  const onDoubleClick = useCallback((e: React.MouseEvent) => {
+    const el = containerRef.current
+    if (!el) return
+    const r = el.getBoundingClientRect()
+    zoomAt(2, e.clientX - r.left, e.clientY - r.top)
+  }, [zoomAt])
+
+  const onTouchStart = useCallback((e: React.TouchEvent) => {
+    if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX
+      const dy = e.touches[0].clientY - e.touches[1].clientY
+      pinchDist.current = Math.sqrt(dx * dx + dy * dy)
+    } else if (e.touches.length === 1 && !editModeRef?.current) {
+      // Em modo edição, pan de 1 dedo é do editor de zonas, não do mapa
+      isDragging.current = true
+      hasMoved.current   = false
+      startPos.current   = { x: e.touches[0].clientX - cur.current.x, y: e.touches[0].clientY - cur.current.y }
+    }
+  }, [])
+
+  const onTouchMove = useCallback((e: React.TouchEvent) => {
+    if (e.touches.length === 2) {
+      const dx   = e.touches[0].clientX - e.touches[1].clientX
+      const dy   = e.touches[0].clientY - e.touches[1].clientY
+      const dist = Math.sqrt(dx * dx + dy * dy)
+      const el   = containerRef.current
+      if (!el || pinchDist.current === 0) return
+      const r   = el.getBoundingClientRect()
+      const mid = {
+        x: (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left,
+        y: (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top,
+      }
+      zoomAt(dist / pinchDist.current, mid.x, mid.y)
+      pinchDist.current  = dist
+      hasMoved.current   = true
+    } else if (e.touches.length === 1 && isDragging.current) {
+      const nx = e.touches[0].clientX - startPos.current.x
+      const ny = e.touches[0].clientY - startPos.current.y
+      hasMoved.current = true
+      setTransform(t => ({ ...t, x: nx, y: ny }))
+    }
+  }, [zoomAt])
+
+  const onTouchEnd = useCallback(() => {
+    isDragging.current = false
+    pinchDist.current  = 0
+    setTransform(t => ({ ...t, dragging: false }))
+  }, [])
+
+  return {
+    containerRef,
+    transform,
+    hasMoved,
+    zoom,
+    resetView,
+    containerHandlers: {
+      onMouseDown,
+      onMouseMove,
+      onMouseUp,
+      onMouseLeave: onMouseUp,
+      onDoubleClick,
+      onTouchStart,
+      onTouchMove,
+      onTouchEnd,
+    },
+  }
+}
+
 /* ── Funções puras ── */
+
+// ── Floor config ──────────────────────────────────────────────────────────────
+
+interface FloorConfig {
+  imageX: number
+  imageY: number
+  imageW: number
+  imageH: number
+}
+
+function getFloorConfig(_floor: number): FloorConfig {
+  // Padrão: ocupa o viewbox inteiro sem margens, eliminando faixas brancas.
+  // Ajuste x/y/imageW/imageH por andar conforme as plantas forem calibradas.
+  return { imageX: 0, imageY: 0, imageW: VIEWBOX.w, imageH: VIEWBOX.h }
+}
+
+// ── IDW interpolation ─────────────────────────────────────────────────────────
+
+function interpolateTemp(x: number, y: number, points: HeatPoint[]): number | null {
+  const valid = points.filter(p => p.temp != null)
+  if (!valid.length) return null
+
+  let weightedSum = 0
+  let weightTotal = 0
+
+  for (const p of valid) {
+    const dx = x - p.x
+    const dy = y - p.y
+    const dist = Math.sqrt(dx * dx + dy * dy)
+    if (dist < 1) return p.temp!
+    const w = 1 / (dist * dist)
+    weightedSum += Number(p.temp) * w
+    weightTotal += w
+  }
+
+  return weightedSum / weightTotal
+}
+
+interface ThermalCell { x: number; y: number; color: string }
+
+function buildThermalGrid(points: HeatPoint[], fallbackTemp: number | null): ThermalCell[] {
+  const valid = points.filter(p => p.temp != null)
+  if (!valid.length && fallbackTemp == null) return []
+
+  const cells: ThermalCell[] = []
+  for (let y = 0; y < VIEWBOX.h; y += GRID_CELL) {
+    for (let x = 0; x < VIEWBOX.w; x += GRID_CELL) {
+      const temp = valid.length
+        ? interpolateTemp(x + GRID_CELL / 2, y + GRID_CELL / 2, valid)
+        : fallbackTemp
+      if (temp == null) continue
+      cells.push({ x, y, color: thermalColor(temp) })
+    }
+  }
+  return cells
+}
 
 function classifyZone(temp: number | null, min: number, max: number): ThermalStatus {
   if (temp == null)       return 'NO_READING'
