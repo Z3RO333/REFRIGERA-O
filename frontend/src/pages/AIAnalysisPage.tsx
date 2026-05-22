@@ -188,6 +188,8 @@ export default function AIAnalysisPage() {
   const [tab, setTab] = useState<'devices' | 'zones'>('devices')
   const [selected, setSelected] = useState<AIAnalysis | null>(null)
   const [severityFilter, setSeverityFilter] = useState<string>('all')
+  const [chatMessage, setChatMessage] = useState('')
+  const [chatFeedback, setChatFeedback] = useState<string | null>(null)
 
   const { data: statusData } = useQuery<AIStatus>({
     queryKey: ['ai-status'],
@@ -211,6 +213,10 @@ export default function AIAnalysisPage() {
     queryFn: () => aiApi.zoneAnalyses(),
     refetchInterval: 60_000,
   })
+  const { data: chatPromptData } = useQuery({
+    queryKey: ['ai-chat-command-prompt'],
+    queryFn: () => aiApi.chatCommandPrompt(),
+  })
 
   const [pendingZone, setPendingZone] = useState<string | null>(null)
   const triggerZoneMutation = useMutation({
@@ -220,6 +226,20 @@ export default function AIAnalysisPage() {
     onSettled: () => {
       setPendingZone(null)
       setTimeout(() => qc.invalidateQueries({ queryKey: ['ai-zone-analyses'] }), 8000)
+    },
+  })
+  const chatCommandMutation = useMutation({
+    mutationFn: (message: string) => aiApi.chatCommand(message),
+    onSuccess: (data) => {
+      setChatFeedback(
+        `✅ ${data.success}/${data.total} aplicados` +
+        (data.skipped_dnd ? ` · ${data.skipped_dnd} em DND` : '') +
+        (data.failed ? ` · ${data.failed} falharam` : '')
+      )
+      setChatMessage('')
+    },
+    onError: (error: any) => {
+      setChatFeedback(`❌ ${error?.response?.data?.detail || 'Erro ao executar comando'}`)
     },
   })
 
@@ -257,6 +277,21 @@ export default function AIAnalysisPage() {
           </div>
         </div>
         <div className="flex items-center gap-3">
+          <div className="hidden md:flex items-center gap-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 px-2 py-1.5">
+            <input
+              value={chatMessage}
+              onChange={(e) => setChatMessage(e.target.value)}
+              placeholder='Ex.: "todos os ar com 25 graus"'
+              className="w-72 bg-transparent text-xs outline-none text-gray-800 dark:text-gray-200"
+            />
+            <button
+              onClick={() => chatMessage.trim() && chatCommandMutation.mutate(chatMessage)}
+              disabled={chatCommandMutation.isPending || !chatMessage.trim()}
+              className="rounded bg-purple-600 px-2 py-1 text-xs font-medium text-white disabled:opacity-50"
+            >
+              {chatCommandMutation.isPending ? 'Aplicando...' : 'Executar'}
+            </button>
+          </div>
           <div className={cn('flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium',
             ollama ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' : 'bg-gray-100 text-gray-500 dark:bg-gray-800')}>
             {ollama ? <Wifi className="h-3.5 w-3.5" /> : <WifiOff className="h-3.5 w-3.5" />}
@@ -276,6 +311,17 @@ export default function AIAnalysisPage() {
           )}
         </div>
       </div>
+      {chatFeedback && (
+        <div className="px-6 py-2 text-xs text-gray-700 dark:text-gray-200 border-b border-gray-200 dark:border-gray-800 bg-purple-50/60 dark:bg-purple-950/20">
+          {chatFeedback}
+        </div>
+      )}
+      {chatPromptData?.system_prompt && (
+        <div className="px-6 py-2 text-[11px] text-gray-600 dark:text-gray-300 border-b border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900/50">
+          <span className="font-semibold">Prompt (base da IA): </span>
+          <span className="opacity-90">use este template para evoluir o chat com escopo global/loja/zona.</span>
+        </div>
+      )}
 
       {/* Tabs */}
       <div className="flex gap-1 px-6 pt-3 pb-0 border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900">
