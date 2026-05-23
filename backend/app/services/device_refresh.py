@@ -19,6 +19,7 @@ from app.cache.device_cache import set_device_status, set_device_params
 from app.cache.redis_client import redis_client
 from app.db.session import AsyncSessionLocal
 from app.models.device import Device, DeviceParameters, DeviceStatusLatest
+from app.models.reading import DeviceReading
 from app.rules.classifier import classify_status
 
 logger = logging.getLogger(__name__)
@@ -116,6 +117,21 @@ async def refresh_device_status(
                     "synced_at": params_row.synced_at.isoformat() if params_row.synced_at else None,
                 }
                 await set_device_params(device_id, cache_params)
+
+            # Registra leitura histórica para manter coerência com poll_device
+            session.add(DeviceReading(
+                time=now,
+                device_id=device_id,
+                state=variables.state,
+                temperature=variables.temperature,
+                humidity=getattr(variables, "humidity", None),
+                consumption=getattr(variables, "consumption", None),
+                consumption_estimated=variables.consumptionEstimated,
+                status_classification=status,
+                delta_temp=delta,
+                efficiency_score=efficiency,
+                raw_payload={"source": "command_refresh"},
+            ))
 
             await session.commit()
 

@@ -237,15 +237,20 @@ async def poll_device(
 
 async def poll_all_devices():
     from app.models.store import StoreSector
-    from app.services.zone_controller import ZONES
-
-    # Mapa reverso: sector_name → (ideal_min, ideal_max)
-    sector_to_zone: dict[str, tuple[float, float]] = {}
-    for zone_cfg in ZONES.values():
-        for sector_name in zone_cfg.sector_names:
-            sector_to_zone[sector_name] = (zone_cfg.ideal_min, zone_cfg.ideal_max)
+    from app.models.custom_zone import CustomZone, CustomZoneDevice
 
     async with AsyncSessionLocal() as session:
+        # Mapa device_id → (ideal_min, ideal_max) via zonas customizadas ativas
+        zone_range_result = await session.execute(
+            select(CustomZoneDevice.device_id, CustomZone.ideal_min, CustomZone.ideal_max)
+            .join(CustomZone, CustomZoneDevice.zone_id == CustomZone.id)
+            .where(CustomZone.active == True)
+        )
+        device_zone_range: dict[uuid.UUID, tuple[float, float]] = {
+            row[0]: (float(row[1]), float(row[2]))
+            for row in zone_range_result.all()
+        }
+
         result = await session.execute(
             select(Device, StoreSector.name.label("sector_name"))
             .outerjoin(StoreSector, Device.sector_id == StoreSector.id)
@@ -259,7 +264,7 @@ async def poll_all_devices():
 
     tasks = []
     for device, sector_name in rows:
-        zone_range = sector_to_zone.get(sector_name or "")
+        zone_range = device_zone_range.get(device.id)
         tasks.append(poll_device(
             device.id,
             device.brise_device_id,

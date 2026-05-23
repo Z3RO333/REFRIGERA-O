@@ -215,7 +215,7 @@ export default function ThermalComfortMap() {
       ? temperatureDevices.reduce((sum: number, d: Device) => sum + Number(d.temperature), 0) / temperatureDevices.length
       : null
     const status = classifyZone(avgTemp, cz.ideal_min, cz.ideal_max)
-    const actionableDevices = zoneDevices.filter((d: Device) => !['SEM_LEITURA', 'AGUARDANDO_LEITURA', 'DESLIGADO'].includes(d.status))
+    const actionableDevices = zoneDevices.filter((d: Device) => !['SEM_LEITURA', 'AGUARDANDO_LEITURA', 'DESLIGADO', 'COMPRESSOR_CYCLING'].includes(d.status))
     return {
       key: cz.zone_key, label: cz.name,
       x: 0, y: 0, w: 0, h: 0,

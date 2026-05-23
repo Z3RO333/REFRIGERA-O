@@ -21,7 +21,7 @@ from app.config import settings
 
 LOCAL_TZ = ZoneInfo(settings.app_timezone)
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.brise.client import brise_client
@@ -194,14 +194,25 @@ async def _check_guardrails(automation: ZoneAutomation) -> str | None:
     # 1. Modo manutenção — bloqueia tudo; verifica expiração automática
     if automation.mode == "maintenance":
         if automation.blocked_until and datetime.utcnow() >= automation.blocked_until:
-            # Prazo expirou: retorna automaticamente para manual
+            # Prazo expirou: persiste a limpeza diretamente no banco com sessão própria
+            async with AsyncSessionLocal() as fix_session:
+                await fix_session.execute(
+                    update(ZoneAutomation)
+                    .where(ZoneAutomation.id == automation.id)
+                    .values(
+                        mode="manual",
+                        blocked_reason=None,
+                        blocked_until=None,
+                        blocked_by_user_name=None,
+                        blocked_at=None,
+                    )
+                )
+                await fix_session.commit()
             automation.mode = "manual"
             automation.blocked_reason = None
             automation.blocked_until = None
             automation.blocked_by_user_name = None
             automation.blocked_at = None
-            # Nota: o caller (run_zone_controller) não usa session aqui; essa limpeza
-            # será persistida pelo _evaluate_zone que abre sua própria sessão.
         else:
             reason = automation.blocked_reason or "Zona em manutenção"
             if automation.blocked_until:
@@ -928,16 +939,20 @@ async def _raise_zone_alert(
     sid = store_id or (automation.store_id if automation else None)
     if sid is None:
         return
-    if device_id is None and automation is not None:
-        # Pega qualquer device da zona para associar o alerta
-        res = await session.execute(
-            select(Device.id)
-            .join(StoreSector, Device.sector_id == StoreSector.id)
-            .where(StoreSector.store_id == sid, StoreSector.name.in_(zone.sector_names))
-            .limit(1)
-        )
-        row = res.one_or_none()
-        device_id = row[0] if row else None
+    if device_id is None:
+        if zone.device_ids:
+            # Zonas customizadas: usa device_ids diretamente
+            device_id = zone.device_ids[0]
+        elif automation is not None:
+            # Zonas legadas: busca por nome de setor
+            res = await session.execute(
+                select(Device.id)
+                .join(StoreSector, Device.sector_id == StoreSector.id)
+                .where(StoreSector.store_id == sid, StoreSector.name.in_(zone.sector_names))
+                .limit(1)
+            )
+            row = res.one_or_none()
+            device_id = row[0] if row else None
 
     if device_id is None:
         return

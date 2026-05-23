@@ -20,13 +20,12 @@ from app.services.audit_service import log_action
 from app.schemas.zone import CustomZoneCreate, CustomZoneUpdate, ZoneGuardrailsUpdate, ZoneModeUpdate
 from app.services.zone_controller import (
     KILL_SWITCH_KEY,
+    LOCAL_TZ,
     ZONE_COOLDOWN_SECONDS,
     ZONES,
     ZoneConfig,
     _check_guardrails,
     _classify,
-    _consecutive_failures,
-    _daily_count,
     _evaluate_zone,
     get_or_create_automation,
     get_zone_last_action,
@@ -131,7 +130,7 @@ async def _custom_zone_config(
             CustomZoneDevice.device_id,
         )
         .outerjoin(CustomZoneDevice, CustomZone.id == CustomZoneDevice.zone_id)
-        .where(CustomZone.store_id == store_id, CustomZone.zone_key == zone_key)
+        .where(CustomZone.store_id == store_id, CustomZone.zone_key == zone_key, CustomZone.active == True)
     )
     rows = result.all()
     if not rows:
@@ -177,7 +176,7 @@ async def _custom_zone_configs(store_id: uuid.UUID, db: AsyncSession) -> dict[st
             CustomZoneDevice.device_id,
         )
         .outerjoin(CustomZoneDevice, CustomZone.id == CustomZoneDevice.zone_id)
-        .where(CustomZone.store_id == store_id)
+        .where(CustomZone.store_id == store_id, CustomZone.active == True)
     )
     zones: dict[str, ZoneConfig] = {}
     for zone_key, name, ideal_min, ideal_max, zone_type, device_id in result.all():
@@ -196,6 +195,89 @@ async def _custom_zone_configs(store_id: uuid.UUID, db: AsyncSession) -> dict[st
     return zones
 
 
+async def _batch_last_actions(
+    store_id: uuid.UUID, zone_keys: list[str], db: AsyncSession
+) -> dict[str, ZoneAction]:
+    """Retorna a última ZoneAction de cada zona em uma única query via subquery."""
+    if not zone_keys:
+        return {}
+    sub = (
+        select(ZoneAction.zone_key, func.max(ZoneAction.created_at).label("max_at"))
+        .where(ZoneAction.store_id == store_id, ZoneAction.zone_key.in_(zone_keys))
+        .group_by(ZoneAction.zone_key)
+    ).subquery()
+    result = await db.execute(
+        select(ZoneAction).join(
+            sub,
+            (ZoneAction.zone_key == sub.c.zone_key)
+            & (ZoneAction.created_at == sub.c.max_at),
+        ).where(ZoneAction.store_id == store_id)
+    )
+    return {a.zone_key: a for a in result.scalars().all()}
+
+
+async def _batch_daily_counts(
+    store_id: uuid.UUID, zone_keys: list[str], db: AsyncSession
+) -> dict[str, int]:
+    """Retorna contagem de ajustes do dia para todas as zonas em uma única query."""
+    if not zone_keys:
+        return {}
+    from datetime import timezone as _tz
+    now_local = datetime.now(LOCAL_TZ)
+    midnight_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    midnight_utc = midnight_local.astimezone(_tz.utc).replace(tzinfo=None)
+    result = await db.execute(
+        select(ZoneAction.zone_key, func.count(ZoneAction.id).label("cnt"))
+        .where(
+            ZoneAction.store_id == store_id,
+            ZoneAction.zone_key.in_(zone_keys),
+            ZoneAction.status.in_(["pending_verification", "executed", "verified_success"]),
+            ZoneAction.created_at >= midnight_utc,
+        )
+        .group_by(ZoneAction.zone_key)
+    )
+    return {row.zone_key: row.cnt for row in result.all()}
+
+
+async def _batch_consecutive_failures(
+    store_id: uuid.UUID, zone_keys: list[str], db: AsyncSession
+) -> dict[str, int]:
+    """Retorna falhas consecutivas por zona usando window function (uma query)."""
+    if not zone_keys:
+        return {}
+    row_num = func.row_number().over(
+        partition_by=ZoneAction.zone_key,
+        order_by=ZoneAction.created_at.desc(),
+    ).label("rn")
+    subq = (
+        select(ZoneAction.zone_key, ZoneAction.status, row_num)
+        .where(
+            ZoneAction.store_id == store_id,
+            ZoneAction.zone_key.in_(zone_keys),
+            ZoneAction.status.in_(["verified_success", "verified_failure"]),
+        )
+    ).subquery()
+    result = await db.execute(
+        select(subq.c.zone_key, subq.c.status)
+        .where(subq.c.rn <= 5)
+        .order_by(subq.c.zone_key, subq.c.rn)
+    )
+    rows = result.all()
+    zone_rows: dict[str, list[str]] = {}
+    for zone_key, status in rows:
+        zone_rows.setdefault(zone_key, []).append(status)
+    counts: dict[str, int] = {}
+    for zk, statuses in zone_rows.items():
+        count = 0
+        for s in statuses:
+            if s == "verified_failure":
+                count += 1
+            else:
+                break
+        counts[zk] = count
+    return counts
+
+
 @router.get("/{store_id}")
 async def list_zones(store_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> list[dict]:
     """Retorna estado de automação de todas as zonas. Leitura pública (requer autenticação via middleware)."""
@@ -204,24 +286,30 @@ async def list_zones(store_id: uuid.UUID, db: AsyncSession = Depends(get_db)) ->
     )
     existing: dict[str, ZoneAutomation] = {a.zone_key: a for a in result.scalars().all()}
 
-    zones_out: list[dict] = []
     all_zones = await _custom_zone_configs(store_id, db)
+    zone_keys = list(all_zones.keys())
 
+    # Carrega todas as métricas de zonas em batch — evita N+1 queries
+    last_actions  = await _batch_last_actions(store_id, zone_keys, db)
+    daily_counts  = await _batch_daily_counts(store_id, zone_keys, db)
+    consec_fails  = await _batch_consecutive_failures(store_id, zone_keys, db)
+
+    zones_out: list[dict] = []
     for zone_key, zone_cfg in all_zones.items():
         automation = existing.get(zone_key)
-
-        last_action = await get_zone_last_action(store_id, zone_key, db)
-        cooldown = await _cooldown_ttl(store_id, zone_key)
-        daily = await _daily_count(store_id, zone_key, db)
-        consec = await _consecutive_failures(store_id, zone_key, db)
+        cooldown   = await _cooldown_ttl(store_id, zone_key)
 
         guardrail_reason: str | None = None
         if automation and automation.mode not in ("manual", "maintenance"):
             guardrail_reason = await _check_guardrails(automation)
 
         zones_out.append(_automation_dict(
-            zone_key, zone_cfg, automation, last_action,
-            cooldown, daily, consec, guardrail_reason,
+            zone_key, zone_cfg, automation,
+            last_actions.get(zone_key),
+            cooldown,
+            daily_counts.get(zone_key, 0),
+            consec_fails.get(zone_key, 0),
+            guardrail_reason,
         ))
 
     return zones_out
@@ -623,8 +711,6 @@ async def update_custom_zone(
         auto.setpoint_min = cz.ideal_min - 2
         auto.setpoint_max = cz.ideal_max + 2
 
-    await db.commit()
-
     await log_action(db,
         action_type="custom_zone_updated",
         description=f"Zona '{cz.name}' atualizada: {', '.join(fields_set)}",
@@ -632,6 +718,7 @@ async def update_custom_zone(
         store_id=store_id,
         zone_key=zone_key,
     )
+    await db.commit()
 
     dev_res = await db.execute(
         select(CustomZoneDevice.device_id).where(CustomZoneDevice.zone_id == cz.id)

@@ -13,10 +13,13 @@ from app.schemas.device import (
     DevicePositionUpdate, ExternalSensorCreate,
 )
 from app.cache.device_cache import get_device_status, set_device_params
+from app.cache.redis_client import redis_client
 from app.security.network import validate_sensor_url
 from app.models.user import User
 from app.api.v1.auth import get_current_user, require_role
 from app.services.audit_service import log_action
+from app.services.zone_controller import KILL_SWITCH_KEY
+from app.services.device_refresh import refresh_after_command
 
 router = APIRouter()
 
@@ -145,6 +148,16 @@ async def update_device_parameters(
         db_params = DeviceParameters(device_id=device_id, **params.model_dump())
         db.add(db_params)
     await db.commit()
+    await set_device_params(device_id, {
+        "mode_device": params.mode_device,
+        "mode_ac": params.mode_ac,
+        "fan_speed": params.fan_speed,
+        "setpoint_cool": params.setpoint_cool,
+        "setpoint_heat": params.setpoint_heat,
+        "eco_cool": params.eco_cool,
+        "eco_heat": params.eco_heat,
+        "synced_at": datetime.utcnow().isoformat(),
+    })
     return {"message": "Parâmetros atualizados com sucesso"}
 
 @router.post("/{device_id}/control")
@@ -163,9 +176,7 @@ async def control_device(
         raise HTTPException(409, "Sensor externo não recebe comandos Brise")
 
     # Bug 4: respeitar kill switch global — bloqueia automação E comandos manuais
-    from app.services.zone_controller import KILL_SWITCH_KEY
-    from app.cache.redis_client import redis_client as _redis
-    if await _redis.exists(KILL_SWITCH_KEY):
+    if await redis_client.exists(KILL_SWITCH_KEY):
         raise HTTPException(409, "Kill switch global ativo — todos os comandos estão bloqueados. Reative a automação antes de enviar comandos.")
 
     # Resolve store/sector para enriquecer o audit_log
@@ -214,7 +225,6 @@ async def control_device(
     }
     label = action_labels.get(command.action, command.action)
 
-    from app.cache.redis_client import redis_client as _rc
     if not confirmed:
         await log_action(
             db, "device_control",
@@ -232,7 +242,7 @@ async def control_device(
             severity="HIGH",
         )
         await db.commit()
-        await _rc.publish("device.command.failed", {
+        await redis_client.publish("device.command.failed", {
             "device_id": str(device_id),
             "device_name": device.name,
             "action": command.action,
@@ -272,7 +282,7 @@ async def control_device(
     # Atualiza cache Redis de parâmetros imediatamente após commit
     await set_device_params(device_id, {**next_params, "synced_at": datetime.utcnow().isoformat()})
 
-    await _rc.publish("device.command.sent", {
+    await redis_client.publish("device.command.sent", {
         "device_id": str(device_id),
         "device_name": device.name,
         "action": command.action,
@@ -281,7 +291,6 @@ async def control_device(
     })
 
     # Dispara refresh em background para atualizar status real após o comando
-    from app.services.device_refresh import refresh_after_command
     asyncio.create_task(refresh_after_command(device_id, device.brise_device_id))
 
     return {
@@ -455,7 +464,7 @@ def _format_device(device, status, sector, store) -> dict:
         "accumulated_off_minutes": off_min,
         "source_url": device.source_url,
         "is_external_sensor": device.source_url is not None,
-        "influence_radius_m": device.influence_radius_m if hasattr(device, 'influence_radius_m') else 8,
+        "influence_radius_m": getattr(device, 'influence_radius_m', 8),
     }
 
 async def _get_current_parameters(device_id: uuid.UUID, brise_id: str, db: AsyncSession) -> dict:
