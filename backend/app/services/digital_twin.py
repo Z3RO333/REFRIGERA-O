@@ -395,10 +395,11 @@ async def compute_store_twin(store_id: uuid.UUID, session: AsyncSession) -> list
     results = []
     from app.models.custom_zone import CustomZone
 
+    # Usa apenas zonas customizadas criadas pelo operador — sem hardcoded
     custom_zones = await _load_all_custom_zones(session)
-    custom_keys_res = await session.execute(select(CustomZone.zone_key).where(CustomZone.store_id == store_id))
+    custom_keys_res = await session.execute(select(CustomZone.zone_key).where(CustomZone.store_id == store_id, CustomZone.active == True))
     custom_keys = {row[0] for row in custom_keys_res.all()}
-    all_zones = {**ZONES, **{k: v for k, v in custom_zones.items() if k in custom_keys}}
+    all_zones = {k: v for k, v in custom_zones.items() if k in custom_keys}
 
     for zone in all_zones.values():
         try:

@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -37,13 +37,11 @@ class CustomZoneCreate(BaseModel):
     ideal_min: int = Field(default=20, ge=16, le=30)
     ideal_max: int = Field(default=24, ge=16, le=30)
     zone_type: ZoneType = "ABERTA"
-    device_ids: list[uuid.UUID] = Field(min_length=1)
+    device_ids: list[uuid.UUID] = Field(default_factory=list)
     mode: ZoneMode = "manual"
-    # posição visual na planta
-    x: float | None = None
-    y: float | None = None
-    w: float | None = None
-    h: float | None = None
+    # Geometria canônica em % da planta — independente de resolução
+    # {"type":"polygon","points":[{"x":12.4,"y":18.2},...],"unit":"percent"}
+    geometry: dict[str, Any] | None = None
     floor: int = 1
     color: str | None = None
 
@@ -60,10 +58,7 @@ class CustomZoneUpdate(BaseModel):
     ideal_max: int | None = Field(default=None, ge=16, le=30)
     zone_type: ZoneType | None = None
     device_ids: list[uuid.UUID] | None = None
-    x: float | None = None
-    y: float | None = None
-    w: float | None = None
-    h: float | None = None
+    geometry: dict[str, Any] | None = None
     floor: int | None = None
     color: str | None = None
 
@@ -72,6 +67,4 @@ class CustomZoneUpdate(BaseModel):
         if self.ideal_min is not None and self.ideal_max is not None:
             if self.ideal_min >= self.ideal_max:
                 raise ValueError("ideal_min deve ser menor que ideal_max")
-        if self.device_ids is not None and len(self.device_ids) == 0:
-            raise ValueError("Selecione pelo menos um equipamento")
         return self

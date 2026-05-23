@@ -10,6 +10,7 @@ import {
   LayoutDashboard,
   Map,
   Monitor,
+  Stethoscope,
   Settings,
   Thermometer,
   Truck,
@@ -42,6 +43,7 @@ const navItems: NavItem[] = [
   { to: '/fornecedores', icon: Truck, label: 'Fornecedores', minRole: 'EDITOR' },
   { to: '/relatorios', icon: BarChart3, label: 'Relatórios' },
   { to: '/atividade', icon: Activity, label: 'Atividade' },
+  { to: '/diagnostico', icon: Stethoscope, label: 'Diagnóstico API', minRole: 'EDITOR' },
   { to: '/configuracoes', icon: Settings, label: 'Configurações', minRole: 'ADMIN' },
   { to: '/usuarios', icon: Users, label: 'Usuários', minRole: 'ADMIN' },
 ]

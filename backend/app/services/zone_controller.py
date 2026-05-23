@@ -36,7 +36,7 @@ from app.models.zone import ZoneAction, ZoneAutomation
 logger = logging.getLogger(__name__)
 
 # Statuses que impedem comandos
-BLOCKED_STATUSES = {"SEM_LEITURA", "DESLIGADO", "COMPRESSOR_CYCLING"}
+BLOCKED_STATUSES = {"SEM_LEITURA", "AGUARDANDO_LEITURA", "DESLIGADO", "COMPRESSOR_CYCLING"}
 
 # Cooldown entre execuções na mesma zona (segundos)
 ZONE_COOLDOWN_SECONDS = 900  # 15 min
@@ -63,19 +63,9 @@ class ZoneConfig:
 
 
 # ── Zonas abertas (departamentos amplos) ──────────────────────────────────────
-ZONES: dict[str, ZoneConfig] = {
-    "convivencia":   ZoneConfig("convivencia",   "Convivência",            ["Convivência", "Refeitório", "Salas de Descanso"], 22, 24, "ABERTA"),
-    "sac":           ZoneConfig("sac",           "SAC",                    ["SAC"],                                            22, 24, "ABERTA"),
-    "conta-bemol":   ZoneConfig("conta-bemol",   "Conta Bemol",            ["Conta Bemol"],                                    22, 24, "ABERTA"),
-    "auditorio":     ZoneConfig("auditorio",     "Auditório",              ["Auditório"],                                      22, 24, "ABERTA"),
-    "comercial":     ZoneConfig("comercial",     "Comercial",              ["Comercial"],                                      22, 24, "ABERTA"),
-    "marketing":     ZoneConfig("marketing",     "Marketing / Marketplace", ["Marketing", "Marketplace"],                      22, 24, "ABERTA"),
-    "contabilidade": ZoneConfig("contabilidade", "Contabilidade / Risco",  ["Contabilidade", "Gestão de Risco"],               22, 24, "ABERTA"),
-    "bemol-online":  ZoneConfig("bemol-online",  "Online / Televendas",    ["Bemol Online", "Televendas"],                    22, 24, "ABERTA"),
-    "geral":         ZoneConfig("geral",         "Área central",           ["Geral", "Recepção", "CAB"],                      22, 24, "ABERTA"),
-    "farmacia":      ZoneConfig("farmacia",      "Farmácia",               ["Farmácia"],                                      20, 22, "ABERTA"),
-    "presidencia":   ZoneConfig("presidencia",   "Presidência",            ["Presidência"],                                   21, 25, "ABERTA"),
-}
+# Zonas hardcoded removidas — sistema usa apenas zonas customizadas criadas pelo operador.
+# Manter dict vazio para compatibilidade com código que ainda importa ZONES.
+ZONES: dict[str, ZoneConfig] = {}
 
 
 # ── Entrypoints do scheduler ──────────────────────────────────────────────────
@@ -95,7 +85,7 @@ async def run_zone_controller() -> None:
     if not automations:
         return
 
-    all_zones: dict[str, ZoneConfig] = {**ZONES, **custom_zones}
+    all_zones: dict[str, ZoneConfig] = custom_zones
 
     logger.info("Zone controller: avaliando %d zonas ativas", len(automations))
     for automation in automations:
@@ -109,6 +99,30 @@ async def run_zone_controller() -> None:
             logger.error("Erro ao avaliar zona %s: %s", automation.zone_key, exc, exc_info=True)
 
 
+async def release_expired_maintenance_zones() -> None:
+    """Bug 2: libera automaticamente zonas em manutenção com blocked_until expirado."""
+    now = datetime.utcnow()
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(ZoneAutomation).where(
+                ZoneAutomation.mode == "maintenance",
+                ZoneAutomation.blocked_until.is_not(None),
+                ZoneAutomation.blocked_until <= now,
+            )
+        )
+        expired = result.scalars().all()
+        for auto in expired:
+            logger.info("Liberando manutenção expirada: zona %s (expirou %s)", auto.zone_key, auto.blocked_until)
+            auto.mode = "manual"
+            auto.blocked_reason = None
+            auto.blocked_until = None
+            auto.blocked_by_user_name = None
+            auto.blocked_at = None
+        if expired:
+            await session.commit()
+            logger.info("release_expired_maintenance_zones: %d zonas liberadas", len(expired))
+
+
 async def _load_all_custom_zones(session: AsyncSession) -> dict[str, ZoneConfig]:
     """Carrega todas as zonas personalizadas do banco em uma única query."""
     from app.models.custom_zone import CustomZone, CustomZoneDevice
@@ -118,6 +132,7 @@ async def _load_all_custom_zones(session: AsyncSession) -> dict[str, ZoneConfig]
             CustomZone.ideal_min, CustomZone.ideal_max, CustomZone.zone_type,
             CustomZoneDevice.device_id,
         ).outerjoin(CustomZoneDevice, CustomZone.id == CustomZoneDevice.zone_id)
+        .where(CustomZone.active == True)
     )
     zones: dict[str, ZoneConfig] = {}
     for zone_key, name, ideal_min, ideal_max, zone_type, dev_id in result.all():
@@ -343,29 +358,63 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
 
         devices, params_map = await _get_zone_devices(automation.store_id, zone, session)
 
-        readable = [
+        # Fontes de temperatura: ACs ativos + sensores externos (exclui DND, status bloqueado)
+        # Separação: sensores contribuem para avg_temp mas não recebem comandos
+        temp_sources = [
             d for d in devices
             if d.status.temperature is not None
-            and d.device.status_latest
-            and d.device.status_latest.status_classification not in BLOCKED_STATUSES
+            and d.status.status_classification not in BLOCKED_STATUSES
             and not d.device.dnd
-            and not d.device.source_url  # sensores externos não recebem comandos
         ]
 
-        if not readable:
-            # SALA_FECHADA sem aparelho interno: registrar bloqueio explícito, não silenciar.
-            # Aparelhos externos não podem compensar a sala por existir parede entre ambientes.
-            if zone.zone_type == "SALA_FECHADA":
-                await _log_blocked(
-                    automation, zone, 0.0,
-                    "SALA_FECHADA sem aparelho interno vinculado. "
-                    "Automação não pode usar equipamento externo para corrigir temperatura "
-                    "desta sala — verificação manual necessária.",
-                    session,
+        # Ajustáveis via comando: apenas ACs (sensores externos têm source_url)
+        readable = [d for d in temp_sources if not d.device.source_url]
+
+        if not temp_sources:
+            # Sem leitura térmica disponível — diagnóstico detalhado com rate-limit anti-spam
+            ac_devices = [d for d in devices if not d.device.source_url and not d.device.dnd]
+            n_total = len(ac_devices)
+            n_off = sum(1 for d in ac_devices if d.status.status_classification == "DESLIGADO")
+            n_waiting = sum(1 for d in ac_devices if d.status.status_classification == "AGUARDANDO_LEITURA")
+            n_no_comm = sum(1 for d in ac_devices if d.status.status_classification == "SEM_LEITURA")
+            n_cycling = sum(1 for d in ac_devices if d.status.status_classification == "COMPRESSOR_CYCLING")
+
+            if n_total == 0:
+                diag = "Zona sem aparelhos vinculados — impossível controlar temperatura automaticamente."
+            elif n_off == n_total:
+                diag = (
+                    f"{n_total} AC(s) vinculado(s), todos desligados — sem leitura térmica disponível. "
+                    "Ligue manualmente pelo menos um AC para iniciar a automação."
                 )
+            elif n_waiting > 0 and n_off + n_waiting == n_total:
+                diag = (
+                    f"{n_total} AC(s) vinculado(s): {n_waiting} aguardando primeira leitura após ligar"
+                    + (f", {n_off} desligado(s)" if n_off else "") + "."
+                )
+            elif n_no_comm > 0:
+                diag = (
+                    f"{n_total} AC(s) vinculado(s): {n_no_comm} sem comunicação com a Brise API"
+                    + (f", {n_off} desligado(s)" if n_off else "")
+                    + ". Verifique conectividade dos equipamentos."
+                )
+            elif n_cycling > 0:
+                diag = (
+                    f"{n_total} AC(s) vinculado(s): {n_cycling} com ciclo de compressor — aguardando normalização."
+                )
+            else:
+                diag = f"{n_total} AC(s) vinculado(s) sem leitura térmica disponível neste momento."
+
+            if zone.zone_type == "SALA_FECHADA":
+                await _log_blocked(automation, zone, 0.0, diag, session)
+            elif n_total > 0:
+                # ABERTA: só loga uma vez a cada 30 min para não poluir histórico
+                diag_key = f"zone:no_reading_log:{automation.store_id}:{zone.key}"
+                if not await redis_client.exists(diag_key):
+                    await redis_client.set(diag_key, "1", ttl=1800)
+                    await _log_blocked(automation, zone, 0.0, diag, session)
             return
 
-        temps = [float(d.status.temperature) for d in readable]
+        temps = [float(d.status.temperature) for d in temp_sources]
         avg_temp = mean(temps)
         status = _classify(avg_temp, zone.ideal_min, zone.ideal_max)
 
@@ -469,11 +518,11 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
         # Seleciona melhor device (com verificação de headroom de setpoint)
         best = _select_best_device(readable, status, params_map, direction, automation.setpoint_min, automation.setpoint_max)
         if best is None:
-            await _log_blocked(
-                automation, zone, avg_temp,
-                "Nenhum aparelho ajustável disponível na zona",
-                session,
+            reason = _build_no_adjustable_reason(
+                readable, devices, params_map, direction,
+                automation.setpoint_min, automation.setpoint_max, zone,
             )
+            await _log_blocked(automation, zone, avg_temp, reason, session)
             return
 
         best_device, best_params = best
@@ -483,6 +532,18 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
             await _log_blocked(
                 automation, zone, avg_temp,
                 f"Setpoint {new_setpoint}°C fora dos limites permitidos ({automation.setpoint_min}–{automation.setpoint_max}°C)",
+                session,
+            )
+            return
+
+        # Guard: rejeitar no-op — o setpoint efetivo não pode ser igual ao atual
+        effective_new = max(automation.setpoint_min, min(automation.setpoint_max, new_setpoint))
+        if effective_new == best_params.setpoint_cool:
+            await _log_blocked(
+                automation, zone, avg_temp,
+                f"Ação ignorada: setpoint de {best_device.device.name} já está em "
+                f"{best_params.setpoint_cool}°C — nenhuma alteração útil dentro dos limites "
+                f"{automation.setpoint_min}–{automation.setpoint_max}°C.",
                 session,
             )
             return
@@ -768,6 +829,14 @@ async def _execute_setpoint(
         min(automation.setpoint_max, params.setpoint_cool + delta),
     )
 
+    # Guard de segurança: nunca enviar comando que não muda nada
+    if new_setpoint == params.setpoint_cool:
+        logger.debug(
+            "_execute_setpoint: no-op para %s (setpoint=%d já no alvo)",
+            device.name, new_setpoint,
+        )
+        return False
+
     brise_params = {
         "modeDevice": 1,
         "modeAC": 0,
@@ -787,13 +856,18 @@ async def _execute_setpoint(
 
 
 async def _daily_count(store_id: uuid.UUID, zone_key: str, session: AsyncSession) -> int:
-    today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    # Bug 16: usa meia-noite em horário de Manaus, não UTC
+    from datetime import timezone
+    now_local = datetime.now(LOCAL_TZ)
+    midnight_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    midnight_utc = midnight_local.astimezone(timezone.utc).replace(tzinfo=None)
     result = await session.execute(
         select(func.count(ZoneAction.id)).where(
             ZoneAction.store_id == store_id,
             ZoneAction.zone_key == zone_key,
-            ZoneAction.status.in_(["pending_verification", "executed", "verified_success", "verified_failure"]),
-            ZoneAction.created_at >= today,
+            # Bug 17: verified_failure não deve consumir limite diário se não houve comando efetivo
+            ZoneAction.status.in_(["pending_verification", "executed", "verified_success"]),
+            ZoneAction.created_at >= midnight_utc,
         )
     )
     return result.scalar() or 0
@@ -897,6 +971,54 @@ def _confidence(avg: float, zone: ZoneConfig, status: str, device_count: int) ->
     if zone.zone_type == "SALA_FECHADA" and device_count < 2:
         base *= 0.75
     return round(base, 2)
+
+
+def _build_no_adjustable_reason(
+    readable: list,
+    devices: list,
+    params_map: dict,
+    direction: str,
+    setpoint_min: int,
+    setpoint_max: int,
+    zone: "ZoneConfig",
+) -> str:
+    """Gera mensagem diagnóstica rica quando _select_best_device retorna None."""
+    going_down = direction == "down"
+    limit_val = setpoint_min if going_down else setpoint_max
+    op = "mínimo" if going_down else "máximo"
+
+    at_limit = [
+        d for d in readable
+        if d.device.id in params_map
+        and (
+            params_map[d.device.id].setpoint_cool <= setpoint_min if going_down
+            else params_map[d.device.id].setpoint_cool >= setpoint_max
+        )
+    ]
+    no_params = [d for d in readable if d.device.id not in params_map]
+    off_in_zone = [
+        d for d in devices
+        if not d.device.source_url and not d.device.dnd
+        and d.status.status_classification == "DESLIGADO"
+    ]
+
+    parts = []
+    if at_limit:
+        parts.append(f"{len(at_limit)} AC(s) com setpoint já no {op} permitido ({limit_val}°C)")
+    if no_params:
+        parts.append(f"{len(no_params)} AC(s) sem parâmetros registrados no banco")
+    if off_in_zone:
+        parts.append(
+            f"{len(off_in_zone)} AC(s) desligados (não eligíveis para ajuste de setpoint — "
+            "candidatos a power_on já tentados)"
+        )
+    if not parts:
+        parts.append(f"nenhum AC com margem de ajuste na direção '{direction}'")
+
+    return (
+        f"Zona {zone.label}: {len(readable)} AC(s) com leitura, nenhum ajustável. "
+        + "; ".join(parts) + f". Faixa: {setpoint_min}–{setpoint_max}°C."
+    )
 
 
 def _build_power_on_reason(

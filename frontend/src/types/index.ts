@@ -1,4 +1,4 @@
-export type DeviceStatus = 'NORMAL' | 'ATENÇÃO' | 'CRÍTICO' | 'BAIXA_EFICIÊNCIA' | 'SEM_LEITURA' | 'DESLIGADO' | 'COMPRESSOR_CYCLING'
+export type DeviceStatus = 'NORMAL' | 'ATENÇÃO' | 'CRÍTICO' | 'BAIXA_EFICIÊNCIA' | 'SEM_LEITURA' | 'AGUARDANDO_LEITURA' | 'DESLIGADO' | 'COMPRESSOR_CYCLING'
 export type AlertSeverity = 'P1' | 'P2' | 'P3' | 'P4'
 export type AlertStatus = 'OPEN' | 'ACK' | 'RESOLVED'
 export type DeviceControlAction = 'power_on' | 'power_off' | 'temperature_up' | 'temperature_down'
@@ -378,6 +378,12 @@ export interface ZoneAIAnalysis {
   analyzed_at: string
 }
 
+export interface ZoneGeometry {
+  type: 'polygon' | 'rect'
+  points: { x: number; y: number }[]  // coordenadas em % da planta
+  unit: 'percent'
+}
+
 export interface CustomZone {
   id: string
   store_id: string
@@ -386,13 +392,11 @@ export interface CustomZone {
   zone_type: ZoneType
   ideal_min: number
   ideal_max: number
-  x: number | null
-  y: number | null
-  w: number | null
-  h: number | null
+  geometry: ZoneGeometry | null
   floor: number
   color: string | null
   created_by_name: string | null
+  updated_by_name: string | null
   device_ids: string[]
   current_temp: number | null
   temp_status: string

@@ -31,8 +31,27 @@ async def poll_device(
 ):
     if not await acquire_polling_lock(device_id):
         return
+    poll_error: str | None = None  # definido antes do try para evitar NameError
     try:
-        variables = await brise_client.get_variables(brise_id)
+        try:
+            variables = await brise_client.get_variables(brise_id)
+            if variables is None:
+                poll_error = "API retornou resposta vazia (dispositivo offline ou sem comunicação)"
+        except Exception as exc:
+            variables = None
+            err_str = str(exc)
+            if "timeout" in err_str.lower() or "TimeoutError" in type(exc).__name__:
+                poll_error = f"Timeout na API Brise ({type(exc).__name__})"
+            elif "Connect" in type(exc).__name__ or "connection" in err_str.lower():
+                poll_error = f"Falha de conexão com a API Brise"
+            elif "401" in err_str:
+                poll_error = "Erro de autenticação na API Brise (401)"
+            elif "403" in err_str:
+                poll_error = "Acesso negado pela API Brise (403)"
+            else:
+                poll_error = f"Erro inesperado: {err_str[:120]}"
+            logger.warning("poll_device [%s/%s] falhou: %s", brise_id, device_id, poll_error)
+
         async with AsyncSessionLocal() as session:
             status_row = await session.get(DeviceStatusLatest, device_id)
             params_result = await session.execute(
@@ -128,6 +147,7 @@ async def poll_device(
             )
             session.add(reading)
 
+            now = datetime.utcnow()
             if status_row:
                 status_row.state = variables.state if variables else None
                 status_row.temperature = variables.temperature if variables else None
@@ -142,7 +162,16 @@ async def poll_device(
                     status_row.accumulated_on_minutes = on_min
                 if off_min is not None:
                     status_row.accumulated_off_minutes = off_min
-                status_row.updated_at = datetime.utcnow()
+                status_row.updated_at = now
+                # Diagnóstico
+                if variables and variables.temperature is not None:
+                    status_row.last_success_at = now
+                    status_row.consecutive_failures = 0
+                    status_row.last_error = None
+                elif poll_error:
+                    status_row.last_error = poll_error
+                    status_row.last_error_at = now
+                    status_row.consecutive_failures = (status_row.consecutive_failures or 0) + 1
             else:
                 new_status = DeviceStatusLatest(
                     device_id=device_id,
@@ -156,6 +185,10 @@ async def poll_device(
                     consecutive_readings_count=consecutive_count,
                     accumulated_on_minutes=on_min,
                     accumulated_off_minutes=off_min,
+                    consecutive_failures=1 if poll_error else 0,
+                    last_error=poll_error,
+                    last_error_at=datetime.utcnow() if poll_error else None,
+                    last_success_at=datetime.utcnow() if not poll_error else None,
                     updated_at=datetime.utcnow(),
                 )
                 session.add(new_status)

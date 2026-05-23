@@ -51,6 +51,11 @@ _STATEMENTS = [
     # device_status_latest
     "ALTER TABLE device_status_latest ADD COLUMN IF NOT EXISTS accumulated_on_minutes BIGINT",
     "ALTER TABLE device_status_latest ADD COLUMN IF NOT EXISTS accumulated_off_minutes BIGINT",
+    # diagnóstico de falhas de polling
+    "ALTER TABLE device_status_latest ADD COLUMN IF NOT EXISTS last_error VARCHAR(200)",
+    "ALTER TABLE device_status_latest ADD COLUMN IF NOT EXISTS last_error_at TIMESTAMP",
+    "ALTER TABLE device_status_latest ADD COLUMN IF NOT EXISTS last_success_at TIMESTAMP",
+    "ALTER TABLE device_status_latest ADD COLUMN IF NOT EXISTS consecutive_failures INTEGER NOT NULL DEFAULT 0",
     # humidity era INTEGER, precisa virar FLOAT
     """DO $$ BEGIN
          IF EXISTS (
@@ -79,6 +84,10 @@ _STATEMENTS = [
     "ALTER TABLE zone_automations ADD COLUMN IF NOT EXISTS allowed_end_minute INTEGER NOT NULL DEFAULT 30",
     # corrige registros antigos que tinham end_hour=22 (antes do ajuste para 18:30)
     "UPDATE zone_automations SET allowed_end_hour = 18 WHERE allowed_end_hour = 22",
+    # padroniza horário de encerramento para 18:00 (não 18:30) — parar comandos às 18h Manaus
+    "UPDATE zone_automations SET allowed_end_minute = 0 WHERE allowed_end_hour = 18",
+    # padroniza horário de início para 07:00 (não 07:30)
+    "UPDATE zone_automations SET allowed_start_minute = 0 WHERE allowed_start_hour = 7",
     # tipo de zona e confiança de leitura (bloqueio térmico)
     "ALTER TABLE zone_automations ADD COLUMN IF NOT EXISTS zone_type VARCHAR(20) NOT NULL DEFAULT 'ABERTA'",
     "ALTER TABLE zone_automations ADD COLUMN IF NOT EXISTS reading_confidence FLOAT NOT NULL DEFAULT 1.0",
@@ -129,13 +138,31 @@ _STATEMENTS = [
         PRIMARY KEY (zone_id, device_id)
     )""",
     "CREATE INDEX IF NOT EXISTS ix_custom_zones_store ON custom_zones (store_id)",
-    # posição visual da zona na planta (coordenadas SVG viewBox)
+    "ALTER TABLE custom_zones ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT true",
+    # posição visual legada (coordenadas SVG absolutas — mantidas para backward compat)
     "ALTER TABLE custom_zones ADD COLUMN IF NOT EXISTS x FLOAT",
     "ALTER TABLE custom_zones ADD COLUMN IF NOT EXISTS y FLOAT",
     "ALTER TABLE custom_zones ADD COLUMN IF NOT EXISTS w FLOAT",
     "ALTER TABLE custom_zones ADD COLUMN IF NOT EXISTS h FLOAT",
     "ALTER TABLE custom_zones ADD COLUMN IF NOT EXISTS floor INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE custom_zones ADD COLUMN IF NOT EXISTS color VARCHAR(30)",
+    # geometria canônica em % da planta (nova — substitui x/y/w/h absolutos)
+    "ALTER TABLE custom_zones ADD COLUMN IF NOT EXISTS geometry JSONB",
+    "ALTER TABLE custom_zones ADD COLUMN IF NOT EXISTS updated_by_name VARCHAR(100)",
+    # migra zonas antigas com x/y/w/h para geometry JSONB em percentual (viewBox 800x556)
+    """UPDATE custom_zones
+       SET geometry = jsonb_build_object(
+         'type', 'polygon',
+         'unit', 'percent',
+         'points', jsonb_build_array(
+           jsonb_build_object('x', round((x/800*100)::numeric,2), 'y', round((y/556*100)::numeric,2)),
+           jsonb_build_object('x', round(((x+w)/800*100)::numeric,2), 'y', round((y/556*100)::numeric,2)),
+           jsonb_build_object('x', round(((x+w)/800*100)::numeric,2), 'y', round(((y+h)/556*100)::numeric,2)),
+           jsonb_build_object('x', round((x/800*100)::numeric,2), 'y', round(((y+h)/556*100)::numeric,2))
+         )
+       )
+       WHERE x IS NOT NULL AND y IS NOT NULL AND w IS NOT NULL AND h IS NOT NULL
+         AND geometry IS NULL""",
 ]
 
 

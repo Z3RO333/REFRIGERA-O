@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from statistics import mean
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.cache.redis_client import redis_client
@@ -205,7 +205,7 @@ async def list_zones(store_id: uuid.UUID, db: AsyncSession = Depends(get_db)) ->
     existing: dict[str, ZoneAutomation] = {a.zone_key: a for a in result.scalars().all()}
 
     zones_out: list[dict] = []
-    all_zones = {**ZONES, **await _custom_zone_configs(store_id, db)}
+    all_zones = await _custom_zone_configs(store_id, db)
 
     for zone_key, zone_cfg in all_zones.items():
         automation = existing.get(zone_key)
@@ -465,10 +465,7 @@ def _cz_dict(cz: CustomZone, device_ids: list[uuid.UUID], current_temp: float | 
         "zone_type": cz.zone_type,
         "ideal_min": cz.ideal_min,
         "ideal_max": cz.ideal_max,
-        "x": cz.x,
-        "y": cz.y,
-        "w": cz.w,
-        "h": cz.h,
+        "geometry": cz.geometry,
         "floor": cz.floor,
         "color": cz.color,
         "created_by_name": cz.created_by_name,
@@ -483,7 +480,7 @@ def _cz_dict(cz: CustomZone, device_ids: list[uuid.UUID], current_temp: float | 
 @router.get("/{store_id}/custom")
 async def list_custom_zones(store_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> list[dict]:
     """Lista zonas personalizadas com temperatura atual."""
-    result = await db.execute(select(CustomZone).where(CustomZone.store_id == store_id))
+    result = await db.execute(select(CustomZone).where(CustomZone.store_id == store_id, CustomZone.active == True))
     czs = result.scalars().all()
     out = []
     for cz in czs:
@@ -496,6 +493,8 @@ async def list_custom_zones(store_id: uuid.UUID, db: AsyncSession = Depends(get_
     return out
 
 
+_EDITOR_ALLOWED_MODES = {"manual", "suggestion", "semi"}
+
 @router.post("/{store_id}/custom")
 async def create_custom_zone(
     store_id: uuid.UUID,
@@ -504,21 +503,28 @@ async def create_custom_zone(
     current_user: User = Depends(require_role("EDITOR", "ADMIN")),
 ) -> dict:
     """Cria zona personalizada e sua automação inicial."""
+    # Bug 1: EDITOR não pode criar zona em modo admin
+    if current_user.role != "ADMIN" and data.mode not in _EDITOR_ALLOWED_MODES:
+        raise HTTPException(403, f"Perfil {current_user.role} não pode criar zona no modo '{data.mode}'")
+
     name = data.name.strip()
     ideal_min = data.ideal_min
     ideal_max = data.ideal_max
     zone_type = data.zone_type
     device_ids = data.device_ids
 
-    # Valida que os devices pertencem à loja
-    valid = await db.execute(
-        select(Device.id)
-        .join(StoreSector, Device.sector_id == StoreSector.id)
-        .where(StoreSector.store_id == store_id, Device.id.in_(device_ids))
-    )
-    valid_ids = {r[0] for r in valid.all()}
-    if valid_ids != set(device_ids):
-        raise HTTPException(400, "Todos os equipamentos da zona devem pertencer à loja informada")
+    # Bug 10: valida devices garantindo store_id (evita vazar device de outra loja)
+    if device_ids:
+        valid = await db.execute(
+            select(Device.id)
+            .join(StoreSector, Device.sector_id == StoreSector.id)
+            .where(StoreSector.store_id == store_id, Device.id.in_(device_ids), Device.active == True)
+        )
+        valid_ids = {r[0] for r in valid.all()}
+        if valid_ids != set(device_ids):
+            raise HTTPException(400, "Todos os equipamentos da zona devem pertencer à loja informada")
+    else:
+        valid_ids = set()
 
     zone_key = _zone_key_from_name(name)
     cz = CustomZone(
@@ -528,10 +534,7 @@ async def create_custom_zone(
         zone_type=zone_type,
         ideal_min=ideal_min,
         ideal_max=ideal_max,
-        x=data.x,
-        y=data.y,
-        w=data.w,
-        h=data.h,
+        geometry=data.geometry,
         floor=data.floor,
         color=data.color,
         created_by_name=current_user.name,
@@ -542,15 +545,20 @@ async def create_custom_zone(
     for dev_id in valid_ids:
         db.add(CustomZoneDevice(zone_id=cz.id, device_id=dev_id))
 
-    # Cria automação inicial em modo manual
     automation = ZoneAutomation(
-        store_id=store_id,
-        zone_key=zone_key,
-        mode=data.mode,
-        setpoint_min=ideal_min - 2,
-        setpoint_max=ideal_max + 2,
+        store_id=store_id, zone_key=zone_key, mode=data.mode,
+        setpoint_min=ideal_min - 2, setpoint_max=ideal_max + 2,
     )
     db.add(automation)
+    # Auditoria antes do commit para garantir atomicidade
+    await log_action(db,
+        action_type="custom_zone_created",
+        description=f"Zona '{name}' criada com {len(valid_ids)} equipamento(s)",
+        user=current_user,
+        store_id=store_id,
+        zone_key=zone_key,
+        new_value=f"ideal {ideal_min}-{ideal_max}°C, modo {data.mode}",
+    )
     await db.commit()
 
     current_temp, temp_status = await _cz_current_temp(cz, db)
@@ -584,9 +592,11 @@ async def update_custom_zone(
         raise HTTPException(400, "ideal_min deve ser menor que ideal_max")
     if "zone_type" in fields_set and data.zone_type is not None:
         cz.zone_type = data.zone_type
-    for field in ("x", "y", "w", "h", "floor", "color"):
+    for field in ("geometry", "floor", "color"):
         if field in fields_set:
             setattr(cz, field, getattr(data, field))
+    if "geometry" in fields_set or "name" in fields_set:
+        cz.updated_by_name = current_user.name
 
     if "device_ids" in fields_set and data.device_ids is not None:
         new_ids = data.device_ids
@@ -615,6 +625,14 @@ async def update_custom_zone(
 
     await db.commit()
 
+    await log_action(db,
+        action_type="custom_zone_updated",
+        description=f"Zona '{cz.name}' atualizada: {', '.join(fields_set)}",
+        user=current_user,
+        store_id=store_id,
+        zone_key=zone_key,
+    )
+
     dev_res = await db.execute(
         select(CustomZoneDevice.device_id).where(CustomZoneDevice.zone_id == cz.id)
     )
@@ -638,13 +656,139 @@ async def delete_custom_zone(
     if not cz:
         raise HTTPException(404, "Zona personalizada não encontrada")
 
-    # Remove automação associada
-    await db.execute(
-        ZoneAutomation.__table__.delete().where(
-            ZoneAutomation.zone_key == zone_key,
-            ZoneAutomation.store_id == store_id,
-        )
+    # Bug 6: soft delete — preserva histórico de ZoneActions
+    cz.active = False
+    cz.updated_at = datetime.utcnow()
+    cz.updated_by_name = current_user.name
+
+    # Inativa a automação (não apaga)
+    auto_res = await db.execute(
+        select(ZoneAutomation).where(ZoneAutomation.zone_key == zone_key, ZoneAutomation.store_id == store_id)
     )
-    await db.delete(cz)
+    auto = auto_res.scalar_one_or_none()
+    if auto:
+        auto.mode = "manual"
+
     await db.commit()
+
+    await log_action(db,
+        action_type="custom_zone_deleted",
+        description=f"Zona '{cz.name}' desativada (soft delete)",
+        user=current_user,
+        store_id=store_id,
+        zone_key=zone_key,
+    )
+
     return {"deleted": zone_key}
+
+
+@router.post("/{store_id}/custom/{zone_key}/restore")
+async def restore_custom_zone(
+    store_id: uuid.UUID, zone_key: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role("ADMIN")),
+) -> dict:
+    """Restaura zona que foi soft-deletada."""
+    result = await db.execute(
+        select(CustomZone).where(CustomZone.zone_key == zone_key, CustomZone.store_id == store_id)
+    )
+    cz = result.scalar_one_or_none()
+    if not cz:
+        raise HTTPException(404, "Zona não encontrada")
+    cz.active = True
+    cz.updated_at = datetime.utcnow()
+    await db.commit()
+    await log_action(db,
+        action_type="custom_zone_restored",
+        description=f"Zona '{cz.name}' restaurada",
+        user=current_user,
+        store_id=store_id,
+        zone_key=zone_key,
+    )
+    return {"restored": zone_key}
+
+
+@router.get("/{store_id}/suggestions")
+async def zone_suggestions(
+    store_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> dict:
+    """
+    Sugestões da IA para criação/ajuste de zonas — nunca executa automaticamente.
+    O usuário revisa e confirma antes de qualquer ação.
+    """
+    from app.models.custom_zone import CustomZoneDevice
+
+    # Devices ativos da loja
+    all_devices_res = await db.execute(
+        select(Device, DeviceStatusLatest)
+        .join(StoreSector, Device.sector_id == StoreSector.id)
+        .outerjoin(DeviceStatusLatest, Device.id == DeviceStatusLatest.device_id)
+        .where(StoreSector.store_id == store_id, Device.active == True, Device.source_url.is_(None))
+    )
+    all_devices = all_devices_res.all()
+
+    # Devices já vinculados a alguma zona ativa
+    linked_res = await db.execute(
+        select(CustomZoneDevice.device_id)
+        .join(CustomZone, CustomZoneDevice.zone_id == CustomZone.id)
+        .where(CustomZone.store_id == store_id, CustomZone.active == True)
+    )
+    linked_ids = {r[0] for r in linked_res.all()}
+
+    suggestions = []
+
+    # Sugestão 1: aparelhos sem zona
+    orphan_devices = [
+        {"device_id": str(d.id), "name": d.name, "sector": None}
+        for d, _s in all_devices if d.id not in linked_ids
+    ]
+    if orphan_devices:
+        suggestions.append({
+            "type": "orphan_devices",
+            "severity": "WARNING",
+            "title": f"{len(orphan_devices)} equipamento(s) sem zona",
+            "description": "Estes aparelhos não estão vinculados a nenhuma zona térmica ativa.",
+            "devices": orphan_devices[:10],
+            "action": "Desenhe uma zona no mapa e vincule estes aparelhos.",
+        })
+
+    # Sugestão 2: zonas sem equipamento
+    zones_res = await db.execute(
+        select(CustomZone).where(CustomZone.store_id == store_id, CustomZone.active == True)
+    )
+    zones = zones_res.scalars().all()
+    for zone in zones:
+        dev_count_res = await db.execute(
+            select(func.count(CustomZoneDevice.device_id)).where(CustomZoneDevice.zone_id == zone.id)
+        )
+        dev_count = dev_count_res.scalar() or 0
+        if dev_count == 0:
+            suggestions.append({
+                "type": "zone_no_devices",
+                "severity": "WARNING",
+                "title": f"Zona '{zone.name}' sem equipamentos",
+                "description": "Esta zona não tem aparelhos vinculados — não há como controlar a temperatura.",
+                "zone_key": zone.zone_key,
+                "action": "Vincule pelo menos um ar-condicionado a esta zona.",
+            })
+
+    # Sugestão 3: aparelhos sem leitura há muito tempo dentro de zona
+    from app.rules.classifier import NO_READING_THRESHOLD_MINUTES
+    from datetime import datetime
+    now = datetime.utcnow()
+    stale_threshold = NO_READING_THRESHOLD_MINUTES * 2
+    for device, status in all_devices:
+        if device.id in linked_ids and status and status.updated_at:
+            mins = (now - status.updated_at).total_seconds() / 60
+            if mins > stale_threshold:
+                suggestions.append({
+                    "type": "device_stale",
+                    "severity": "INFO",
+                    "title": f"'{device.name}' sem leitura há {int(mins)} min",
+                    "description": "Aparelho vinculado a uma zona mas sem leitura recente.",
+                    "device_id": str(device.id),
+                    "device_name": device.name,
+                    "action": "Verifique se o aparelho está ligado e comunicando com a API Brise.",
+                })
+
+    return {"suggestions": suggestions, "total": len(suggestions)}

@@ -7,7 +7,7 @@ import {
   RotateCcw, Shield, ShieldOff, SlidersHorizontal,
   Thermometer, TrendingDown, TrendingUp, Wind, Wrench, Zap,
 } from 'lucide-react'
-import { automationApi, devicesApi, digitalTwinApi, storesApi, zonesApi } from '../api/client'
+import { automationApi, customZonesApi, devicesApi, digitalTwinApi, storesApi, zonesApi } from '../api/client'
 import StatusBadge from '../components/StatusBadge'
 import DeviceMarker from '../components/map/DeviceMarker'
 import ZoneEditor from '../components/map/ZoneEditor'
@@ -116,6 +116,7 @@ export default function ThermalComfortMap() {
   const toggleLayer = (k: keyof typeof layers) => setLayers(l => ({ ...l, [k]: !l[k] }))
 
   const editModeRef = useRef(false)
+  const { role } = useAuthStore()
   const [editMode, setEditMode] = useState(false)
   const handleSetEditMode = useCallback((v: boolean | ((prev: boolean) => boolean)) => {
     const next = typeof v === 'function' ? v(editModeRef.current) : v
@@ -142,6 +143,14 @@ export default function ThermalComfortMap() {
     queryFn: () => storesApi.devices(storeId!),
     enabled: !!storeId,
     refetchInterval: 30000,
+  })
+
+  // Zonas customizadas do backend (com geometry)
+  const { data: customZones = [] } = useQuery<import('../types').CustomZone[]>({
+    queryKey: ['custom-zones', storeId],
+    queryFn: () => customZonesApi.list(storeId!),
+    enabled: !!storeId,
+    refetchInterval: 60_000,
   })
 
   const { data: sectors = [] } = useQuery({
@@ -192,25 +201,32 @@ export default function ThermalComfortMap() {
   const floorDevices = devices.filter((d: Device) => sectorsById.get(d.sector_id || '')?.floor === selectedFloor)
   const positionedDevices = floorDevices.filter((d: Device) => d.position_x != null && d.position_y != null)
 
-  // Filtra apenas as zonas cujos setores existem nesta loja
-  const storeSectorNames = useMemo(() => new Set(sectors.map((s: Sector) => s.name)), [sectors])
-  const storeZones = useMemo(
-    () => ZONES.filter(z => z.sectorNames.some(n => storeSectorNames.has(n))),
-    [storeSectorNames]
+  // Zonas customizadas deste andar com geometry
+  const floorCustomZones = useMemo(
+    () => customZones.filter(z => z.floor === selectedFloor && z.geometry != null),
+    [customZones, selectedFloor]
   )
 
-  // ── Estado de todas as zonas ────────────────────────────────────────────────
-  const zoneStates = useMemo(() => storeZones.map(zone => {
-    const zoneDevices = floorDevices.filter((d: Device) => zone.sectorNames.includes(d.sector_name || ''))
+  // ── Apenas zonas customizadas — hardcoded removido ──────────────────────────
+  const zoneStates = useMemo(() => floorCustomZones.map(cz => {
+    const zoneDevices = devices.filter((d: Device) => cz.device_ids.includes(d.id))
     const temperatureDevices = zoneDevices.filter((d: Device) => d.temperature != null)
     const avgTemp = temperatureDevices.length
       ? temperatureDevices.reduce((sum: number, d: Device) => sum + Number(d.temperature), 0) / temperatureDevices.length
       : null
-    const status = classifyZone(avgTemp, zone.idealMin, zone.idealMax)
-    const actionableDevices = zoneDevices.filter((d: Device) => !['SEM_LEITURA', 'DESLIGADO'].includes(d.status))
-    return { ...zone, devices: zoneDevices, actionableDevices, avgTemp, status }
-  }), [floorDevices, storeZones])
+    const status = classifyZone(avgTemp, cz.ideal_min, cz.ideal_max)
+    const actionableDevices = zoneDevices.filter((d: Device) => !['SEM_LEITURA', 'AGUARDANDO_LEITURA', 'DESLIGADO'].includes(d.status))
+    return {
+      key: cz.zone_key, label: cz.name,
+      x: 0, y: 0, w: 0, h: 0,
+      idealMin: cz.ideal_min, idealMax: cz.ideal_max,
+      zone_type: cz.zone_type as ZoneType,
+      sectorNames: [] as string[],
+      devices: zoneDevices, actionableDevices, avgTemp, status,
+    }
+  }), [floorCustomZones, devices])
 
+  // Bug 9: contadores usam o array final (inclui custom zones)
   const visibleZones = statusFilter === 'ALL'
     ? zoneStates
     : zoneStates.filter(z => z.status === statusFilter)
@@ -230,70 +246,72 @@ export default function ThermalComfortMap() {
 
     const mergedSensorIds = new Set<string>()
 
-    const zonePoints: HeatPoint[] = visibleZones.map(zone => ({
-      key: `zone-${zone.key}`,
-      label: zone.label,
-      x: zone.x + zone.w / 2,
-      y: zone.y + zone.h / 2,
-      radius: Math.max(zone.w, zone.h) / 2,
-      radiusM: Math.round(Math.max(zone.w, zone.h) / 2 / M_TO_SVG),
-      temp: zone.avgTemp,
-      status: zone.status,
-      opacity: 0.55,
-      sourceType: 'zone' as SourceType,
-    }))
+    // Zonas customizadas têm w=0/h=0 — excluídas do heatmap (usam geometry via ZoneEditor)
+    const zonePoints: HeatPoint[] = visibleZones
+      .filter(zone => zone.w > 0 && zone.h > 0)
+      .map(zone => ({
+        key: `zone-${zone.key}`,
+        label: zone.label,
+        x: zone.x + zone.w / 2,
+        y: zone.y + zone.h / 2,
+        radius: Math.max(zone.w, zone.h) / 2,
+        radiusM: Math.round(Math.max(zone.w, zone.h) / 2 / M_TO_SVG),
+        temp: zone.avgTemp,
+        status: zone.status,
+        opacity: 0.55,
+        sourceType: 'zone' as SourceType,
+      }))
 
-    const brisePoints: HeatPoint[] = layers.devices
-      ? positionedDevices
-          .filter((d: Device) => !d.is_external_sensor && d.temperature != null)
-          .map((d: Device): HeatPoint => {
-            const radiusM = d.influence_radius_m ?? 8
-            const radiusPx = radiusM * M_TO_SVG
-            const ideal = sectorIdealByName.get(d.sector_name || '')
-            const sensorsInSector = layers.sensors
-              ? (sectorGroups.get(d.sector_id ?? '')?.sensors ?? [])
-              : []
+    // ACs sempre alimentam o IDW — layers.devices só controla ícones e labels
+    const brisePoints: HeatPoint[] = positionedDevices
+      .filter((d: Device) => !d.is_external_sensor && d.temperature != null)
+      .map((d: Device): HeatPoint => {
+        const radiusM = d.influence_radius_m ?? 8
+        const radiusPx = radiusM * M_TO_SVG
+        const ideal = sectorIdealByName.get(d.sector_name || '')
+        const sensorsInSector = layers.sensors
+          ? (sectorGroups.get(d.sector_id ?? '')?.sensors ?? [])
+          : []
 
-            if (sensorsInSector.length > 0) {
-              const allTemps = [Number(d.temperature), ...sensorsInSector.map(s => Number(s.temperature))]
-              const avgTemp = allTemps.reduce((a, b) => a + b, 0) / allTemps.length
-              sensorsInSector.forEach(s => mergedSensorIds.add(s.id))
-              return {
-                key: `merged-${d.id}`,
-                label: d.name,
-                x: Number(d.position_x),
-                y: Number(d.position_y),
-                radius: radiusPx,
-                radiusM,
-                temp: avgTemp,
-                status: classifyZone(avgTemp, ideal?.idealMin ?? 22, ideal?.idealMax ?? 24),
-                opacity: 0.85,
-                sourceType: 'merged',
-                lastUpdated: d.updated_at,
-                deviceId: d.id,
-                mergedSources: [
-                  { label: d.name, temp: Number(d.temperature), type: 'brise' },
-                  ...sensorsInSector.map(s => ({ label: s.name, temp: Number(s.temperature), type: 'sensor' as const })),
-                ],
-              }
-            }
+        if (sensorsInSector.length > 0) {
+          const allTemps = [Number(d.temperature), ...sensorsInSector.map(s => Number(s.temperature))]
+          const avgTemp = allTemps.reduce((a, b) => a + b, 0) / allTemps.length
+          sensorsInSector.forEach(s => mergedSensorIds.add(s.id))
+          return {
+            key: `merged-${d.id}`,
+            label: d.name,
+            x: Number(d.position_x),
+            y: Number(d.position_y),
+            radius: radiusPx,
+            radiusM,
+            temp: avgTemp,
+            status: classifyZone(avgTemp, ideal?.idealMin ?? 22, ideal?.idealMax ?? 24),
+            opacity: 0.85,
+            sourceType: 'merged',
+            lastUpdated: d.updated_at,
+            deviceId: d.id,
+            mergedSources: [
+              { label: d.name, temp: Number(d.temperature), type: 'brise' },
+              ...sensorsInSector.map(s => ({ label: s.name, temp: Number(s.temperature), type: 'sensor' as const })),
+            ],
+          }
+        }
 
-            return {
-              key: `brise-${d.id}`,
-              label: d.name,
-              x: Number(d.position_x),
-              y: Number(d.position_y),
-              radius: radiusPx,
-              radiusM,
-              temp: Number(d.temperature),
-              status: classifyZone(Number(d.temperature), ideal?.idealMin ?? 22, ideal?.idealMax ?? 24),
-              opacity: 0.85,
-              sourceType: 'brise',
-              lastUpdated: d.updated_at,
-              deviceId: d.id,
-            }
-          })
-      : []
+        return {
+          key: `brise-${d.id}`,
+          label: d.name,
+          x: Number(d.position_x),
+          y: Number(d.position_y),
+          radius: radiusPx,
+          radiusM,
+          temp: Number(d.temperature),
+          status: classifyZone(Number(d.temperature), ideal?.idealMin ?? 22, ideal?.idealMax ?? 24),
+          opacity: 0.85,
+          sourceType: 'brise',
+          lastUpdated: d.updated_at,
+          deviceId: d.id,
+        }
+      })
 
     const sensorPoints: HeatPoint[] = layers.sensors
       ? positionedDevices
@@ -453,7 +471,8 @@ export default function ThermalComfortMap() {
             Posicionamento
           </button>
 
-          <button
+          {/* Bug 21: kill switch só aparece para ADMIN */}
+          {role === 'ADMIN' && <button
             type="button"
             disabled={togglingKillSwitch}
             onClick={() => handleKillSwitch(!autoStatus?.kill_switch_active)}
@@ -469,7 +488,7 @@ export default function ThermalComfortMap() {
               ? <><ShieldOff className="h-3.5 w-3.5" /> Auto PAUSADA</>
               : <><Shield className="h-3.5 w-3.5" /> Kill switch</>
             }
-          </button>
+          </button>}
         </div>
       </div>
 
@@ -653,7 +672,8 @@ export default function ThermalComfortMap() {
             {/* 7. Labels de temperatura */}
             <g pointerEvents="none">
               {heatPoints
-                .filter(p => p.sourceType !== 'zone' && p.temp != null)
+                .filter(p => p.sourceType !== 'zone' && p.temp != null
+                  && (p.sourceType === 'sensor' ? layers.sensors : layers.devices))
                 .map(point => {
                   const label = `${point.temp!.toFixed(1)}°`
                   const tw = label.length * 5.8 + 10
@@ -674,7 +694,8 @@ export default function ThermalComfortMap() {
 
             {/* 8. Áreas de hit para tooltip */}
             {heatPoints
-              .filter(p => p.sourceType !== 'zone')
+              .filter(p => p.sourceType !== 'zone'
+                && (p.sourceType === 'sensor' ? layers.sensors : layers.devices))
               .map(point => (
                 <circle
                   key={`hit-${point.key}`}
@@ -847,6 +868,8 @@ function ZoneAlertRow({
   const meta = STATUS_META[zone.status]
   const action = recommendedControlAction(zone.status)
   const acDevices = zone.actionableDevices.filter((d: Device) => !d.is_external_sensor)
+  const offAcDevices = zone.devices.filter((d: Device) => !d.is_external_sensor && d.status === 'DESLIGADO')
+  const canPowerOn = action === 'temperature_down' && acDevices.length === 0 && offAcDevices.length > 0 && !isLocked && phase !== 'loading'
   const canAdjust = action != null && acDevices.length > 0 && !isLocked && phase !== 'loading'
 
   const quickAdjust = async () => {
@@ -861,6 +884,22 @@ function ZoneAlertRow({
       const targets = (hot.length > 0 ? hot : acDevices.filter((d: Device) => d.temperature == null)).slice(0, 8)
       if (!targets.length) { setPhase('idle'); return }
       await Promise.all(targets.map((d: Device) => devicesApi.control(d.id, action, 1)))
+      setPhase('done')
+      setLockedUntil(Date.now() + 2 * 60 * 1000)
+      onRefetch()
+      setTimeout(() => setPhase('idle'), 8000)
+    } catch {
+      setPhase('error')
+      setTimeout(() => setPhase('idle'), 4000)
+    }
+  }
+
+  const quickPowerOn = async () => {
+    if (!canPowerOn) return
+    setPhase('loading')
+    try {
+      const targets = offAcDevices.slice(0, 4)
+      await Promise.all(targets.map((d: Device) => devicesApi.control(d.id, 'power_on', 1)))
       setPhase('done')
       setLockedUntil(Date.now() + 2 * 60 * 1000)
       onRefetch()
@@ -898,16 +937,23 @@ function ZoneAlertRow({
           {acDevices.length > 0 && (
             <span className="text-gray-400">· {acDevices.length} AC{acDevices.length !== 1 ? 's' : ''}</span>
           )}
+          {acDevices.length === 0 && offAcDevices.length > 0 && (
+            <span className="text-blue-400">· {offAcDevices.length} desligado{offAcDevices.length !== 1 ? 's' : ''}</span>
+          )}
         </div>
       </div>
       {action && (
         <button
           type="button"
-          title={action === 'temperature_down'
-            ? `Reduzir 1°C em ${acDevices.length} AC(s) de ${zone.label}`
-            : `Aumentar 1°C em ${acDevices.length} AC(s) de ${zone.label}`}
-          onClick={(e) => { e.stopPropagation(); void quickAdjust() }}
-          disabled={!canAdjust}
+          title={
+            canPowerOn
+              ? `Ligar ${offAcDevices.length} AC(s) desligado(s) em ${zone.label}`
+              : action === 'temperature_down'
+              ? `Reduzir 1°C em ${acDevices.length} AC(s) de ${zone.label}`
+              : `Aumentar 1°C em ${acDevices.length} AC(s) de ${zone.label}`
+          }
+          onClick={(e) => { e.stopPropagation(); canPowerOn ? void quickPowerOn() : void quickAdjust() }}
+          disabled={!canAdjust && !canPowerOn}
           className={cn(
             'flex-shrink-0 inline-flex items-center justify-center rounded-md px-2.5 py-1 text-xs font-semibold transition-colors min-w-[52px]',
             phase === 'done'
@@ -916,6 +962,8 @@ function ZoneAlertRow({
               ? 'bg-red-100 text-red-700 dark:bg-red-950/50 dark:text-red-400'
               : isLocked
               ? 'cursor-not-allowed bg-gray-100 text-gray-400 dark:bg-gray-800'
+              : canPowerOn
+              ? 'bg-blue-100 text-blue-700 hover:bg-blue-200 dark:bg-blue-950/50 dark:text-blue-400'
               : !canAdjust
               ? 'cursor-not-allowed bg-gray-100 text-gray-400 dark:bg-gray-800'
               : action === 'temperature_down'
@@ -931,6 +979,8 @@ function ZoneAlertRow({
             ? '✗ Erro'
             : isLocked
             ? 'esperar'
+            : canPowerOn
+            ? '⏻ Ligar'
             : acDevices.length === 0
             ? 'sem AC'
             : action === 'temperature_down'
@@ -958,6 +1008,62 @@ const ACTION_STATUS_META: Record<string, { label: string; color: string }> = {
   blocked:              { label: 'Bloqueado',          color: 'text-gray-500' },
   verified_success:     { label: 'Eficaz ✓',          color: 'text-green-600' },
   verified_failure:     { label: 'Sem efeito ✗',      color: 'text-red-500' },
+}
+
+function PowerOnPanel({ devices, onRefetch }: { devices: Device[]; onRefetch: () => void }) {
+  const [phase, setPhase] = useState<'idle' | 'loading' | 'done' | 'error'>('idle')
+  const [lockedUntil, setLockedUntil] = useState(0)
+  const isLocked = Date.now() < lockedUntil
+
+  const handlePowerOn = async () => {
+    if (isLocked || phase === 'loading') return
+    setPhase('loading')
+    try {
+      await Promise.all(devices.slice(0, 4).map(d => devicesApi.control(d.id, 'power_on', 1)))
+      setPhase('done')
+      setLockedUntil(Date.now() + 2 * 60 * 1000)
+      onRefetch()
+      setTimeout(() => setPhase('idle'), 8000)
+    } catch {
+      setPhase('error')
+      setTimeout(() => setPhase('idle'), 4000)
+    }
+  }
+
+  if (phase === 'done') return (
+    <div className="rounded-lg bg-green-50 px-3 py-2 dark:bg-green-950/30 text-xs text-green-700 dark:text-green-400">
+      ✓ Comando enviado — ACs sendo ligados. Próximo ajuste disponível em 2 min.
+    </div>
+  )
+  if (phase === 'error') return (
+    <div className="rounded-lg bg-red-50 px-3 py-2 dark:bg-red-950/30 text-xs text-red-600 dark:text-red-400">
+      ✗ Falha ao ligar. Verifique a conectividade com a Brise API.
+    </div>
+  )
+
+  return (
+    <div className="space-y-1.5">
+      {devices.slice(0, 4).map(d => (
+        <div key={d.id} className="flex items-center gap-2 text-xs text-gray-500">
+          <span className="h-1.5 w-1.5 rounded-full bg-blue-400 flex-shrink-0" />
+          <span className="truncate">{d.name}</span>
+        </div>
+      ))}
+      <button
+        type="button"
+        disabled={isLocked || phase === 'loading'}
+        onClick={handlePowerOn}
+        className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        {phase === 'loading'
+          ? <><RefreshCw className="h-3.5 w-3.5 animate-spin" /> Ligando…</>
+          : isLocked
+          ? <><Wind className="h-3.5 w-3.5" /> Aguardar cooldown</>
+          : <><Wind className="h-3.5 w-3.5" /> Ligar {devices.length} AC{devices.length !== 1 ? 's' : ''}</>
+        }
+      </button>
+    </div>
+  )
 }
 
 type ManualPhase = 'idle' | 'confirming' | 'sending' | 'done' | 'error'
@@ -991,6 +1097,7 @@ function ZonePanel({
   const meta = STATUS_META[zone.status as ThermalStatus]
 
   const acDevices: Device[] = zone.actionableDevices.filter((d: Device) => !d.is_external_sensor)
+  const offAcDevices: Device[] = zone.devices.filter((d: Device) => !d.is_external_sensor && d.status === 'DESLIGADO')
   // Prefere dispositivo com setpoint disponível + maior delta; se nenhum tem setpoint, usa o de maior delta mesmo
   const bestDevice: Device | null =
     ([...acDevices].filter(d => d.setpoint_cool != null)
@@ -1270,8 +1377,14 @@ function ZonePanel({
                   }
                   <span>
                     {lastAction.device_name ?? '—'}
-                    {lastAction.setpoint_before != null && lastAction.setpoint_after != null && (
+                    {lastAction.setpoint_before != null && lastAction.setpoint_after != null
+                      && lastAction.setpoint_before !== lastAction.setpoint_after && (
                       <> · {lastAction.setpoint_before}°→{lastAction.setpoint_after}°C</>
+                    )}
+                    {lastAction.setpoint_before != null
+                      && lastAction.setpoint_before === lastAction.setpoint_after
+                      && lastAction.direction === 'down' && (
+                      <> · ⏻ Ligou</>
                     )}
                   </span>
                 </div>
@@ -1325,12 +1438,29 @@ function ZonePanel({
         </div>
 
         <div className="p-3">
-          {!canShowManual && (
+          {!canShowManual && !canWrite && (
+            <p className="text-sm text-gray-500">Somente leitura — sem permissão para ajustar.</p>
+          )}
+
+          {/* ACs desligados — zona precisa resfriar */}
+          {!canShowManual && canWrite && acDevices.length === 0 && offAcDevices.length > 0 && ctrlAction === 'temperature_down' && !isLocked && (
+            <div className="space-y-2">
+              <p className="text-xs text-blue-600 dark:text-blue-400">
+                {offAcDevices.length} AC{offAcDevices.length !== 1 ? 's' : ''} desligado{offAcDevices.length !== 1 ? 's' : ''} nesta zona.
+                Ligue para iniciar o resfriamento.
+              </p>
+              <PowerOnPanel devices={offAcDevices} onRefetch={onRefetch} />
+            </div>
+          )}
+
+          {!canShowManual && canWrite && !(acDevices.length === 0 && offAcDevices.length > 0 && ctrlAction === 'temperature_down') && (
             <p className="text-sm text-gray-500">
               {isLocked
                 ? 'Aguarde antes de reaplicar (cooldown de 2 min).'
+                : acDevices.length === 0 && offAcDevices.length > 0
+                ? `${offAcDevices.length} AC${offAcDevices.length !== 1 ? 's' : ''} desligado${offAcDevices.length !== 1 ? 's' : ''} — zona dentro da faixa, nenhum ajuste necessário.`
                 : acDevices.length === 0
-                ? 'Nenhum aparelho ajustável nesta zona.'
+                ? 'Nenhum aparelho com leitura ativa nesta zona.'
                 : 'Zona dentro da faixa confortável — nenhum ajuste necessário.'}
             </p>
           )}

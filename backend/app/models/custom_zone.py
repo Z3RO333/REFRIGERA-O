@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from sqlalchemy import String, DateTime, Float, Integer, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from app.db.session import Base
 
 
@@ -16,13 +16,13 @@ class CustomZone(Base):
     zone_type: Mapped[str] = mapped_column(String(20), default="ABERTA")
     ideal_min: Mapped[int] = mapped_column(Integer, default=20)
     ideal_max: Mapped[int] = mapped_column(Integer, default=24)
-    # Posição visual na planta (coordenadas SVG viewBox 800×556)
-    x: Mapped[float | None] = mapped_column(Float)
-    y: Mapped[float | None] = mapped_column(Float)
-    w: Mapped[float | None] = mapped_column(Float)
-    h: Mapped[float | None] = mapped_column(Float)
+    # Geometria em % da planta — independente de resolução/tamanho de tela
+    # {"type":"polygon","points":[{"x":12.4,"y":18.2},...],"unit":"percent"}
+    geometry: Mapped[dict | None] = mapped_column(JSONB)
     floor: Mapped[int] = mapped_column(Integer, default=1)
     color: Mapped[str | None] = mapped_column(String(30))
+    active: Mapped[bool] = mapped_column(default=True)
+    updated_by_name: Mapped[str | None] = mapped_column(String(100))
     created_by_name: Mapped[str | None] = mapped_column(String(100))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

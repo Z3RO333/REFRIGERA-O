@@ -63,4 +63,9 @@ class DeviceStatusLatest(Base):
     accumulated_on_minutes: Mapped[int | None] = mapped_column(BigInteger)
     accumulated_off_minutes: Mapped[int | None] = mapped_column(BigInteger)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # Diagnóstico de falhas
+    last_error: Mapped[str | None] = mapped_column(String(200))
+    last_error_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
     device: Mapped["Device"] = relationship("Device", back_populates="status_latest")

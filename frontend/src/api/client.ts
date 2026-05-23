@@ -43,6 +43,7 @@ export const devicesApi = {
   control: (id: string, action: DeviceControlAction, step = 1) =>
     api.post(`/devices/${id}/control`, { action, step }).then(r => r.data),
   updatePosition: (id: string, x: number | null, y: number | null) => api.put(`/devices/${id}/position`, { position_x: x, position_y: y }),
+  refreshStatus: (id: string) => api.post(`/devices/${id}/refresh-status`).then(r => r.data),
   sync: (id: string) => api.post(`/devices/${id}/sync`),
   create: (data: object) => api.post('/devices', data),
   briseSchedules: (id: string) => api.get(`/devices/${id}/brise-schedules`).then(r => r.data),
@@ -138,7 +139,11 @@ export const logsApi = {
     api.get('/logs/kpis', { params }).then(r => r.data),
 }
 
-interface ZonePosition { x?: number; y?: number; w?: number; h?: number; floor?: number; color?: string }
+interface ZoneGeometry {
+  type: 'polygon' | 'rect'
+  points: { x: number; y: number }[]
+  unit: 'percent'
+}
 
 export const customZonesApi = {
   list: (storeId: string) => api.get(`/zones/${storeId}/custom`).then(r => r.data),
@@ -147,18 +152,33 @@ export const customZonesApi = {
     ideal_min?: number
     ideal_max?: number
     zone_type?: string
-    device_ids: string[]
+    device_ids?: string[]
     mode?: string
-  } & ZonePosition) => api.post(`/zones/${storeId}/custom`, data).then(r => r.data),
+    geometry?: ZoneGeometry
+    floor?: number
+    color?: string
+  }) => api.post(`/zones/${storeId}/custom`, data).then(r => r.data),
   update: (storeId: string, zoneKey: string, data: {
     name?: string
     ideal_min?: number
     ideal_max?: number
     zone_type?: string
     device_ids?: string[]
-  } & ZonePosition) => api.put(`/zones/${storeId}/custom/${zoneKey}`, data).then(r => r.data),
+    geometry?: ZoneGeometry
+    floor?: number
+    color?: string
+  }) => api.put(`/zones/${storeId}/custom/${zoneKey}`, data).then(r => r.data),
   delete: (storeId: string, zoneKey: string) =>
     api.delete(`/zones/${storeId}/custom/${zoneKey}`).then(r => r.data),
+  restore: (storeId: string, zoneKey: string) =>
+    api.post(`/zones/${storeId}/custom/${zoneKey}/restore`).then(r => r.data),
+  suggestions: (storeId: string) =>
+    api.get(`/zones/${storeId}/suggestions`).then(r => r.data),
+}
+
+export const diagnosticsApi = {
+  store: (storeId: string) => api.get(`/diagnostics/stores/${storeId}`).then(r => r.data),
+  device: (deviceId: string) => api.get(`/diagnostics/devices/${deviceId}`).then(r => r.data),
 }
 
 export const aiApi = {

@@ -159,25 +159,24 @@ async def _fetch_anomalous_devices() -> tuple[list[dict], dict[str, dict]]:
         )
         rows = result.all()
 
-        # Mapa de zona por sector_name
-        from app.services.zone_controller import ZONES
+        # Usa apenas zonas customizadas — sem hardcoded
+        from app.services.zone_controller import _load_all_custom_zones
         from app.models.zone import ZoneAutomation
         from sqlalchemy import or_
 
-        sector_to_zone = {}
-        for zone_cfg in ZONES.values():
-            for sname in zone_cfg.sector_names:
-                sector_to_zone[sname] = zone_cfg
+        custom_zones = await _load_all_custom_zones(session)
+        sector_to_zone: dict = {}  # custom zones usam device_ids, não sector_names
 
-        # Temperatura média por zona/loja (para contexto dos vizinhos)
-        zone_avg_map: dict[tuple, float] = {}
-        for zone_cfg in ZONES.values():
+        # Temperatura média por zona customizada (via device_ids)
+        zone_avg_map: dict[str, float] = {}
+        for zone_cfg in custom_zones.values():
+            if not zone_cfg.device_ids:
+                continue
             avg_res = await session.execute(
                 select(func.avg(DeviceStatusLatest.temperature))
                 .join(Device, DeviceStatusLatest.device_id == Device.id)
-                .join(StoreSector, Device.sector_id == StoreSector.id)
                 .where(
-                    StoreSector.name.in_(zone_cfg.sector_names),
+                    Device.id.in_(zone_cfg.device_ids),
                     DeviceStatusLatest.temperature.is_not(None),
                 )
             )
@@ -396,12 +395,14 @@ async def trigger_zone_analysis(store_id_str: str, zone_key: str) -> None:
 
     from app.ai.analyzer import analyze_zone_deep
     from app.services.digital_twin import compute_zone_twin
-    from app.services.zone_controller import ZONES
+    from app.services.zone_controller import _load_all_custom_zones
 
     try:
-        zone_cfg = ZONES.get(zone_key)
+        async with AsyncSessionLocal() as _s:
+            all_zones = await _load_all_custom_zones(_s)
+        zone_cfg = all_zones.get(zone_key)
         if not zone_cfg:
-            logger.warning("Zone key não encontrada: %s", zone_key)
+            logger.warning("Zona customizada '%s' não encontrada — crie a zona no editor do mapa", zone_key)
             return
 
         store_uuid = uuid.UUID(store_id_str)

@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
@@ -11,7 +12,7 @@ from app.schemas.device import (
     DeviceControlCommand, DeviceCreate, DeviceMetadataUpdate, DeviceParametersUpdate,
     DevicePositionUpdate, ExternalSensorCreate,
 )
-from app.cache.device_cache import get_device_status
+from app.cache.device_cache import get_device_status, set_device_params
 from app.security.network import validate_sensor_url
 from app.models.user import User
 from app.api.v1.auth import get_current_user, require_role
@@ -161,6 +162,12 @@ async def control_device(
     if device.source_url is not None:
         raise HTTPException(409, "Sensor externo não recebe comandos Brise")
 
+    # Bug 4: respeitar kill switch global — bloqueia automação E comandos manuais
+    from app.services.zone_controller import KILL_SWITCH_KEY
+    from app.cache.redis_client import redis_client as _redis
+    if await _redis.exists(KILL_SWITCH_KEY):
+        raise HTTPException(409, "Kill switch global ativo — todos os comandos estão bloqueados. Reative a automação antes de enviar comandos.")
+
     # Resolve store/sector para enriquecer o audit_log
     sector_store = await db.execute(
         select(StoreSector, Store)
@@ -244,7 +251,7 @@ async def control_device(
                 status.status_classification = "DESLIGADO"
                 status.delta_temp = None
             elif status.status_classification == "DESLIGADO":
-                status.status_classification = "SEM_LEITURA"
+                status.status_classification = "AGUARDANDO_LEITURA"
             status.updated_at = datetime.utcnow()
 
     await log_action(
@@ -262,6 +269,9 @@ async def control_device(
     )
     await db.commit()
 
+    # Atualiza cache Redis de parâmetros imediatamente após commit
+    await set_device_params(device_id, {**next_params, "synced_at": datetime.utcnow().isoformat()})
+
     await _rc.publish("device.command.sent", {
         "device_id": str(device_id),
         "device_name": device.name,
@@ -270,11 +280,34 @@ async def control_device(
         "by": current_user.name,
     })
 
+    # Dispara refresh em background para atualizar status real após o comando
+    from app.services.device_refresh import refresh_after_command
+    asyncio.create_task(refresh_after_command(device_id, device.brise_device_id))
+
     return {
         "message": "Comando enviado",
         "confirmed": True,
         "parameters": next_params,
     }
+
+@router.post("/{device_id}/refresh-status")
+async def refresh_device_status_endpoint(
+    device_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_role("EDITOR", "ADMIN")),
+):
+    device = await db.get(Device, device_id)
+    if not device:
+        raise HTTPException(404, "Dispositivo não encontrado")
+    if device.source_url is not None:
+        raise HTTPException(409, "Sensor externo não suporta refresh manual")
+
+    from app.services.device_refresh import refresh_device_status
+    result = await refresh_device_status(device_id, device.brise_device_id)
+    if result is None:
+        raise HTTPException(503, "Brise API não retornou dados — tente novamente em instantes")
+    return result
+
 
 @router.put("/{device_id}/position")
 async def update_device_position(

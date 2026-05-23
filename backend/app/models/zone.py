@@ -22,9 +22,9 @@ class ZoneAutomation(Base):
 
     # ── Guardrails ────────────────────────────────────────────────────────────
     allowed_start_hour: Mapped[int] = mapped_column(Integer, default=7)
-    allowed_start_minute: Mapped[int] = mapped_column(Integer, default=30)  # 07:30
+    allowed_start_minute: Mapped[int] = mapped_column(Integer, default=0)   # 07:00
     allowed_end_hour: Mapped[int] = mapped_column(Integer, default=18)
-    allowed_end_minute: Mapped[int] = mapped_column(Integer, default=30)    # 18:30
+    allowed_end_minute: Mapped[int] = mapped_column(Integer, default=0)     # 18:00
     is_critical_zone: Mapped[bool] = mapped_column(Boolean, default=False)  # bloqueia auto/semi
 
     # ── Prioridade operacional ────────────────────────────────────────────────

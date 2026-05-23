@@ -88,15 +88,20 @@ async def get_recent_analyses(db: AsyncSession = Depends(get_db)):
 
 @router.get("/zone-analyses")
 async def get_zone_analyses(db: AsyncSession = Depends(get_db)):
-    """Retorna últimas análises de IA por zona (cache Redis, TTL 24h)."""
-    from app.services.zone_controller import ZONES
+    """Retorna últimas análises de IA por zona — inclui zonas fixas e customizadas."""
+    from app.services.zone_controller import ZONES, _load_all_custom_zones
+    from app.models.custom_zone import CustomZone
 
     stores_res = await db.execute(select(Store).where(Store.active == True))
     stores = stores_res.scalars().all()
 
     analyses = []
     for store in stores:
-        for zone_key in ZONES:
+        # Bug 11: inclui custom zones além das fixas
+        custom = await _load_all_custom_zones(db)
+        all_zone_keys = set(custom.keys())
+
+        for zone_key in all_zone_keys:
             raw = await redis_client.get(f"ai:last_zone_analysis:{store.id}:{zone_key}")
             if raw:
                 try:

@@ -19,6 +19,7 @@ import Reports from './pages/Reports'
 import ModulePlaceholder from './pages/ModulePlaceholder'
 import UsersPage from './pages/Users'
 import ActivityLog from './pages/ActivityLog'
+import DiagnosticsPage from './pages/DiagnosticsPage'
 import AIAnalysisPage from './pages/AIAnalysisPage'
 import LogsPage from './pages/LogsPage'
 import DigitalTwinPage from './pages/DigitalTwinPage'
@@ -62,6 +63,7 @@ export default function App() {
           <Route path="configuracoes" element={<ModulePlaceholder title="Configurações" columns={['Regra', 'Escopo', 'Valor', 'Atualizado em']} />} />
           <Route path="usuarios" element={<UsersPage />} />
           <Route path="atividade" element={<ActivityLog />} />
+          <Route path="diagnostico" element={<DiagnosticsPage />} />
           <Route path="ia" element={<AIAnalysisPage />} />
           <Route path="ambientes" element={<ZoneControlPanel />} />
           <Route path="zonas" element={<DigitalTwinPage />} />

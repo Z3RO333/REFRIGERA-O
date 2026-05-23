@@ -12,6 +12,7 @@ from app.ai.email_manager import send_consolidated_email_job
 from app.ai.job import run_zone_analysis
 from app.services.zone_controller import run_zone_controller, run_zone_verification
 from app.db.retention import purge_old_readings
+from app.services.zone_controller import release_expired_maintenance_zones
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ _JOB_LOCK_TTL = {
     "zone_verification":     150,   # interval 3 min  → lock 2.5 min
     "zone_ai_analysis":     1700,   # interval 30 min → lock 28 min
     "purge_old_readings":   3600,   # interval 24 h   → lock 1 h
+    "release_maintenance":   55,    # interval 1 min  → lock 55s
 }
 
 
@@ -88,6 +90,11 @@ async def _job_purge_old_readings():
     await purge_old_readings()
 
 
+@_with_lock("release_maintenance")
+async def _job_release_maintenance():
+    await release_expired_maintenance_zones()
+
+
 def _on_job_error(event):
     logger.error("Job %s falhou: %s", event.job_id, event.exception, exc_info=event.traceback)
 
@@ -139,6 +146,11 @@ async def start_scheduler():
         _job_purge_old_readings,
         trigger=IntervalTrigger(hours=24),
         id="purge_old_readings", replace_existing=True, max_instances=1,
+    )
+    scheduler.add_job(
+        _job_release_maintenance,
+        trigger=IntervalTrigger(minutes=1),
+        id="release_maintenance", replace_existing=True, max_instances=1,
     )
 
     scheduler.add_listener(_on_job_error, EVENT_JOB_ERROR)

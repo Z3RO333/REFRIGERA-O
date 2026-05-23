@@ -54,6 +54,10 @@ export function useWebSocket() {
           if (ch === 'device.command.sent' || ch === 'device.command.failed') {
             queryClient.invalidateQueries({ queryKey: ['store-devices'] })
             queryClient.invalidateQueries({ queryKey: ['device'] })
+            queryClient.invalidateQueries({ queryKey: ['digital-twin'] })
+            queryClient.invalidateQueries({ queryKey: ['zones-automation'] })
+            queryClient.invalidateQueries({ queryKey: ['kpis'] })
+            queryClient.invalidateQueries({ queryKey: ['automation-status'] })
           }
         } catch {}
       }
