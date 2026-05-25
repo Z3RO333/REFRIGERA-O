@@ -33,6 +33,7 @@ from app.models.device import Device, DeviceParameters, DeviceStatusLatest
 from app.models.reading import DeviceReading
 from app.models.store import StoreSector
 from app.models.zone import ZoneAction, ZoneAutomation
+from app.services.thermal_spatial import Hotspot, proximity_score
 
 logger = logging.getLogger(__name__)
 
@@ -786,6 +787,7 @@ def _select_best_device(
     direction: str,
     setpoint_min: int,
     setpoint_max: int,
+    hotspot: "Hotspot | None" = None,
 ) -> tuple[_DeviceRow, DeviceParameters] | None:
     going_down = direction == "down"
     candidates = [
@@ -799,10 +801,16 @@ def _select_best_device(
     if not candidates:
         return None
 
-    # Ordena pelo maior delta_temp absoluto (mais fora de range = mais urgente)
-    def sort_key(row: _DeviceRow) -> float:
+    def sort_key(row: _DeviceRow) -> tuple[float, float]:
+        prox = proximity_score(
+            row.device.position_x,
+            row.device.position_y,
+            hotspot=hotspot,
+            influence_radius_m=float(row.device.influence_radius_m or 8),
+        )
         delta = row.status.delta_temp
-        return abs(delta) if delta is not None else 0.0
+        delta_abs = abs(delta) if delta is not None else 0.0
+        return (prox, delta_abs)
 
     candidates.sort(key=sort_key, reverse=True)
     best = candidates[0]
@@ -812,6 +820,7 @@ def _select_best_device(
 def _select_power_on_candidate(
     devices: list[_DeviceRow],
     params_map: dict[uuid.UUID, DeviceParameters],
+    hotspot: "Hotspot | None" = None,
 ) -> tuple[_DeviceRow, DeviceParameters] | None:
     candidates = []
     for row in devices:
@@ -829,7 +838,19 @@ def _select_power_on_candidate(
     if not candidates:
         return None
 
-    candidates.sort(key=lambda row: (row.device.btu or 0, row.device.name or ""), reverse=True)
+    candidates.sort(
+        key=lambda row: (
+            proximity_score(
+                row.device.position_x,
+                row.device.position_y,
+                hotspot=hotspot,
+                influence_radius_m=float(row.device.influence_radius_m or 8),
+            ),
+            row.device.btu or 0,
+            row.device.name or "",
+        ),
+        reverse=True,
+    )
     best = candidates[0]
     # Se não há params, cria um objeto temporário com defaults seguros para ligar
     params = params_map.get(best.device.id)
