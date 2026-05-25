@@ -82,7 +82,6 @@ def _zone_action_to_entry(z: ZoneAction, store_name: str | None = None) -> dict:
         event_type = "automation_exec"
         origin = "automation"
 
-    direction_arrow = {"down": "↓", "up": "↑"}.get(z.direction or "", "")
     zone_id = z.zone_label or z.zone_key or "—"
     device = z.device_name or "equipamento"
 
@@ -90,9 +89,17 @@ def _zone_action_to_entry(z: ZoneAction, store_name: str | None = None) -> dict:
     if event_type == "guardrail_block":
         summary = f"Bloqueio de automação — {z.block_reason or 'guardrail'} [{zone_id}]"
     elif event_type == "ai_suggestion":
-        sp = f"{z.setpoint_before}°C → {z.setpoint_after}°C" if z.setpoint_before and z.setpoint_after else ""
-        summary = f"Sugestão {direction_arrow}: {device} {sp} [{zone_id}]"
+        if z.setpoint_before is not None and z.setpoint_after is not None and z.setpoint_before != z.setpoint_after:
+            summary = (
+                f"Sugestão IA: ajuste local na zona {zone_id} — "
+                f"{device} {z.setpoint_before}°C → {z.setpoint_after}°C"
+            )
+        elif z.device_id is not None and z.setpoint_before is not None and z.setpoint_after == z.setpoint_before:
+            summary = f"Sugestão IA: ligar {device} na zona {zone_id}"
+        else:
+            summary = f"Sugestão IA: hotspot na zona {zone_id}"
     else:
+        direction_arrow = {"down": "↓", "up": "↑"}.get(z.direction or "", "")
         sp = f"{z.setpoint_before}°C → {z.setpoint_after}°C" if z.setpoint_before and z.setpoint_after else ""
         status_icons = {
             "pending_verification": "⏳",
@@ -141,6 +148,7 @@ def _zone_action_to_entry(z: ZoneAction, store_name: str | None = None) -> dict:
             "confidence": z.confidence,
             "mode": z.mode,
             "block_reason": z.block_reason,
+            "suggestion_signature": getattr(z, "suggestion_signature", None),
             "verified_at": z.verified_at.isoformat() if z.verified_at else None,
         },
     }

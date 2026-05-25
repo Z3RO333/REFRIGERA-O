@@ -424,6 +424,13 @@ Regras obrigatórias:
    - nunca recomende reduzir setpoint se o novo valor for igual ao atual;
    - se não houver ação segura, informe o motivo técnico.
 
+3b. Para hotspot local:
+   - se houver aparelho desligado, comunicando e controlável perto do hotspot, recomende ligar esse aparelho;
+   - se todos os aparelhos próximos já estiverem ligados, NUNCA recomende ligar outro aparelho;
+   - nesse caso, avalie reduzir setpoint real dos aparelhos próximos se current_setpoint > min_allowed_setpoint;
+   - se todos já estiverem no limite mínimo ou sem comunicação/controle, recomende verificação técnica de balanceamento, insuflação, retorno de ar, carga térmica ou manutenção;
+   - nunca use faixa_ideal_min/target_min como current_setpoint.
+
 4. Para zona fria:
    Se temperatura_media < faixa_ideal_min:
    - primeiro recomende aumentar setpoint dos aparelhos ligados;
@@ -554,6 +561,16 @@ def _build_zone_prompt(twin: dict) -> str:
     blocked_devices = [d for d in ac_devices if d.get("blocked")]
     no_comm_devices = [d for d in ac_devices if not d.get("communication_ok", True)]
     controllable_devices = [d for d in ac_devices if d.get("controllable") and d.get("communication_ok", True) and not d.get("blocked")]
+    all_devices_on = len(ac_devices) > 0 and len(off_devices) == 0
+    adjustable_setpoint = [
+        d for d in active
+        if d.get("controllable")
+        and d.get("communication_ok", True)
+        and not d.get("blocked")
+        and d.get("setpoint_cool") is not None
+        and d.get("setpoint_min", ideal_min if ideal_min is not None else 18) is not None
+        and d.get("setpoint_cool") > d.get("setpoint_min", ideal_min if ideal_min is not None else 18)
+    ]
     stale_devices = [d for d in devices if d.get("is_stale")]
     sensors_no_reading = [d for d in sensors if d.get("status") in ("SEM_LEITURA", "UNKNOWN") or d.get("temperature") is None]
     anomalous = [d for d in active if d.get("status") not in ("NORMAL",)]
@@ -579,6 +596,8 @@ def _build_zone_prompt(twin: dict) -> str:
         f"Aparelhos bloqueados: {len(blocked_devices)}",
         f"Aparelhos sem comunicação/leitura confiável: {len(no_comm_devices)}",
         f"Aparelhos controláveis agora: {len(controllable_devices)}",
+        f"Todos os aparelhos ligados: {'SIM' if all_devices_on else 'NÃO'}",
+        f"Aparelhos ligados com margem para reduzir setpoint: {len(adjustable_setpoint)}",
         f"Sensores ativos/vinculados: {len(sensors)}",
         f"Sensores sem leitura: {len(sensors_no_reading)}",
         f"Leituras stale: {len(stale_devices)}",
@@ -593,8 +612,10 @@ def _build_zone_prompt(twin: dict) -> str:
         state_s = "ligado" if d.get("state") is True else ("desligado" if d.get("state") is False else "estado desconhecido")
         ctrl_s = "controlável" if d.get("controllable") else "não controlável"
         comm_s = "comunicando" if d.get("communication_ok", True) else "sem comunicação/leitura confiável"
+        setpoint_s = f", setpoint_real={d.get('setpoint_cool')}°C" if d.get("setpoint_cool") is not None else ", setpoint_real=sem leitura"
+        min_s = f", minimo_operacional={d.get('setpoint_min')}°C" if d.get("setpoint_min") is not None else ""
         stale_s = ", stale" if d.get("is_stale") else ""
-        lines.append(f"  • {d['name']}: {temp_s}, status={d['status']}, {state_s}, {ctrl_s}, {comm_s}{stale_s}, efic.={eff_s}{ext}")
+        lines.append(f"  • {d['name']}: {temp_s}, status={d['status']}, {state_s}, {ctrl_s}, {comm_s}{setpoint_s}{min_s}{stale_s}, efic.={eff_s}{ext}")
 
     schema = (
         f'{{"zone_key":"{twin["zone_key"]}",'
@@ -611,6 +632,7 @@ def _build_zone_prompt(twin: dict) -> str:
         "",
         "Estados que devem ser diferenciados quando aplicável: zona_sem_leitura_termica, zona_sem_sensor, zona_sem_aparelhos_vinculados, aparelhos_sem_comunicacao, aparelhos_bloqueados, aparelhos_nao_controlaveis, api_com_erro, leitura_stale, dados_insuficientes.",
         "Para zona quente, priorize ligar aparelhos desligados disponíveis antes de reduzir setpoint. Para zona fria, priorize aumentar setpoint dos aparelhos ligados antes de desligar excedentes.",
+        "Se todos os aparelhos da zona estiverem ligados, não recomende power_on; para hotspot local, recomende ajuste de setpoint real dos aparelhos próximos se houver margem, senão verificação técnica.",
         "Com base no estado coletivo da zona, identifique o problema e retorne o JSON:",
         schema,
     ]

@@ -71,6 +71,7 @@ class ZoneAction(Base):
     # suggestion | pending_verification | executed | blocked | verified_success | verified_failure
     status: Mapped[str] = mapped_column(String(30), default="suggestion", index=True)
     block_reason: Mapped[str | None] = mapped_column(Text)
+    suggestion_signature: Mapped[str | None] = mapped_column(String(80), index=True)
 
     attempt_count: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)

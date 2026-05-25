@@ -17,8 +17,9 @@ from statistics import mean, stdev
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.device import Device, DeviceStatusLatest
+from app.models.device import Device, DeviceParameters, DeviceStatusLatest
 from app.models.reading import DeviceReading
+from app.models.zone import ZoneAutomation
 from app.services.zone_controller import BLOCKED_STATUSES, ZONES, ZoneConfig, _classify, _load_all_custom_zones
 
 logger = logging.getLogger(__name__)
@@ -256,6 +257,22 @@ async def compute_zone_twin(
             )
         )
         rows = result.all()
+    params_map = {}
+    automation_min = 18
+    if rows:
+        row_device_ids = [device.id for device, _ in rows]
+        params_result = await session.execute(
+            select(DeviceParameters).where(DeviceParameters.device_id.in_(row_device_ids))
+        )
+        params_map = {p.device_id: p for p in params_result.scalars().all()}
+        auto_result = await session.execute(
+            select(ZoneAutomation.setpoint_min).where(
+                ZoneAutomation.store_id == store_id,
+                ZoneAutomation.zone_key == zone.key,
+            )
+        )
+        automation_min = auto_result.scalar_one_or_none() or 18
+
     contributing: list[dict] = []
     device_ids: list[uuid.UUID] = []
     temps_now: list[float] = []
@@ -283,6 +300,7 @@ async def compute_zone_twin(
             readings_fresh = False
         controllable = not is_ext and not device.dnd
         communication_ok = status.status_classification not in {"SEM_LEITURA"} and not is_stale
+        params = params_map.get(device.id)
 
         contributing.append({
             "device_id": str(device.id),
@@ -296,6 +314,8 @@ async def compute_zone_twin(
             "communication_ok": communication_ok,
             "controllable": controllable,
             "blocked": bool(device.dnd),
+            "setpoint_cool": params.setpoint_cool if params else None,
+            "setpoint_min": automation_min,
             "efficiency_score": status.efficiency_score,
             "updated_at": status.updated_at.isoformat() if status.updated_at else None,
         })

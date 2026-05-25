@@ -295,6 +295,130 @@ def test_select_power_on_skips_device_without_communication():
     assert best_row.device.name == "FAR_OK"
 
 
+def test_local_hotspot_all_devices_on_suggests_setpoint_not_power_on():
+    """Hotspot local com todos ligados deve escolher ajuste de setpoint, não power_on."""
+    from app.services.zone_controller import _select_hotspot_setpoint_candidates, _select_power_on_candidate
+
+    hotspot = Hotspot(x=400, y=200, peak_temp=24.8, avg_hotspot_temp=24.6, has_coordinates=True)
+    remedios, params_remedios = _make_device_row("Brise Remedios", x=405, y=205, btu=18000, setpoint_cool=24)
+    meio, params_meio = _make_device_row("Brise Meio", x=420, y=210, btu=18000, setpoint_cool=23)
+    entrada, params_entrada = _make_device_row("Brise Entrada", x=700, y=300, btu=18000, setpoint_cool=23)
+    params_map = {
+        remedios.device.id: params_remedios,
+        meio.device.id: params_meio,
+        entrada.device.id: params_entrada,
+    }
+
+    assert _select_power_on_candidate([remedios, meio, entrada], params_map, hotspot=hotspot) is None
+
+    candidates = _select_hotspot_setpoint_candidates(
+        [remedios, meio, entrada],
+        params_map,
+        setpoint_min=20,
+        hotspot=hotspot,
+    )
+
+    assert candidates
+    best_row, best_params = candidates[0]
+    assert best_row.device.name == "Brise Remedios"
+    assert best_params.setpoint_cool == 24
+
+
+def test_local_hotspot_uses_real_setpoint_not_zone_target_min():
+    """target_min da zona não pode sobrescrever current_setpoint real do aparelho."""
+    from app.services.zone_controller import _select_hotspot_setpoint_candidates
+
+    hotspot = Hotspot(x=400, y=200, peak_temp=24.8, avg_hotspot_temp=24.6, has_coordinates=True)
+    row, params = _make_device_row("Brise Remedios", x=405, y=205, btu=18000, setpoint_cool=24)
+
+    candidates = _select_hotspot_setpoint_candidates(
+        [row],
+        {row.device.id: params},
+        setpoint_min=20,
+        hotspot=hotspot,
+    )
+
+    assert candidates[0][1].setpoint_cool == 24
+    assert max(20, candidates[0][1].setpoint_cool - 1) == 23
+
+
+def test_local_hotspot_all_on_at_min_requires_technical_check():
+    """Todos ligados no mínimo permitido não podem gerar comando no-op de setpoint."""
+    from app.services.zone_controller import _select_hotspot_setpoint_candidates, _select_power_on_candidate
+
+    hotspot = Hotspot(x=400, y=200, peak_temp=24.8, avg_hotspot_temp=24.6, has_coordinates=True)
+    row_a, params_a = _make_device_row("Brise A", x=405, y=205, btu=18000, setpoint_cool=20)
+    row_b, params_b = _make_device_row("Brise B", x=420, y=210, btu=18000, setpoint_cool=20)
+    params_map = {row_a.device.id: params_a, row_b.device.id: params_b}
+
+    assert _select_power_on_candidate([row_a, row_b], params_map, hotspot=hotspot) is None
+    assert _select_hotspot_setpoint_candidates([row_a, row_b], params_map, setpoint_min=20, hotspot=hotspot) == []
+
+
+def test_suggestion_signature_dedupes_same_zone_hotspot_action():
+    """A assinatura fica igual para sugestão repetida e muda quando a ação muda."""
+    from app.services.zone_controller import ZoneConfig, _suggestion_signature
+
+    zone = ZoneConfig(key="farma", label="FARMA", sector_names=[], ideal_min=20, ideal_max=24)
+    hotspot = Hotspot(x=405, y=205, peak_temp=24.8, avg_hotspot_temp=24.6, has_coordinates=True)
+    device_id = uuid.uuid4()
+
+    sig_a = _suggestion_signature(
+        zone=zone,
+        hotspot=hotspot,
+        issue_type="local_hotspot",
+        action_type="set_temperature",
+        target_devices=[device_id],
+        severity="WARM",
+        setpoint_after=23,
+    )
+    sig_b = _suggestion_signature(
+        zone=zone,
+        hotspot=hotspot,
+        issue_type="local_hotspot",
+        action_type="set_temperature",
+        target_devices=[device_id],
+        severity="WARM",
+        setpoint_after=23,
+    )
+    sig_c = _suggestion_signature(
+        zone=zone,
+        hotspot=hotspot,
+        issue_type="local_hotspot",
+        action_type="technical_check",
+        target_devices=[],
+        severity="WARM",
+    )
+
+    assert sig_a == sig_b
+    assert sig_a != sig_c
+
+
+def test_ai_suggestion_title_uses_zone_not_equipment_label():
+    """Sugestão de zona não deve aparecer como 'equipamento [farma]'."""
+    from app.api.v1.logs import _zone_action_to_entry
+    from app.models.zone import ZoneAction
+
+    zone_action = ZoneAction(
+        id=uuid.uuid4(),
+        store_id=uuid.uuid4(),
+        zone_key="farma",
+        zone_label="FARMA",
+        direction="down",
+        setpoint_before=24,
+        setpoint_after=23,
+        device_id=uuid.uuid4(),
+        device_name="Brise Remedios",
+        reason="Hotspot local",
+        status="suggestion",
+        created_at=datetime.utcnow(),
+    )
+
+    entry = _zone_action_to_entry(zone_action)
+    assert entry["summary"].startswith("Sugestão IA: ajuste local na zona FARMA")
+    assert "equipamento [farma]" not in entry["summary"].lower()
+
+
 def test_local_hotspot_status_detects_subarea_above_range():
     """Média pode estar confortável, mas hotspot acima da faixa deve virar status local."""
     from app.services.zone_controller import ZoneConfig, _local_hotspot_status

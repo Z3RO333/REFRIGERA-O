@@ -66,6 +66,7 @@ def _action_dict(a: ZoneAction) -> dict:
         "mode": a.mode,
         "status": a.status,
         "block_reason": a.block_reason,
+        "suggestion_signature": getattr(a, "suggestion_signature", None),
         "attempt_count": a.attempt_count,
         "created_at": a.created_at.isoformat(),
         "verified_at": a.verified_at.isoformat() if a.verified_at else None,

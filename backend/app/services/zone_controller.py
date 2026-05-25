@@ -12,6 +12,8 @@ Ciclo por zona:
   8. Após 12-15 min, verifica se a temperatura melhorou
 """
 import logging
+import hashlib
+import json
 import time
 import uuid
 from dataclasses import dataclass
@@ -54,6 +56,9 @@ VERIFY_MAX_AGE_MINUTES = 18
 
 # Kill switch global — bloqueia toda automação imediatamente
 KILL_SWITCH_KEY = "automation:kill_switch"
+
+# Janela anti-spam para sugestões iguais de IA/automação.
+SUGGESTION_DEDUPE_SECONDS = 1800
 
 
 @dataclass
@@ -550,9 +555,21 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                         block_reason=block_reason,
                         decision_ms=int((time.monotonic() - _t0) * 1000),
                         api_ms=_api_ms,
+                        suggestion_signature=(
+                            _suggestion_signature(
+                                zone=zone,
+                                hotspot=hotspot,
+                                issue_type="local_hotspot",
+                                action_type="power_on",
+                                target_devices=[power_device.device.id],
+                                severity=local_status,
+                            )
+                            if action_status == "suggestion" else None
+                        ),
                     )
-                    session.add(action)
-                    await session.commit()
+                    _, deduped = await _save_zone_action(action, session)
+                    if deduped:
+                        return
 
                     await redis_client.publish("zone.action.created", {
                         "store_id": str(automation.store_id),
@@ -565,6 +582,114 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                         "setpoint_before": setpoint_before,
                         "setpoint_after": setpoint_before,
                         "action": "power_on",
+                        "local_hotspot": True,
+                        "hotspot_temp": hotspot.peak_temp,
+                    })
+                    return
+
+                setpoint_candidates = _select_hotspot_setpoint_candidates(
+                    readable, params_map, automation.setpoint_min, hotspot=hotspot
+                )
+                if setpoint_candidates:
+                    best_device, best_params = setpoint_candidates[0]
+                    setpoint_before = best_params.setpoint_cool
+                    new_setpoint = max(automation.setpoint_min, setpoint_before - 1)
+                    if new_setpoint == setpoint_before:
+                        await _log_local_hotspot_suggestion(
+                            automation, zone, avg_temp, local_status, trend, hotspot, session,
+                            no_adjustable_reason="aparelhos próximos já estão ligados, mas sem margem útil de setpoint",
+                        )
+                        return
+
+                    confidence = _confidence(hotspot.peak_temp, zone, local_status, max(len(readable), 1))
+                    reason = _build_local_hotspot_setpoint_reason(
+                        avg_temp,
+                        zone,
+                        local_status,
+                        best_device.device,
+                        setpoint_before,
+                        new_setpoint,
+                        trend,
+                        hotspot,
+                        [row.device.name for row, _ in setpoint_candidates[:3]],
+                    )
+                    action_status = "suggestion"
+                    block_reason = None
+                    _api_ms: int | None = None
+
+                    if automation.mode in ("auto", "semi"):
+                        if not await _device_window_ok(best_device.device.id):
+                            action_status = "blocked"
+                            block_reason = (
+                                f"Limite de {DEVICE_WINDOW_MAX_CMDS} comandos em "
+                                f"{DEVICE_WINDOW_SECONDS // 60} min atingido para "
+                                f"{best_device.device.name}"
+                            )
+                        elif not await redis_client.acquire_lock(cooldown_key, ttl=ZONE_COOLDOWN_SECONDS):
+                            return
+                        else:
+                            ok, _api_ms = await _execute_setpoint(
+                                best_device.device, best_params, "down", automation, session, step=1
+                            )
+                            if ok:
+                                action_status = "pending_verification"
+                                logger.info(
+                                    "Zone %s [%s]: hotspot local %.1f°C, ajustando %s setpoint %d→%d",
+                                    zone.key, automation.mode, hotspot.peak_temp,
+                                    best_device.device.name, setpoint_before, new_setpoint,
+                                )
+                            else:
+                                action_status = "blocked"
+                                block_reason = "Falha ao enviar comando para a Brise API"
+                                await redis_client.release_lock(cooldown_key)
+
+                    action = ZoneAction(
+                        store_id=automation.store_id,
+                        zone_key=zone.key,
+                        zone_label=zone.label,
+                        device_id=best_device.device.id,
+                        device_name=best_device.device.name,
+                        direction="down",
+                        temp_before=round(avg_temp, 2),
+                        ideal_min=zone.ideal_min,
+                        ideal_max=zone.ideal_max,
+                        setpoint_before=setpoint_before,
+                        setpoint_after=new_setpoint,
+                        reason=reason,
+                        confidence=confidence,
+                        mode=automation.mode,
+                        status=action_status,
+                        block_reason=block_reason,
+                        decision_ms=int((time.monotonic() - _t0) * 1000),
+                        api_ms=_api_ms,
+                        suggestion_signature=(
+                            _suggestion_signature(
+                                zone=zone,
+                                hotspot=hotspot,
+                                issue_type="local_hotspot",
+                                action_type="set_temperature",
+                                target_devices=[best_device.device.id],
+                                severity=local_status,
+                                setpoint_after=new_setpoint,
+                            )
+                            if action_status == "suggestion" else None
+                        ),
+                    )
+                    _, deduped = await _save_zone_action(action, session)
+                    if deduped:
+                        return
+
+                    await redis_client.publish("zone.action.created", {
+                        "store_id": str(automation.store_id),
+                        "zone_key": zone.key,
+                        "zone_label": zone.label,
+                        "device_name": best_device.device.name,
+                        "direction": "down",
+                        "status": action_status,
+                        "confidence": round(confidence * 100),
+                        "setpoint_before": setpoint_before,
+                        "setpoint_after": new_setpoint,
+                        "action": "set_temperature",
                         "local_hotspot": True,
                         "hotspot_temp": hotspot.peak_temp,
                     })
@@ -985,6 +1110,85 @@ def _device_command_communication_ok(row: _DeviceRow) -> bool:
     return updated_at >= datetime.utcnow() - timedelta(minutes=settings.offline_threshold_minutes)
 
 
+def _hotspot_area_key(hotspot: Hotspot | None) -> str:
+    if hotspot is None:
+        return "no_hotspot"
+    if hotspot.has_coordinates:
+        bucket_x = int((hotspot.x or 0) // 50)
+        bucket_y = int((hotspot.y or 0) // 50)
+        return f"xy:{bucket_x}:{bucket_y}"
+    names = ",".join(sorted(hotspot.contributing_names or []))
+    return f"names:{names or 'unknown'}"
+
+
+def _suggestion_signature(
+    *,
+    zone: ZoneConfig,
+    hotspot: Hotspot | None,
+    issue_type: str,
+    action_type: str,
+    target_devices: list[uuid.UUID | str],
+    severity: str,
+    setpoint_after: int | None = None,
+) -> str:
+    payload = {
+        "zone_id": zone.key,
+        "hotspot_area": _hotspot_area_key(hotspot),
+        "issue_type": issue_type,
+        "recommended_action_type": action_type,
+        "target_devices": sorted(str(d) for d in target_devices),
+        "severity": severity,
+        "setpoint_after": setpoint_after,
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+async def _save_zone_action(action: ZoneAction, session: AsyncSession) -> tuple[ZoneAction, bool]:
+    """Persiste a ação ou atualiza sugestão aberta/recentemente repetida."""
+    signature = getattr(action, "suggestion_signature", None)
+    if action.status == "suggestion" and signature:
+        since = datetime.utcnow() - timedelta(seconds=SUGGESTION_DEDUPE_SECONDS)
+        existing_result = await session.execute(
+            select(ZoneAction)
+            .where(
+                ZoneAction.store_id == action.store_id,
+                ZoneAction.zone_key == action.zone_key,
+                ZoneAction.status == "suggestion",
+                ZoneAction.suggestion_signature == signature,
+                ZoneAction.created_at >= since,
+            )
+            .order_by(ZoneAction.created_at.desc())
+            .limit(1)
+        )
+        existing = existing_result.scalar_one_or_none()
+        if existing is not None:
+            existing.zone_label = action.zone_label
+            existing.device_id = action.device_id
+            existing.device_name = action.device_name
+            existing.direction = action.direction
+            existing.temp_before = action.temp_before
+            existing.temp_after = action.temp_after
+            existing.ideal_min = action.ideal_min
+            existing.ideal_max = action.ideal_max
+            existing.setpoint_before = action.setpoint_before
+            existing.setpoint_after = action.setpoint_after
+            existing.reason = action.reason
+            existing.confidence = action.confidence
+            existing.mode = action.mode
+            existing.block_reason = action.block_reason
+            existing.decision_ms = action.decision_ms
+            existing.api_ms = action.api_ms
+            existing.attempt_count = (existing.attempt_count or 1) + 1
+            existing.created_at = datetime.utcnow()
+            await session.commit()
+            return existing, True
+
+    session.add(action)
+    await session.commit()
+    return action, False
+
+
 def _select_best_device(
     readable: list[_DeviceRow],
     status: str,
@@ -1020,6 +1224,52 @@ def _select_best_device(
     candidates.sort(key=sort_key, reverse=True)
     best = candidates[0]
     return best, params_map[best.device.id]
+
+
+def _select_hotspot_setpoint_candidates(
+    readable: list[_DeviceRow],
+    params_map: dict[uuid.UUID, DeviceParameters],
+    setpoint_min: int,
+    hotspot: "Hotspot | None" = None,
+) -> list[tuple[_DeviceRow, DeviceParameters]]:
+    """Retorna ACs ligados, comunicando e com margem real para reduzir setpoint."""
+    candidates: list[_DeviceRow] = []
+    for row in readable:
+        if row.device.dnd or row.device.source_url:
+            continue
+        if not _device_command_communication_ok(row):
+            continue
+        params = params_map.get(row.device.id)
+        if params is None or params.setpoint_cool is None:
+            continue
+        if row.status.state is False or row.status.status_classification == "DESLIGADO" or params.mode_device == 0:
+            continue
+        is_on = (
+            row.status.state is True
+            or row.status.status_classification not in BLOCKED_STATUSES
+            or params.mode_device == 1
+        )
+        if not is_on:
+            continue
+        if params.setpoint_cool <= setpoint_min:
+            continue
+        candidates.append(row)
+
+    candidates.sort(
+        key=lambda row: (
+            proximity_score(
+                row.device.position_x,
+                row.device.position_y,
+                hotspot=hotspot,
+                influence_radius_m=float(row.device.influence_radius_m or 8),
+            ),
+            params_map[row.device.id].setpoint_cool or 0,
+            abs(row.status.delta_temp or 0.0),
+            row.device.name or "",
+        ),
+        reverse=True,
+    )
+    return [(row, params_map[row.device.id]) for row in candidates]
 
 
 def _select_power_on_candidate(
@@ -1359,6 +1609,30 @@ def _build_local_hotspot_power_on_reason(
     )
 
 
+def _build_local_hotspot_setpoint_reason(
+    avg: float,
+    zone: ZoneConfig,
+    local_status: str,
+    device: Device,
+    setpoint_before: int,
+    setpoint_after: int,
+    trend: float | None,
+    hotspot: Hotspot,
+    adjustable_names: list[str],
+) -> str:
+    labels = {"WARM": "subárea aquecendo", "HOT": "subárea quente", "CRITICAL": "subárea crítica"}
+    trend_note = f" Tendência geral {trend:+.1f}°C/h." if trend is not None else ""
+    near = hotspot.contributing_names[0] if hotspot.contributing_names else "ponto quente"
+    adjustable = ", ".join(name for name in adjustable_names if name) or device.name
+    return (
+        f"Zona confortável na média ({avg:.1f}°C), mas há {labels.get(local_status, local_status)} "
+        f"com pico de {hotspot.peak_temp:.1f}°C próximo a {near}.{trend_note} "
+        f"Todos os aparelhos disponíveis próximos já estão ligados; ação localizada: reduzir setpoint "
+        f"de {device.name} de {setpoint_before}°C para {setpoint_after}°C. "
+        f"Aparelhos próximos ajustáveis: {adjustable}. Faixa ideal da zona {zone.ideal_min}–{zone.ideal_max}°C."
+    )
+
+
 async def _log_local_hotspot_suggestion(
     automation: ZoneAutomation,
     zone: ZoneConfig,
@@ -1367,21 +1641,28 @@ async def _log_local_hotspot_suggestion(
     trend: float | None,
     hotspot: Hotspot,
     session: AsyncSession,
+    no_adjustable_reason: str | None = None,
 ) -> None:
-    cooldown_key = f"zone:local_hotspot_suggestion:{automation.store_id}:{zone.key}"
-    if await redis_client.exists(cooldown_key):
-        return
-    await redis_client.set(cooldown_key, "1", ttl=1800)
-
     near = hotspot.contributing_names[0] if hotspot.contributing_names else "ponto quente"
     trend_note = f" Tendência geral {trend:+.1f}°C/h." if trend is not None else ""
+    blocker = no_adjustable_reason or (
+        "nenhum aparelho desligado comunicando e comandável está disponível perto do hotspot "
+        "e nenhum aparelho ligado próximo possui margem segura de setpoint"
+    )
     reason = (
         f"Zona confortável na média ({avg_temp:.1f}°C), mas hotspot local chegou a "
         f"{hotspot.peak_temp:.1f}°C próximo a {near}.{trend_note} "
-        "Nenhum aparelho desligado comunicando e comandável está disponível perto do hotspot; "
-        "monitorar e verificar balanceamento de ar."
+        f"{blocker}; verificar balanceamento de ar, insuflação, retorno, carga térmica ou manutenção."
     )
-    session.add(ZoneAction(
+    signature = _suggestion_signature(
+        zone=zone,
+        hotspot=hotspot,
+        issue_type="local_hotspot",
+        action_type="technical_check",
+        target_devices=[],
+        severity=local_status,
+    )
+    await _save_zone_action(ZoneAction(
         store_id=automation.store_id,
         zone_key=zone.key,
         zone_label=zone.label,
@@ -1393,8 +1674,8 @@ async def _log_local_hotspot_suggestion(
         confidence=_confidence(hotspot.peak_temp, zone, local_status, 1),
         mode=automation.mode,
         status="suggestion",
-    ))
-    await session.commit()
+        suggestion_signature=signature,
+    ), session)
 
 
 def _build_power_on_reason(
