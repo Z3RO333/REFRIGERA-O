@@ -56,6 +56,21 @@ async def refresh_device_status(
                 select(DeviceParameters).where(DeviceParameters.device_id == device_id)
             )
             params_row = params_res.scalar_one_or_none()
+
+            remote_params = await brise_client.get_parameters(brise_id)
+            if remote_params:
+                if params_row is None:
+                    params_row = DeviceParameters(device_id=device_id)
+                    session.add(params_row)
+                params_row.mode_device = remote_params.modeDevice if remote_params.modeDevice is not None else params_row.mode_device
+                params_row.mode_ac = remote_params.modeAC if remote_params.modeAC is not None else params_row.mode_ac
+                params_row.fan_speed = remote_params.fanSpeed if remote_params.fanSpeed is not None else params_row.fan_speed
+                params_row.setpoint_cool = remote_params.setpointCool if remote_params.setpointCool is not None else params_row.setpoint_cool
+                params_row.setpoint_heat = remote_params.setpointHeat if remote_params.setpointHeat is not None else params_row.setpoint_heat
+                params_row.eco_cool = remote_params.ecoCool if remote_params.ecoCool is not None else params_row.eco_cool
+                params_row.eco_heat = remote_params.ecoHeat if remote_params.ecoHeat is not None else params_row.eco_heat
+                params_row.synced_at = datetime.utcnow()
+
             setpoint_cool = params_row.setpoint_cool if params_row else 24
             mode_ac = params_row.mode_ac if params_row else 0
 
@@ -102,6 +117,10 @@ async def refresh_device_status(
                 "state": variables.state,
                 "delta_temp": delta,
                 "efficiency_score": efficiency,
+                "setpoint_cool": setpoint_cool,
+                "current_setpoint": setpoint_cool,
+                "setpoint_synced_at": params_row.synced_at.isoformat() if params_row and params_row.synced_at else None,
+                "setpoint_source": "brise_parameters_cache" if params_row else "default",
                 "updated_at": now.isoformat(),
             }
 
@@ -115,6 +134,7 @@ async def refresh_device_status(
                     "eco_cool": params_row.eco_cool,
                     "eco_heat": params_row.eco_heat,
                     "synced_at": params_row.synced_at.isoformat() if params_row.synced_at else None,
+                    "source": "brise_api" if remote_params else "db_cache",
                 }
                 await set_device_params(device_id, cache_params)
 

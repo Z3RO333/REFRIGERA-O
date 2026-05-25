@@ -5,6 +5,7 @@ Parte 2: seleção espacial de devices em zone_controller (adicionada em Task 2)
 """
 import math
 import uuid
+from datetime import datetime
 from unittest.mock import MagicMock
 
 import pytest
@@ -142,6 +143,7 @@ def _make_device_row(name, x, y, btu, influence_radius_m=8, delta_temp=2.0, setp
     status.delta_temp = delta_temp
     status.status_classification = "LIGADO"
     status.state = True
+    status.updated_at = datetime.utcnow()
 
     params = MagicMock()
     params.mode_device = 1
@@ -264,3 +266,41 @@ def test_select_power_on_falls_back_to_btu_without_hotspot():
     assert best_row.device.name == "HIGH_BTU", (
         f"Expected HIGH_BTU (largest BTU) but got {best_row.device.name}"
     )
+
+
+def test_select_power_on_skips_device_without_communication():
+    """Mesmo com mode_device=0, SEM_LEITURA não pode receber comando de power_on."""
+    from app.services.zone_controller import _select_power_on_candidate
+
+    hotspot = Hotspot(x=400, y=200, peak_temp=28.0, avg_hotspot_temp=27.0, has_coordinates=True)
+    row_bad, params_bad = _make_device_row("NEAR_NO_READING", x=405, y=205, btu=24000)
+    row_ok, params_ok = _make_device_row("FAR_OK", x=100, y=400, btu=9000)
+
+    row_bad.status.status_classification = "SEM_LEITURA"
+    row_bad.status.state = False
+    params_bad.mode_device = 0
+
+    row_ok.status.status_classification = "DESLIGADO"
+    row_ok.status.state = False
+    params_ok.mode_device = 0
+
+    result = _select_power_on_candidate(
+        devices=[row_bad, row_ok],
+        params_map={row_bad.device.id: params_bad, row_ok.device.id: params_ok},
+        hotspot=hotspot,
+    )
+
+    assert result is not None
+    best_row, _ = result
+    assert best_row.device.name == "FAR_OK"
+
+
+def test_local_hotspot_status_detects_subarea_above_range():
+    """Média pode estar confortável, mas hotspot acima da faixa deve virar status local."""
+    from app.services.zone_controller import ZoneConfig, _local_hotspot_status
+
+    zone = ZoneConfig(key="FARMA", label="Farma", sector_names=[], ideal_min=22, ideal_max=24)
+    hotspot = Hotspot(x=400, y=200, peak_temp=25.0, avg_hotspot_temp=24.8, has_coordinates=True)
+
+    assert _local_hotspot_status(hotspot, zone) == "WARM"
+    assert _local_hotspot_status(Hotspot(400, 200, 24.0, 24.0), zone) is None

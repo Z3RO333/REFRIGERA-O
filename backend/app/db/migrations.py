@@ -151,7 +151,17 @@ _STATEMENTS = [
     "ALTER TABLE custom_zones ADD COLUMN IF NOT EXISTS updated_by_name VARCHAR(100)",
     "ALTER TABLE zone_actions ADD COLUMN IF NOT EXISTS decision_ms INTEGER",
     "ALTER TABLE zone_actions ADD COLUMN IF NOT EXISTS api_ms INTEGER",
-    "UPDATE zone_automations SET max_daily_adjustments = 9999 WHERE max_daily_adjustments < 9999",
+    """DO $$ BEGIN
+         IF EXISTS (
+           SELECT 1 FROM information_schema.columns
+           WHERE table_name='zone_automations'
+             AND column_name='max_daily_adjustments'
+         ) THEN
+           UPDATE zone_automations
+           SET max_daily_adjustments = 9999
+           WHERE max_daily_adjustments < 9999;
+         END IF;
+       END $$""",
     # migra zonas antigas com x/y/w/h para geometry JSONB em percentual (viewBox 800x556)
     """UPDATE custom_zones
        SET geometry = jsonb_build_object(

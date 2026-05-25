@@ -1105,15 +1105,19 @@ function ZonePanel({
     ?? ([...acDevices].sort((a, b) => Math.abs(b.delta_temp ?? 0) - Math.abs(a.delta_temp ?? 0))[0])
     ?? null
 
-  const currentSp: number | null = bestDevice?.setpoint_cool ?? null
+  const currentSpRaw: number | null = bestDevice?.current_setpoint ?? bestDevice?.setpoint_cool ?? null
+  const setpointStale = !!bestDevice?.setpoint_stale
+  const currentSp: number | null = setpointStale ? null : currentSpRaw
+  const minAllowedSp = bestDevice?.min_allowed_setpoint ?? 18
+  const maxAllowedSp = bestDevice?.max_allowed_setpoint ?? 28
   const ctrlAction = recommendedControlAction(zone.status)
 
   const targetSp: number | null =
-    ctrlAction === 'temperature_down' && currentSp != null ? Math.max(zone.idealMin, currentSp - 1)
-    : ctrlAction === 'temperature_up' && currentSp != null ? Math.min(zone.idealMax, currentSp + 1)
+    ctrlAction === 'temperature_down' && currentSp != null ? Math.max(minAllowedSp, currentSp - 1)
+    : ctrlAction === 'temperature_up' && currentSp != null ? Math.min(maxAllowedSp, currentSp + 1)
     : null
 
-  // Quando setpoint desconhecido, ainda envia o comando direcional (step=1)
+  // Quando setpoint desconhecido/stale, ainda envia o comando direcional; o backend revalida na Brise.
   const actualAction: 'temperature_up' | 'temperature_down' | null =
     targetSp != null && currentSp != null && targetSp !== currentSp
       ? targetSp > currentSp ? 'temperature_up' : 'temperature_down'
@@ -1473,21 +1477,24 @@ function ZonePanel({
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-gray-500">
                   <span>{bestDevice.sector_name ?? zone.label}</span>
                   {bestDevice.temperature != null && <span>Ambiente: {formatTemp(bestDevice.temperature)}</span>}
-                  {currentSp != null && <span>Setpoint atual: <strong className="text-gray-700 dark:text-gray-300">{currentSp}°C</strong></span>}
+                  {currentSp != null && <span>Setpoint atual real: <strong className="text-gray-700 dark:text-gray-300">{currentSp}°C</strong></span>}
+                  {currentSp == null && currentSpRaw != null && <span className="text-amber-600 dark:text-amber-400">Setpoint desatualizado: {currentSpRaw}°C</span>}
+                  {currentSp == null && currentSpRaw == null && <span className="text-amber-600 dark:text-amber-400">Sem leitura de setpoint</span>}
+                  <span>Limite operacional: {minAllowedSp}–{maxAllowedSp}°C</span>
                   <span className="font-mono text-gray-400">{bestDevice.brise_id}</span>
                 </div>
                 <p className="text-xs text-gray-600 dark:text-gray-400">
                   {allAlreadyOk
                     ? `Todos os ${acDevices.length} ACs já estão dentro da faixa (${zone.idealMin}–${zone.idealMax}°C). Nenhum ajuste necessário.`
                     : atLimit
-                    ? `Setpoint já no limite da faixa ideal (${currentSp}°C = ${ctrlAction === 'temperature_down' ? 'mín' : 'máx'}. ${ctrlAction === 'temperature_down' ? zone.idealMin : zone.idealMax}°C).`
+                    ? `Setpoint real já no limite operacional (${currentSp}°C = ${ctrlAction === 'temperature_down' ? 'mín' : 'máx'}. ${ctrlAction === 'temperature_down' ? minAllowedSp : maxAllowedSp}°C).`
                     : currentSp == null
                     ? ctrlAction === 'temperature_down'
-                      ? `Zona aquecida — será enviado comando de redução. Setpoint atual não disponível (faixa ideal: ${zone.idealMin}–${zone.idealMax}°C).`
-                      : `Zona fria — será enviado comando de aumento. Setpoint atual não disponível (faixa ideal: ${zone.idealMin}–${zone.idealMax}°C).`
+                      ? `Zona aquecida — será enviado comando de redução. Setpoint real indisponível ou desatualizado; backend revalidará na Brise. Faixa ideal: ${zone.idealMin}–${zone.idealMax}°C.`
+                      : `Zona fria — será enviado comando de aumento. Setpoint real indisponível ou desatualizado; backend revalidará na Brise. Faixa ideal: ${zone.idealMin}–${zone.idealMax}°C.`
                     : ctrlAction === 'temperature_down'
-                    ? `Zona aquecida — reduzir para ${targetSp}°C (faixa: ${zone.idealMin}–${zone.idealMax}°C).`
-                    : `Zona fria — aumentar para ${targetSp}°C (faixa: ${zone.idealMin}–${zone.idealMax}°C).`
+                    ? `Zona aquecida — setpoint real ${currentSp}°C, reduzir para ${targetSp}°C. Faixa ideal da zona: ${zone.idealMin}–${zone.idealMax}°C.`
+                    : `Zona fria — setpoint real ${currentSp}°C, aumentar para ${targetSp}°C. Faixa ideal da zona: ${zone.idealMin}–${zone.idealMax}°C.`
                   }
                   {!allAlreadyOk && adjustTargets.length > 0 && adjustTargets.length < acDevices.length && (
                     <> <span className="font-medium text-orange-600 dark:text-orange-400">
@@ -1507,7 +1514,7 @@ function ZonePanel({
                 {allAlreadyOk
                   ? 'Todos já confortáveis'
                   : atLimit
-                  ? `Setpoint no limite (${currentSp}°C)`
+                  ? `Setpoint no limite operacional (${currentSp}°C)`
                   : targetSp != null
                   ? `Ajustar para ${targetSp}°C${adjustTargets.length > 1 ? ` (${adjustTargets.length} ACs)` : ''}`
                   : ctrlAction === 'temperature_down'
@@ -1540,7 +1547,7 @@ function ZonePanel({
                     </div>
                   )}
                   <div className="text-blue-600 dark:text-blue-400">
-                    Faixa ideal: {zone.idealMin}–{zone.idealMax}°C
+                    Faixa ideal: {zone.idealMin}–{zone.idealMax}°C · limite operacional: {minAllowedSp}–{maxAllowedSp}°C
                     {adjustTargets.length > 1 && ` · ${adjustTargets.length} aparelho${adjustTargets.length !== 1 ? 's' : ''} fora da faixa`}
                   </div>
                   {adjustTargets.length < acDevices.length && adjustTargets.length > 0 && (

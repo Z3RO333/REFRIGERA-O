@@ -4,7 +4,7 @@ Motor de automação inteligente de zonas térmicas.
 Ciclo por zona:
   1. Coleta temperatura média das leituras atuais
   2. Classifica (COLD/COMFORT/WARM/HOT/CRITICAL)
-  3. Valida regras de segurança (cooldown, limite diário, DND, status)
+  3. Valida regras de segurança (cooldown, janela por device, DND, status)
   4. Seleciona o AC mais influente da zona
   5. Calcula novo setpoint (±1°C)
   6. Registra decisão em zone_actions
@@ -26,6 +26,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.brise.client import brise_client
+from app.cache.device_cache import set_device_params
 from app.cache.redis_client import redis_client
 from app.db.session import AsyncSessionLocal
 from app.models.alert import Alert
@@ -375,6 +376,7 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
 
         _t0 = time.monotonic()
         devices, params_map = await _get_zone_devices(automation.store_id, zone, session)
+        await _sync_zone_parameters_from_brise(devices, params_map, session)
 
         # Fontes de temperatura: ACs ativos + sensores externos (exclui DND, status bloqueado)
         # Separação: sensores contribuem para avg_temp mas não recebem comandos
@@ -474,6 +476,103 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
         trend = await _quick_trend(automation.store_id, zone, session)
 
         if status == "COMFORT":
+            local_status = _local_hotspot_status(hotspot, zone)
+            if local_status is not None:
+                # Média confortável, mas existe uma subárea acima da faixa ideal.
+                # Ação permitida: ligar capacidade disponível perto do hotspot.
+                # Evita redução agressiva de setpoint quando a zona toda ainda está verde.
+                if trend is not None and trend < -1.5:
+                    logger.debug(
+                        "Zone %s: hotspot local %.1f°C, mas zona resfriando a %.1f°C/h — aguardando",
+                        zone.key, hotspot.peak_temp, trend,
+                    )
+                    return
+
+                cooldown_key = f"zone:cooldown:{automation.store_id}:{zone.key}"
+                if await redis_client.exists(cooldown_key):
+                    return
+                if await _consecutive_failures(automation.store_id, zone.key, session) >= 3:
+                    await _raise_zone_alert(automation, zone, avg_temp, session)
+                    return
+
+                power_on_candidate = _select_power_on_candidate(devices, params_map, hotspot=hotspot)
+                if power_on_candidate is not None:
+                    power_device, power_params = power_on_candidate
+                    confidence = _confidence(hotspot.peak_temp, zone, local_status, max(len(readable), 1))
+                    reason = _build_local_hotspot_power_on_reason(
+                        avg_temp, zone, local_status, power_device.device, trend, hotspot
+                    )
+                    setpoint_before = power_params.setpoint_cool
+                    action_status = "suggestion"
+                    block_reason = None
+                    _api_ms: int | None = None
+
+                    if automation.mode in ("auto", "semi"):
+                        if not await _device_window_ok(power_device.device.id):
+                            action_status = "blocked"
+                            block_reason = (
+                                f"Limite de {DEVICE_WINDOW_MAX_CMDS} comandos em "
+                                f"{DEVICE_WINDOW_SECONDS // 60} min atingido para "
+                                f"{power_device.device.name}"
+                            )
+                        elif not await redis_client.acquire_lock(cooldown_key, ttl=ZONE_COOLDOWN_SECONDS):
+                            return
+                        else:
+                            ok, _api_ms = await _execute_power_on(power_device.device, power_params, session)
+                            if ok:
+                                action_status = "pending_verification"
+                                logger.info(
+                                    "Zone %s [%s]: ligando %s por hotspot local %.1f°C (média %.1f°C)",
+                                    zone.key, automation.mode, power_device.device.name,
+                                    hotspot.peak_temp, avg_temp,
+                                )
+                            else:
+                                action_status = "blocked"
+                                block_reason = "Falha ao ligar aparelho pela Brise API"
+                                await redis_client.release_lock(cooldown_key)
+
+                    action = ZoneAction(
+                        store_id=automation.store_id,
+                        zone_key=zone.key,
+                        zone_label=zone.label,
+                        device_id=power_device.device.id,
+                        device_name=power_device.device.name,
+                        direction="down",
+                        temp_before=round(avg_temp, 2),
+                        ideal_min=zone.ideal_min,
+                        ideal_max=zone.ideal_max,
+                        setpoint_before=setpoint_before,
+                        setpoint_after=setpoint_before,
+                        reason=reason,
+                        confidence=confidence,
+                        mode=automation.mode,
+                        status=action_status,
+                        block_reason=block_reason,
+                        decision_ms=int((time.monotonic() - _t0) * 1000),
+                        api_ms=_api_ms,
+                    )
+                    session.add(action)
+                    await session.commit()
+
+                    await redis_client.publish("zone.action.created", {
+                        "store_id": str(automation.store_id),
+                        "zone_key": zone.key,
+                        "zone_label": zone.label,
+                        "device_name": power_device.device.name,
+                        "direction": "down",
+                        "status": action_status,
+                        "confidence": round(confidence * 100),
+                        "setpoint_before": setpoint_before,
+                        "setpoint_after": setpoint_before,
+                        "action": "power_on",
+                        "local_hotspot": True,
+                        "hotspot_temp": hotspot.peak_temp,
+                    })
+                    return
+
+                await _log_local_hotspot_suggestion(automation, zone, avg_temp, local_status, trend, hotspot, session)
+                return
+
             # Zona confortável mas aquecendo rapidamente → suggestion preemptiva
             if trend is not None and trend > 2.5:
                 await _log_trending(automation, zone, avg_temp, trend, session)
@@ -506,6 +605,7 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
             setpoint_before = power_params.setpoint_cool
             action_status = "suggestion"
             block_reason = None
+            _api_ms: int | None = None
 
             if automation.mode in ("auto", "semi"):
                 if not await _device_window_ok(power_device.device.id):
@@ -530,7 +630,7 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                         block_reason = "Falha ao ligar aparelho pela Brise API"
                         await redis_client.release_lock(cooldown_key)
 
-            _power_api_ms = locals().get("_api_ms", None)
+            _power_api_ms = _api_ms
             action = ZoneAction(
                 store_id=automation.store_id,
                 zone_key=zone.key,
@@ -548,8 +648,8 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                 mode=automation.mode,
                 status=action_status,
                 block_reason=block_reason,
-                decision_ms=int((time.monotonic() - _t0) * 1000) if action_status == "pending_verification" else None,
-                api_ms=_power_api_ms if action_status == "pending_verification" else None,
+                decision_ms=int((time.monotonic() - _t0) * 1000),
+                api_ms=_power_api_ms,
             )
             session.add(action)
             await session.commit()
@@ -617,6 +717,7 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
 
         action_status = "suggestion"
         block_reason = None
+        _api_ms: int | None = None
 
         if automation.mode in ("auto", "semi"):
             if not await _device_window_ok(best_device.device.id):
@@ -644,7 +745,7 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                 block_reason = "Falha ao enviar comando para a Brise API"
                 await redis_client.release_lock(cooldown_key)  # libera para próxima tentativa
 
-        _setpoint_api_ms = locals().get("_api_ms", None)
+        _setpoint_api_ms = _api_ms
         action = ZoneAction(
             store_id=automation.store_id,
             zone_key=zone.key,
@@ -662,8 +763,8 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
             mode=automation.mode,
             status=action_status,
             block_reason=block_reason,
-            decision_ms=int((time.monotonic() - _t0) * 1000) if action_status == "pending_verification" else None,
-            api_ms=_setpoint_api_ms if action_status == "pending_verification" else None,
+            decision_ms=int((time.monotonic() - _t0) * 1000),
+            api_ms=_setpoint_api_ms,
         )
         session.add(action)
         await session.commit()
@@ -770,14 +871,14 @@ async def _get_zone_devices(
             return [], {}
         result = await session.execute(
             select(Device, DeviceStatusLatest)
-            .join(DeviceStatusLatest, Device.id == DeviceStatusLatest.device_id)
+            .outerjoin(DeviceStatusLatest, Device.id == DeviceStatusLatest.device_id)
             .where(Device.active == True, Device.id.in_(zone.device_ids))
         )
     else:
         # Zona padrão: filtra por nomes de setor
         result = await session.execute(
             select(Device, DeviceStatusLatest)
-            .join(DeviceStatusLatest, Device.id == DeviceStatusLatest.device_id)
+            .outerjoin(DeviceStatusLatest, Device.id == DeviceStatusLatest.device_id)
             .join(StoreSector, Device.sector_id == StoreSector.id)
             .where(
                 Device.active == True,
@@ -786,7 +887,17 @@ async def _get_zone_devices(
             )
         )
     rows = result.all()
-    devices = [_DeviceRow(d, s) for d, s in rows]
+    devices = []
+    for device, status in rows:
+        if status is None:
+            status = DeviceStatusLatest(
+                device_id=device.id,
+                state=None,
+                temperature=None,
+                status_classification="SEM_LEITURA",
+                updated_at=None,
+            )
+        devices.append(_DeviceRow(device, status))
 
     if not devices:
         return [], {}
@@ -796,6 +907,82 @@ async def _get_zone_devices(
     )
     params_map = {p.device_id: p for p in params_result.scalars().all()}
     return devices, params_map
+
+
+
+async def _sync_zone_parameters_from_brise(
+    devices: list[_DeviceRow],
+    params_map: dict[uuid.UUID, DeviceParameters],
+    session: AsyncSession,
+) -> None:
+    """Atualiza setpoint real dos ACs antes de decidir automação da zona."""
+    changed = False
+    for row in devices:
+        if row.device.source_url is not None:
+            continue
+        remote = await brise_client.get_parameters(row.device.brise_device_id)
+        if remote is None:
+            continue
+
+        params = params_map.get(row.device.id)
+        if params is None:
+            params = DeviceParameters(device_id=row.device.id)
+            params_map[row.device.id] = params
+            session.add(params)
+
+        before = params.setpoint_cool
+        params.mode_device = remote.modeDevice if remote.modeDevice is not None else params.mode_device
+        params.mode_ac = remote.modeAC if remote.modeAC is not None else params.mode_ac
+        params.fan_speed = remote.fanSpeed if remote.fanSpeed is not None else params.fan_speed
+        params.setpoint_cool = remote.setpointCool if remote.setpointCool is not None else params.setpoint_cool
+        params.setpoint_heat = remote.setpointHeat if remote.setpointHeat is not None else params.setpoint_heat
+        params.eco_cool = remote.ecoCool if remote.ecoCool is not None else params.eco_cool
+        params.eco_heat = remote.ecoHeat if remote.ecoHeat is not None else params.eco_heat
+        params.synced_at = datetime.utcnow()
+        changed = True
+
+        if before != params.setpoint_cool:
+            logger.info(
+                "Setpoint real sincronizado Brise: %s (%s) %s°C → %s°C",
+                row.device.name,
+                row.device.brise_device_id,
+                before,
+                params.setpoint_cool,
+            )
+
+        await set_device_params(row.device.id, {
+            "mode_device": params.mode_device,
+            "mode_ac": params.mode_ac,
+            "fan_speed": params.fan_speed,
+            "setpoint_cool": params.setpoint_cool,
+            "setpoint_heat": params.setpoint_heat,
+            "eco_cool": params.eco_cool,
+            "eco_heat": params.eco_heat,
+            "synced_at": params.synced_at.isoformat(),
+            "source": "brise_api",
+        })
+
+    if changed:
+        await session.commit()
+
+def _local_hotspot_status(hotspot: Hotspot | None, zone: ZoneConfig) -> str | None:
+    """Retorna severidade local quando a média está confortável, mas há subárea quente."""
+    if hotspot is None or hotspot.peak_temp <= zone.ideal_max:
+        return None
+    status = _classify(hotspot.peak_temp, zone.ideal_min, zone.ideal_max)
+    return status if status in ("WARM", "HOT", "CRITICAL") else None
+
+
+def _device_command_communication_ok(row: _DeviceRow) -> bool:
+    """Valida se o aparelho tem telemetria recente o bastante para receber comando."""
+    status = row.status.status_classification
+    if status in {"SEM_LEITURA", "AGUARDANDO_LEITURA", "COMPRESSOR_CYCLING"}:
+        return False
+
+    updated_at = getattr(row.status, "updated_at", None)
+    if not isinstance(updated_at, datetime):
+        return False
+    return updated_at >= datetime.utcnow() - timedelta(minutes=settings.offline_threshold_minutes)
 
 
 def _select_best_device(
@@ -843,6 +1030,8 @@ def _select_power_on_candidate(
     candidates = []
     for row in devices:
         if row.device.dnd or row.device.source_url:
+            continue
+        if not _device_command_communication_ok(row):
             continue
         params = params_map.get(row.device.id)
         is_off = (
@@ -985,12 +1174,15 @@ async def _device_window_ok(device_id: uuid.UUID) -> bool:
     Usa Redis INCR via pipeline atômico. Fail-open: se Redis indisponível, permite o comando."""
     key = f"device:cmd_window:{device_id}"
     try:
-        async with redis_client.client.pipeline(transaction=False) as pipe:
+        async with redis_client.client.pipeline(transaction=True) as pipe:
             await pipe.incr(key)
             await pipe.expire(key, DEVICE_WINDOW_SECONDS)
             results = await pipe.execute()
         count = results[0]
-        return count <= DEVICE_WINDOW_MAX_CMDS
+        if count > DEVICE_WINDOW_MAX_CMDS:
+            await redis_client.client.decrby(key, 1)
+            return False
+        return True
     except Exception as exc:
         logger.warning("_device_window_ok: Redis indisponível, permitindo comando (%s)", exc)
         return True
@@ -1146,6 +1338,63 @@ def _build_no_adjustable_reason(
         f"Zona {zone.label}: {len(readable)} AC(s) com leitura, nenhum ajustável. "
         + "; ".join(parts) + f". Faixa: {setpoint_min}–{setpoint_max}°C."
     )
+
+
+def _build_local_hotspot_power_on_reason(
+    avg: float,
+    zone: ZoneConfig,
+    local_status: str,
+    device: Device,
+    trend: float | None,
+    hotspot: Hotspot,
+) -> str:
+    labels = {"WARM": "subárea aquecendo", "HOT": "subárea quente", "CRITICAL": "subárea crítica"}
+    trend_note = f" Tendência geral {trend:+.1f}°C/h." if trend is not None else ""
+    near = hotspot.contributing_names[0] if hotspot.contributing_names else "ponto quente"
+    return (
+        f"Zona confortável na média ({avg:.1f}°C), mas há {labels.get(local_status, local_status)} "
+        f"com pico de {hotspot.peak_temp:.1f}°C próximo a {near}."
+        f"{trend_note} Faixa ideal {zone.ideal_min}–{zone.ideal_max}°C. "
+        f"Ligar {device.name} desligado próximo ao hotspot antes de reduzir setpoint da zona inteira."
+    )
+
+
+async def _log_local_hotspot_suggestion(
+    automation: ZoneAutomation,
+    zone: ZoneConfig,
+    avg_temp: float,
+    local_status: str,
+    trend: float | None,
+    hotspot: Hotspot,
+    session: AsyncSession,
+) -> None:
+    cooldown_key = f"zone:local_hotspot_suggestion:{automation.store_id}:{zone.key}"
+    if await redis_client.exists(cooldown_key):
+        return
+    await redis_client.set(cooldown_key, "1", ttl=1800)
+
+    near = hotspot.contributing_names[0] if hotspot.contributing_names else "ponto quente"
+    trend_note = f" Tendência geral {trend:+.1f}°C/h." if trend is not None else ""
+    reason = (
+        f"Zona confortável na média ({avg_temp:.1f}°C), mas hotspot local chegou a "
+        f"{hotspot.peak_temp:.1f}°C próximo a {near}.{trend_note} "
+        "Nenhum aparelho desligado comunicando e comandável está disponível perto do hotspot; "
+        "monitorar e verificar balanceamento de ar."
+    )
+    session.add(ZoneAction(
+        store_id=automation.store_id,
+        zone_key=zone.key,
+        zone_label=zone.label,
+        temp_before=round(avg_temp, 2),
+        ideal_min=zone.ideal_min,
+        ideal_max=zone.ideal_max,
+        direction="down",
+        reason=reason,
+        confidence=_confidence(hotspot.peak_temp, zone, local_status, 1),
+        mode=automation.mode,
+        status="suggestion",
+    ))
+    await session.commit()
 
 
 def _build_power_on_reason(

@@ -26,6 +26,7 @@ router = APIRouter()
 
 SETPOINT_COOL_MIN = 18
 SETPOINT_COOL_MAX = 28
+SETPOINT_STALE_MINUTES = 30
 DEFAULT_PARAMETERS = {
     "mode_device": 1,
     "mode_ac": 0,
@@ -76,6 +77,44 @@ def _validate_control_action(
             return "NO_OP_SETPOINT_EQUALS_CURRENT", "Setpoint solicitado é igual ao setpoint atual ou já está no limite operacional"
 
     return None
+
+
+def _params_synced_at(params: DeviceParameters | None) -> datetime | None:
+    return params.synced_at if params and params.synced_at else None
+
+
+def _params_are_stale(params: DeviceParameters | None) -> bool:
+    synced_at = _params_synced_at(params)
+    if synced_at is None:
+        return True
+    return synced_at < datetime.utcnow() - timedelta(minutes=SETPOINT_STALE_MINUTES)
+
+
+def _brise_params_to_dict(brise_params) -> dict:
+    return {
+        "mode_device": brise_params.modeDevice if brise_params.modeDevice is not None else DEFAULT_PARAMETERS["mode_device"],
+        "mode_ac": brise_params.modeAC if brise_params.modeAC is not None else DEFAULT_PARAMETERS["mode_ac"],
+        "fan_speed": brise_params.fanSpeed if brise_params.fanSpeed is not None else DEFAULT_PARAMETERS["fan_speed"],
+        "setpoint_cool": brise_params.setpointCool if brise_params.setpointCool is not None else DEFAULT_PARAMETERS["setpoint_cool"],
+        "setpoint_heat": brise_params.setpointHeat if brise_params.setpointHeat is not None else DEFAULT_PARAMETERS["setpoint_heat"],
+        "eco_cool": brise_params.ecoCool if brise_params.ecoCool is not None else DEFAULT_PARAMETERS["eco_cool"],
+        "eco_heat": brise_params.ecoHeat if brise_params.ecoHeat is not None else DEFAULT_PARAMETERS["eco_heat"],
+    }
+
+
+def _enrich_parameter_fields(data: dict, params: DeviceParameters | None) -> dict:
+    synced_at = _params_synced_at(params)
+    setpoint = params.setpoint_cool if params else None
+    data.update({
+        "setpoint_cool": setpoint,
+        "current_setpoint": setpoint,
+        "setpoint_synced_at": synced_at.isoformat() if synced_at else None,
+        "setpoint_stale": _params_are_stale(params),
+        "setpoint_source": "brise_parameters_cache" if params else "unavailable",
+        "min_allowed_setpoint": SETPOINT_COOL_MIN,
+        "max_allowed_setpoint": SETPOINT_COOL_MAX,
+    })
+    return data
 
 @router.get("")
 async def list_devices(db: AsyncSession = Depends(get_db)):
@@ -129,18 +168,11 @@ async def get_device(device_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         raise HTTPException(404, "Dispositivo não encontrado")
     device, status, params, sector, store = row
     data = _format_device(device, status, sector, store)
-    if params:
-        data["parameters"] = {
-            "mode_device": params.mode_device,
-            "mode_ac": params.mode_ac,
-            "fan_speed": params.fan_speed,
-            "setpoint_cool": params.setpoint_cool,
-            "setpoint_heat": params.setpoint_heat,
-            "eco_cool": params.eco_cool,
-            "eco_heat": params.eco_heat,
-        }
-    else:
-        data["parameters"] = await _get_current_parameters(device_id, device.brise_device_id, db)
+    current_params = await _get_current_parameters(device_id, device.brise_device_id, db)
+    await db.commit()
+    params = await _get_device_parameters_row(device_id, db)
+    data["parameters"] = current_params
+    _enrich_parameter_fields(data, params)
     return data
 
 @router.get("/{device_id}/status")
@@ -569,21 +601,18 @@ def _format_device(device, status, sector, store) -> dict:
     }
 
 async def _get_current_parameters(device_id: uuid.UUID, brise_id: str, db: AsyncSession) -> dict:
+    # Fonte de verdade para comando é a Brise. O banco é só cache do último parâmetro confirmado.
+    brise_params = await brise_client.get_parameters(brise_id)
+    if brise_params:
+        params = _brise_params_to_dict(brise_params)
+        await _persist_device_parameters(device_id, params, db)
+        await db.flush()
+        await set_device_params(device_id, {**params, "synced_at": datetime.utcnow().isoformat(), "source": "brise_api"})
+        return params
+
     db_params = await _get_device_parameters_row(device_id, db)
     if db_params:
         return _db_params_to_dict(db_params)
-
-    brise_params = await brise_client.get_parameters(brise_id)
-    if brise_params:
-        return {
-            "mode_device": brise_params.modeDevice if brise_params.modeDevice is not None else DEFAULT_PARAMETERS["mode_device"],
-            "mode_ac": brise_params.modeAC if brise_params.modeAC is not None else DEFAULT_PARAMETERS["mode_ac"],
-            "fan_speed": brise_params.fanSpeed if brise_params.fanSpeed is not None else DEFAULT_PARAMETERS["fan_speed"],
-            "setpoint_cool": brise_params.setpointCool if brise_params.setpointCool is not None else DEFAULT_PARAMETERS["setpoint_cool"],
-            "setpoint_heat": brise_params.setpointHeat if brise_params.setpointHeat is not None else DEFAULT_PARAMETERS["setpoint_heat"],
-            "eco_cool": brise_params.ecoCool if brise_params.ecoCool is not None else DEFAULT_PARAMETERS["eco_cool"],
-            "eco_heat": brise_params.ecoHeat if brise_params.ecoHeat is not None else DEFAULT_PARAMETERS["eco_heat"],
-        }
 
     return DEFAULT_PARAMETERS.copy()
 

@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,6 +11,25 @@ from app.api.v1.auth import require_role
 from app.schemas.store import FloorPlanUpdate, SectorCreate, StoreCreate
 
 router = APIRouter()
+
+SETPOINT_STALE_MINUTES = 30
+SETPOINT_COOL_MIN = 18
+SETPOINT_COOL_MAX = 28
+
+
+def _setpoint_fields(params: DeviceParameters | None) -> dict:
+    synced_at = params.synced_at if params and params.synced_at else None
+    current_setpoint = params.setpoint_cool if params else None
+    stale = synced_at is None or synced_at < datetime.utcnow() - timedelta(minutes=SETPOINT_STALE_MINUTES)
+    return {
+        "setpoint_cool": current_setpoint,
+        "current_setpoint": current_setpoint,
+        "setpoint_synced_at": synced_at.isoformat() if synced_at else None,
+        "setpoint_stale": stale,
+        "setpoint_source": "brise_parameters_cache" if params else "unavailable",
+        "min_allowed_setpoint": SETPOINT_COOL_MIN,
+        "max_allowed_setpoint": SETPOINT_COOL_MAX,
+    }
 
 @router.get("")
 async def list_stores(db: AsyncSession = Depends(get_db)):
@@ -89,7 +109,7 @@ async def get_store_devices(store_id: uuid.UUID, db: AsyncSession = Depends(get_
             "delta_temp": status.delta_temp if status else None,
             "efficiency_score": status.efficiency_score if status else None,
             "state": status.state if status else None,
-            "setpoint_cool": params.setpoint_cool if params else None,
+            **_setpoint_fields(params),
             "updated_at": status.updated_at.isoformat() if status else None,
         })
     return {"devices": devices}

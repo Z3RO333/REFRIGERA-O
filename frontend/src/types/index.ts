@@ -27,7 +27,13 @@ export interface Device {
   delta_temp: number | null
   efficiency_score: number | null
   state: boolean | null
-  setpoint_cool?: number
+  setpoint_cool?: number | null
+  current_setpoint?: number | null
+  setpoint_synced_at?: string | null
+  setpoint_stale?: boolean
+  setpoint_source?: string | null
+  min_allowed_setpoint?: number | null
+  max_allowed_setpoint?: number | null
   updated_at: string | null
   parameters?: DeviceParameters
 }

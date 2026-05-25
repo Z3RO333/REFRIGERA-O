@@ -22,6 +22,7 @@ def make_mock_redis(count: int):
     m = MagicMock()
     m.client = MagicMock()
     m.client.pipeline = MagicMock(return_value=pipe)
+    m.client.decrby = AsyncMock()
     return m
 
 
@@ -51,7 +52,7 @@ async def test_exatamente_no_limite_permitido():
 
 @pytest.mark.asyncio
 async def test_acima_do_limite_bloqueado():
-    """DEVICE_WINDOW_MAX_CMDS + 1 comandos deve ser bloqueado."""
+    """DEVICE_WINDOW_MAX_CMDS + 1 comandos deve ser bloqueado e compensado."""
     mock_redis = make_mock_redis(count=DEVICE_WINDOW_MAX_CMDS + 1)
     device_id = uuid.uuid4()
 
@@ -59,6 +60,7 @@ async def test_acima_do_limite_bloqueado():
         result = await _device_window_ok(device_id)
 
     assert result is False
+    mock_redis.client.decrby.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -89,3 +91,13 @@ def test_sem_limite_diario_no_codigo():
     source = inspect.getsource(mod)
     assert "Limite diário de" not in source
     assert "max_daily_adjustments" not in source or "_daily_count" not in source.split("max_daily_adjustments")[0]
+
+
+def test_migration_max_daily_adjustments_eh_guardada_por_coluna_existente():
+    """Banco novo sem coluna legada não pode quebrar startup na migration."""
+    from pathlib import Path
+
+    source = Path("app/db/migrations.py").read_text()
+    assert "column_name='max_daily_adjustments'" in source
+    assert "UPDATE zone_automations" in source
+    assert "IF EXISTS" in source
