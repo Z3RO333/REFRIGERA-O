@@ -33,7 +33,7 @@ from app.models.device import Device, DeviceParameters, DeviceStatusLatest
 from app.models.reading import DeviceReading
 from app.models.store import StoreSector
 from app.models.zone import ZoneAction, ZoneAutomation
-from app.services.thermal_spatial import Hotspot, proximity_score
+from app.services.thermal_spatial import DevicePoint, Hotspot, detect_hotspot, proximity_score
 
 logger = logging.getLogger(__name__)
 
@@ -452,6 +452,24 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
         avg_temp = mean(temps)
         status = _classify(avg_temp, zone.ideal_min, zone.ideal_max)
 
+        # Detecção de hotspot espacial — None se zona uniforme ou sem coordenadas
+        _spatial_points = [
+            DevicePoint(
+                device_id=str(d.device.id),
+                device_name=d.device.name or "",
+                pos_x=d.device.position_x,
+                pos_y=d.device.position_y,
+                influence_radius_m=float(d.device.influence_radius_m or 8),
+                temperature=float(d.status.temperature),
+                is_on=d.status.state is True,
+                is_off=d.status.state is False,
+                is_available=True,
+                btu=d.device.btu or 0,
+            )
+            for d in temp_sources
+        ]
+        hotspot = detect_hotspot(_spatial_points)
+
         # Tendência térmica (últimos 30 min)
         trend = await _quick_trend(automation.store_id, zone, session)
 
@@ -480,11 +498,11 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
         direction = "down" if status in ("WARM", "HOT", "CRITICAL") else "up"
         step = _step_size(status)
 
-        power_on_candidate = _select_power_on_candidate(devices, params_map) if direction == "down" else None
+        power_on_candidate = _select_power_on_candidate(devices, params_map, hotspot=hotspot) if direction == "down" else None
         if power_on_candidate is not None:
             power_device, power_params = power_on_candidate
             confidence = _confidence(avg_temp, zone, status, max(len(readable), 1))
-            reason = _build_power_on_reason(avg_temp, zone, status, power_device.device, trend)
+            reason = _build_power_on_reason(avg_temp, zone, status, power_device.device, trend, hotspot=hotspot)
             setpoint_before = power_params.setpoint_cool
             action_status = "suggestion"
             block_reason = None
@@ -559,7 +577,7 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
             return
 
         # Seleciona melhor device (com verificação de headroom de setpoint)
-        best = _select_best_device(readable, status, params_map, direction, automation.setpoint_min, automation.setpoint_max)
+        best = _select_best_device(readable, status, params_map, direction, automation.setpoint_min, automation.setpoint_max, hotspot=hotspot)
         if best is None:
             reason = _build_no_adjustable_reason(
                 readable, devices, params_map, direction,
@@ -592,7 +610,7 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
             return
 
         confidence = _confidence(avg_temp, zone, status, len(readable))
-        reason = _build_reason(avg_temp, zone, status, best_device.device, direction, trend)
+        reason = _build_reason(avg_temp, zone, status, best_device.device, direction, trend, hotspot=hotspot)
 
         # Captura ANTES de _execute_setpoint modificar params.setpoint_cool
         setpoint_before = best_params.setpoint_cool
@@ -1136,6 +1154,7 @@ def _build_power_on_reason(
     status: str,
     device: Device,
     trend: float | None = None,
+    hotspot: "Hotspot | None" = None,
 ) -> str:
     labels = {"WARM": "zona aquecendo", "HOT": "zona quente", "CRITICAL": "zona crítica"}
     label = labels.get(status, status)
@@ -1144,10 +1163,17 @@ def _build_power_on_reason(
         if zone.zone_type == "SALA_FECHADA" else ""
     )
     trend_note = f" Tendência {trend:+.1f}°C/h." if trend is not None else ""
+    if hotspot and hotspot.has_coordinates and hotspot.contributing_names:
+        hotspot_note = (
+            f" Hotspot identificado próximo a {hotspot.contributing_names[0]} "
+            f"({hotspot.peak_temp:.1f}°C); {device.name} selecionado por proximidade ao ponto quente."
+        )
+    else:
+        hotspot_note = ""
     return (
         f"Temperatura média {avg:.1f}°C ({label}).{trend_note} "
         f"Faixa ideal {zone.ideal_min}–{zone.ideal_max}°C. "
-        f"Ligar {device.name} desligado para aumentar capacidade de resfriamento da zona.{wall_note}"
+        f"Ligar {device.name} desligado para aumentar capacidade de resfriamento da zona.{wall_note}{hotspot_note}"
     )
 
 
@@ -1158,6 +1184,7 @@ def _build_reason(
     device: Device,
     direction: str,
     trend: float | None = None,
+    hotspot: "Hotspot | None" = None,
 ) -> str:
     direction_pt = "reduzir" if direction == "down" else "aumentar"
     labels = {"WARM": "zona aquecendo", "HOT": "zona quente", "CRITICAL": "zona crítica", "COLD": "zona fria"}
@@ -1168,10 +1195,17 @@ def _build_reason(
     )
     trend_note = f" Tendência {trend:+.1f}°C/h." if trend is not None else ""
     step = _step_size(status)
+    if hotspot and hotspot.has_coordinates and hotspot.contributing_names:
+        hotspot_note = (
+            f" Hotspot identificado próximo a {hotspot.contributing_names[0]} "
+            f"({hotspot.peak_temp:.1f}°C); {device.name} selecionado por proximidade ao ponto quente."
+        )
+    else:
+        hotspot_note = ""
     return (
         f"Temperatura média {avg:.1f}°C ({label}).{trend_note} "
         f"Faixa ideal {zone.ideal_min}–{zone.ideal_max}°C. "
-        f"Ajuste via {device.name} para {direction_pt} {step}°C no setpoint.{wall_note}"
+        f"Ajuste via {device.name} para {direction_pt} {step}°C no setpoint.{wall_note}{hotspot_note}"
     )
 
 
