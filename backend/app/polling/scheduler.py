@@ -23,7 +23,7 @@ _JOB_LOCK_TTL = {
     "poll_configs":          290,   # interval 5 min  → lock ~5 min
     "poll_external_sensors": 240,   # interval 5 min  → lock 4 min
     "consolidated_email":    300,   # interval varies → lock 5 min
-    "zone_controller":       840,   # interval 15 min → lock 14 min
+    "zone_controller":       280,   # interval 5 min  → lock ~4.5 min
     "zone_verification":     150,   # interval 3 min  → lock 2.5 min
     "zone_ai_analysis":     1700,   # interval 30 min → lock 28 min
     "purge_old_readings":   3600,   # interval 24 h   → lock 1 h
@@ -129,7 +129,7 @@ async def start_scheduler():
     )
     scheduler.add_job(
         _job_zone_controller,
-        trigger=IntervalTrigger(minutes=15),
+        trigger=IntervalTrigger(minutes=5),
         id="zone_controller", replace_existing=True, max_instances=1,
     )
     scheduler.add_job(
