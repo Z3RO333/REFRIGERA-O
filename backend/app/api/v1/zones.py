@@ -92,7 +92,6 @@ def _automation_dict(
         "mode": automation.mode if automation else "manual",
         "setpoint_min": automation.setpoint_min if automation else 18,
         "setpoint_max": automation.setpoint_max if automation else 28,
-        "max_daily_adjustments": automation.max_daily_adjustments if automation else 6,
         "daily_count": daily_count,
         "consecutive_failures": consecutive_fail,
         "cooldown_remaining_s": cooldown_ttl,
@@ -356,8 +355,6 @@ async def set_zone_mode(
         raise HTTPException(400, "setpoint_min deve ser menor que setpoint_max")
     automation.setpoint_min = new_min
     automation.setpoint_max = new_max
-    if "max_daily_adjustments" in fields_set and data.max_daily_adjustments is not None:
-        automation.max_daily_adjustments = data.max_daily_adjustments
     if data.priority is not None:
         automation.priority = data.priority
 

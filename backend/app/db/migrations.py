@@ -151,6 +151,7 @@ _STATEMENTS = [
     "ALTER TABLE custom_zones ADD COLUMN IF NOT EXISTS updated_by_name VARCHAR(100)",
     "ALTER TABLE zone_actions ADD COLUMN IF NOT EXISTS decision_ms INTEGER",
     "ALTER TABLE zone_actions ADD COLUMN IF NOT EXISTS api_ms INTEGER",
+    "UPDATE zone_automations SET max_daily_adjustments = 9999 WHERE max_daily_adjustments < 9999",
     # migra zonas antigas com x/y/w/h para geometry JSONB em percentual (viewBox 800x556)
     """UPDATE custom_zones
        SET geometry = jsonb_build_object(

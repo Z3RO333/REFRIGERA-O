@@ -18,8 +18,6 @@ class ZoneAutomation(Base):
     # manual | suggestion | semi | auto
     setpoint_min: Mapped[int] = mapped_column(Integer, default=18)
     setpoint_max: Mapped[int] = mapped_column(Integer, default=28)
-    max_daily_adjustments: Mapped[int] = mapped_column(Integer, default=6)
-
     # ── Guardrails ────────────────────────────────────────────────────────────
     allowed_start_hour: Mapped[int] = mapped_column(Integer, default=7)
     allowed_start_minute: Mapped[int] = mapped_column(Integer, default=0)   # 07:00

@@ -16,8 +16,6 @@ class ZoneModeUpdate(BaseModel):
     blocked_until: datetime | None = None
     setpoint_min: int | None = Field(default=None, ge=16, le=30)
     setpoint_max: int | None = Field(default=None, ge=16, le=30)
-    max_daily_adjustments: int | None = Field(default=None, ge=0, le=50)
-
     @model_validator(mode="after")
     def validate_setpoint_range(self):
         if self.setpoint_min is not None and self.setpoint_max is not None:
