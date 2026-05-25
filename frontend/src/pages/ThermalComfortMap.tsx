@@ -1157,8 +1157,6 @@ function ZonePanel({
   const currentMode: ZoneMode = automation?.mode ?? 'manual'
   const lastAction = automation?.last_action ?? null
   const cooldownS = automation?.cooldown_remaining_s ?? null
-  const dailyCount = automation?.daily_count ?? 0
-  const maxDaily = automation?.max_daily_adjustments ?? 6
   const consecFail = automation?.consecutive_failures ?? 0
   const isInMaintenance = currentMode === 'maintenance'
 
@@ -1342,9 +1340,9 @@ function ZonePanel({
           {/* Stats */}
           <div className="grid grid-cols-3 gap-2">
             <div className="rounded bg-gray-50 dark:bg-gray-950 p-2 text-center">
-              <div className="text-xs text-gray-500">Hoje</div>
-              <div className={cn('text-sm font-semibold', dailyCount >= maxDaily ? 'text-red-500' : 'text-gray-900 dark:text-white')}>
-                {dailyCount}/{maxDaily}
+              <div className="text-xs text-gray-500">Ações hoje</div>
+              <div className="text-sm font-semibold text-gray-900 dark:text-white">
+                {automation?.daily_count ?? 0}
               </div>
             </div>
             <div className="rounded bg-gray-50 dark:bg-gray-950 p-2 text-center">

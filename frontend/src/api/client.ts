@@ -76,7 +76,6 @@ export const zonesApi = {
     blocked_until?: string | null
     setpoint_min?: number
     setpoint_max?: number
-    max_daily_adjustments?: number
   }) => api.put(`/zones/${storeId}/${zoneKey}/mode`, data).then(r => r.data),
   history: (storeId: string, zoneKey: string, limit = 20) =>
     api.get(`/zones/${storeId}/${zoneKey}/history`, { params: { limit } }).then(r => r.data),

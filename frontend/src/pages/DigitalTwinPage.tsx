@@ -170,7 +170,7 @@ function ZoneCard({
           <p className="font-semibold text-gray-900 dark:text-white truncate">{twin.zone_label}</p>
           <p className="text-xs text-gray-400">
             Faixa: {twin.ideal_min}–{twin.ideal_max}°C
-            {automation && ` · ${automation.daily_count}/${automation.max_daily_adjustments} ajustes hoje`}
+            {automation && automation.daily_count > 0 && ` · ${automation.daily_count} ações hoje`}
           </p>
         </div>
 

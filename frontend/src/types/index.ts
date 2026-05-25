@@ -171,7 +171,6 @@ export interface ZoneAutomationState {
   mode: ZoneMode
   setpoint_min: number
   setpoint_max: number
-  max_daily_adjustments: number
   daily_count: number
   consecutive_failures: number
   cooldown_remaining_s: number | null
