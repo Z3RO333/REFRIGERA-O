@@ -149,6 +149,8 @@ _STATEMENTS = [
     # geometria canônica em % da planta (nova — substitui x/y/w/h absolutos)
     "ALTER TABLE custom_zones ADD COLUMN IF NOT EXISTS geometry JSONB",
     "ALTER TABLE custom_zones ADD COLUMN IF NOT EXISTS updated_by_name VARCHAR(100)",
+    "ALTER TABLE zone_actions ADD COLUMN IF NOT EXISTS decision_ms INTEGER",
+    "ALTER TABLE zone_actions ADD COLUMN IF NOT EXISTS api_ms INTEGER",
     # migra zonas antigas com x/y/w/h para geometry JSONB em percentual (viewBox 800x556)
     """UPDATE custom_zones
        SET geometry = jsonb_build_object(

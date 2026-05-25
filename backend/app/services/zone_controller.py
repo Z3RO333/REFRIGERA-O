@@ -12,6 +12,7 @@ Ciclo por zona:
   8. Após 12-15 min, verifica se a temperatura melhorou
 """
 import logging
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -371,6 +372,7 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
             logger.debug("Zone %s bloqueada por guardrail: %s", automation.zone_key, guardrail_reason)
             return
 
+        _t0 = time.monotonic()
         devices, params_map = await _get_zone_devices(automation.store_id, zone, session)
 
         # Fontes de temperatura: ACs ativos + sensores externos (exclui DND, status bloqueado)
@@ -497,7 +499,7 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                 elif not await redis_client.acquire_lock(cooldown_key, ttl=ZONE_COOLDOWN_SECONDS):
                     return
                 else:
-                    ok = await _execute_power_on(power_device.device, power_params, session)
+                    ok, _api_ms = await _execute_power_on(power_device.device, power_params, session)
                     if ok:
                         action_status = "pending_verification"
                         logger.info(
@@ -509,6 +511,7 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                         block_reason = "Falha ao ligar aparelho pela Brise API"
                         await redis_client.release_lock(cooldown_key)
 
+            _power_api_ms = locals().get("_api_ms", None)
             action = ZoneAction(
                 store_id=automation.store_id,
                 zone_key=zone.key,
@@ -526,9 +529,19 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                 mode=automation.mode,
                 status=action_status,
                 block_reason=block_reason,
+                decision_ms=int((time.monotonic() - _t0) * 1000) if action_status == "pending_verification" else None,
+                api_ms=_power_api_ms if action_status == "pending_verification" else None,
             )
             session.add(action)
             await session.commit()
+
+            if action_status == "pending_verification" and _power_api_ms is not None:
+                logger.info(
+                    "Zone %s: decisão em %dms, API em %dms",
+                    zone.key,
+                    int((time.monotonic() - _t0) * 1000),
+                    _power_api_ms,
+                )
 
             await redis_client.publish("zone.action.created", {
                 "store_id": str(automation.store_id),
@@ -599,7 +612,7 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
             # acquire_lock é atômico (SET NX EX) — evita race entre múltiplos workers
             if not await redis_client.acquire_lock(cooldown_key, ttl=ZONE_COOLDOWN_SECONDS):
                 return  # outro worker chegou primeiro entre o exists() e agora
-            ok = await _execute_setpoint(best_device.device, best_params, direction, automation, session, step=step)
+            ok, _api_ms = await _execute_setpoint(best_device.device, best_params, direction, automation, session, step=step)
             if ok:
                 action_status = "pending_verification"
                 logger.info(
@@ -612,6 +625,7 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                 block_reason = "Falha ao enviar comando para a Brise API"
                 await redis_client.release_lock(cooldown_key)  # libera para próxima tentativa
 
+        _setpoint_api_ms = locals().get("_api_ms", None)
         action = ZoneAction(
             store_id=automation.store_id,
             zone_key=zone.key,
@@ -629,9 +643,19 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
             mode=automation.mode,
             status=action_status,
             block_reason=block_reason,
+            decision_ms=int((time.monotonic() - _t0) * 1000) if action_status == "pending_verification" else None,
+            api_ms=_setpoint_api_ms if action_status == "pending_verification" else None,
         )
         session.add(action)
         await session.commit()
+
+        if action_status == "pending_verification" and _setpoint_api_ms is not None:
+            logger.info(
+                "Zone %s: decisão em %dms, API em %dms",
+                zone.key,
+                int((time.monotonic() - _t0) * 1000),
+                _setpoint_api_ms,
+            )
 
         await redis_client.publish("zone.action.created", {
             "store_id": str(automation.store_id),
@@ -827,7 +851,7 @@ async def _execute_power_on(
     device: Device,
     params: DeviceParameters,
     session: AsyncSession,
-) -> bool:
+) -> tuple[bool, int]:
     brise_params = {
         "modeDevice": 1,
         "modeAC": 0,
@@ -838,7 +862,9 @@ async def _execute_power_on(
         "ecoHeat": params.eco_heat or False,
     }
 
+    _t_api = time.monotonic()
     success = await brise_client.put_parameters(device.brise_device_id, brise_params)
+    _api_ms = int((time.monotonic() - _t_api) * 1000)
     if success:
         params.mode_device = 1
         params.mode_ac = 0
@@ -850,7 +876,7 @@ async def _execute_power_on(
             device.status_latest.state = True
             device.status_latest.updated_at = datetime.utcnow()
         await session.commit()
-    return success
+    return success, _api_ms
 
 
 async def _execute_setpoint(
@@ -860,7 +886,7 @@ async def _execute_setpoint(
     automation: ZoneAutomation,
     session: AsyncSession,
     step: int = 1,
-) -> bool:
+) -> tuple[bool, int]:
     delta = step if direction == "up" else -step
     new_setpoint = max(
         automation.setpoint_min,
@@ -873,7 +899,7 @@ async def _execute_setpoint(
             "_execute_setpoint: no-op para %s (setpoint=%d já no alvo)",
             device.name, new_setpoint,
         )
-        return False
+        return False, 0
 
     brise_params = {
         "modeDevice": 1,
@@ -885,12 +911,14 @@ async def _execute_setpoint(
         "ecoHeat": params.eco_heat,
     }
 
+    _t_api = time.monotonic()
     success = await brise_client.put_parameters(device.brise_device_id, brise_params)
+    _api_ms = int((time.monotonic() - _t_api) * 1000)
     if success:
         params.setpoint_cool = new_setpoint
         params.synced_at = datetime.utcnow()
         await session.commit()
-    return success
+    return success, _api_ms
 
 
 # Mantido para métricas informacionais (daily_count no payload da API).

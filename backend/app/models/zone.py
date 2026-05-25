@@ -77,3 +77,7 @@ class ZoneAction(Base):
     attempt_count: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
     verified_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    # Métricas de latência (ms)
+    decision_ms: Mapped[int | None] = mapped_column(Integer)   # tempo total da decisão
+    api_ms:      Mapped[int | None] = mapped_column(Integer)   # tempo da chamada à Brise API
