@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import re
+from types import SimpleNamespace
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +19,13 @@ from app.models.store import Store
 from app.models.user import User
 from app.brise.client import brise_client
 from app.ai.chat_control_prompt import CHAT_CONTROL_SYSTEM_PROMPT
+from app.api.v1.devices import (
+    DEFAULT_PARAMETERS,
+    _persist_device_parameters,
+    _to_brise_params,
+    _validate_control_action,
+)
+from app.services.audit_service import log_action
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -171,64 +179,97 @@ async def ai_chat_command(
     failed = 0
     skipped = 0
     errors: list[str] = []
-    for device in devices:
-        if device.dnd:
-            skipped += 1
-            continue
-        params_row = await db.get(DeviceParameters, device.id)
-        current = {
-            "mode_device": params_row.mode_device if params_row else 1,
-            "mode_ac": params_row.mode_ac if params_row else 0,
-            "fan_speed": params_row.fan_speed if params_row else 2,
-            "setpoint_cool": params_row.setpoint_cool if params_row else 24,
-            "setpoint_heat": params_row.setpoint_heat if params_row else 20,
-            "eco_cool": params_row.eco_cool if params_row else 22,
-            "eco_heat": params_row.eco_heat if params_row else 18,
-        }
-        if command == "power_off":
-            current["mode_device"] = 0
-        elif command == "power_on":
-            current["mode_device"] = 1
-            current["mode_ac"] = 0
-        elif command == "set_temp":
-            current["setpoint_cool"] = target_temp
-            current["mode_device"] = 1
-            current["mode_ac"] = 0
+    skipped_reasons: dict[str, int] = {}
+    command_for_validation = "set_temperature" if command == "set_temp" else command
 
-        brise_payload = {
-            "modeDevice": current["mode_device"],
-            "modeAC": current["mode_ac"],
-            "fanSpeed": current["fan_speed"],
-            "setpointCool": current["setpoint_cool"],
-            "setpointHeat": current["setpoint_heat"],
-            "ecoCool": current["eco_cool"],
-            "ecoHeat": current["eco_heat"],
-        }
-        ok = await brise_client.put_parameters(device.brise_device_id, brise_payload)
+    for device in devices:
+        params_row = await db.get(DeviceParameters, device.id)
+        status = await db.get(DeviceStatusLatest, device.id)
+        current = DEFAULT_PARAMETERS.copy()
+        if params_row:
+            current.update({
+                "mode_device": params_row.mode_device,
+                "mode_ac": params_row.mode_ac,
+                "fan_speed": params_row.fan_speed,
+                "setpoint_cool": params_row.setpoint_cool,
+                "setpoint_heat": params_row.setpoint_heat,
+                "eco_cool": params_row.eco_cool,
+                "eco_heat": params_row.eco_heat,
+            })
+        next_params = current.copy()
+
+        if command == "power_off":
+            next_params["mode_device"] = 0
+        elif command == "power_on":
+            next_params["mode_device"] = 1
+            next_params["mode_ac"] = 0
+        elif command == "set_temp":
+            next_params["setpoint_cool"] = target_temp
+
+        validation_command = SimpleNamespace(action=command_for_validation, step=0)
+        validation_error = _validate_control_action(device, status, current, next_params, validation_command)
+        if validation_error:
+            validation_code, validation_message = validation_error
+            skipped += 1
+            skipped_reasons[validation_code] = skipped_reasons.get(validation_code, 0) + 1
+            await log_action(
+                db, "device_control",
+                f"{current_user.name} tentou comando em massa — {device.name}, mas foi bloqueado: {validation_message}",
+                user=current_user,
+                device_id=device.id,
+                device_name=device.name,
+                old_value=str(current.get("setpoint_cool")) if command == "set_temp" else str(current.get("mode_device")),
+                new_value=str(next_params.get("setpoint_cool")) if command == "set_temp" else str(next_params.get("mode_device")),
+                extra_data={
+                    "action": command_for_validation,
+                    "confirmed": False,
+                    "rejected": validation_code,
+                    "source": "ai_chat_command",
+                },
+                severity="LOW" if validation_code.startswith("NO_OP") else "MEDIUM",
+            )
+            continue
+
+        ok = await brise_client.put_parameters(device.brise_device_id, _to_brise_params(next_params))
         if not ok:
             failed += 1
             errors.append(device.name)
+            await log_action(
+                db, "device_control",
+                f"{current_user.name} tentou comando em massa — {device.name}, mas a Brise API recusou/falhou",
+                user=current_user,
+                device_id=device.id,
+                device_name=device.name,
+                old_value=str(current.get("setpoint_cool")) if command == "set_temp" else str(current.get("mode_device")),
+                new_value=str(next_params.get("setpoint_cool")) if command == "set_temp" else str(next_params.get("mode_device")),
+                extra_data={"action": command_for_validation, "confirmed": False, "source": "ai_chat_command"},
+                severity="HIGH",
+            )
             continue
+
         success += 1
-        if params_row:
-            params_row.mode_device = current["mode_device"]
-            params_row.mode_ac = current["mode_ac"]
-            params_row.fan_speed = current["fan_speed"]
-            params_row.setpoint_cool = current["setpoint_cool"]
-            params_row.setpoint_heat = current["setpoint_heat"]
-            params_row.eco_cool = current["eco_cool"]
-            params_row.eco_heat = current["eco_heat"]
-        else:
-            db.add(DeviceParameters(device_id=device.id, **current))
+        await _persist_device_parameters(device.id, next_params, db)
+        await log_action(
+            db, "device_control",
+            f"{current_user.name} aplicou comando em massa — {device.name}",
+            user=current_user,
+            device_id=device.id,
+            device_name=device.name,
+            old_value=str(current.get("setpoint_cool")) if command == "set_temp" else str(current.get("mode_device")),
+            new_value=str(next_params.get("setpoint_cool")) if command == "set_temp" else str(next_params.get("mode_device")),
+            extra_data={"action": command_for_validation, "confirmed": True, "source": "ai_chat_command"},
+        )
 
     await db.commit()
     return {
-        "message": f"Comando aplicado por {current_user.name}",
+        "message": f"Comando processado por {current_user.name}",
         "command": command,
         "target_temp": target_temp,
         "success": success,
         "failed": failed,
-        "skipped_dnd": skipped,
+        "skipped": skipped,
+        "skipped_dnd": skipped_reasons.get("DEVICE_BLOCKED", 0),
+        "skipped_reasons": skipped_reasons,
         "total": len(devices),
         "failed_devices": errors[:20],
     }

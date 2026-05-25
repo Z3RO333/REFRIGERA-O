@@ -20,20 +20,72 @@ logger = logging.getLogger(__name__)
 
 _SEM = asyncio.Semaphore(1)
 
-SYSTEM_PROMPT = """Você é um especialista em diagnóstico de sistemas de ar condicionado para ambientes comerciais (varejo).
+SYSTEM_PROMPT = """Você é um especialista em diagnóstico de sistemas de ar-condicionado para ambientes comerciais de varejo.
 
-Seu papel é analisar dados de monitoramento em tempo real e identificar problemas, causas raiz e ações corretivas precisas.
+Sua função é analisar UM EQUIPAMENTO por vez, usando dados em tempo real, histórico e contexto operacional, para identificar falhas, baixa eficiência, risco de desconforto térmico e necessidade de manutenção.
 
-Conhecimentos aplicáveis:
-- Delta acima do setpoint > 2°C por mais de 15 min indica perda de capacidade de refrigeração
-- Delta > 4°C em ambiente crítico (farmácia, servidor) exige ação imediata
-- Eficiência < 60% combinada com alta temperatura sugere filtro entupido ou baixo nível de gás
-- Se a temperatura atual supera a média histórica no mesmo horário em > 3°C, há degradação recente
-- Equipamentos com > 5.000h de operação sem manutenção têm alta probabilidade de filtro sujo
-- Umidade > 70% combinada com temperatura alta pode indicar condensador com problema
-- Temperatura subindo (tendência positiva) é mais urgente que temperatura estável acima do setpoint
+Responda SOMENTE com JSON puro, sem markdown, sem explicações fora do JSON.
 
-Responda SOMENTE com JSON puro, sem markdown, sem texto fora do JSON."""
+Regras obrigatórias:
+
+1. Não confunda equipamento com sensor.
+   - Se o item analisado for apenas sensor externo, sensor de ambiente ou medidor, NUNCA sugira ligar, desligar ou alterar setpoint.
+   - Comandos só podem ser recomendados para equipamentos de ar-condicionado controláveis.
+
+2. Não confunda ausência de leitura com equipamento desligado.
+   - "sem leitura" significa dado insuficiente, comunicação ausente ou leitura stale.
+   - "desligado" só pode ser afirmado se houver status explícito de power/off.
+   - "sem comunicação" deve ser tratado como problema de telemetria/API, não como falha térmica confirmada.
+
+3. Não recomende ação inútil.
+   - Nunca sugerir alterar setpoint para o mesmo valor atual.
+   - Nunca sugerir ligar equipamento já ligado.
+   - Nunca sugerir desligar equipamento já desligado.
+   - Nunca sugerir comando se o equipamento não for controlável remotamente.
+
+4. Priorize conforto térmico por zona.
+   - Avalie o equipamento considerando a zona onde ele está.
+   - Se a zona está quente, mas este equipamento está desligado e disponível, a recomendação pode ser ligar o equipamento.
+   - Se a zona está quente e o equipamento já está ligado, avalie eficiência, delta, setpoint, tendência e histórico.
+   - Se a zona está sem leitura confiável, não conclua falha térmica com alta certeza.
+
+5. Diferencie causa raiz.
+   Classifique a causa provável como uma destas categorias quando aplicável:
+   - equipamento_desligado
+   - setpoint_inadequado
+   - baixa_eficiencia
+   - possivel_falta_de_gas
+   - filtro_sujo
+   - evaporadora_obstruida
+   - condensadora_obstruida
+   - sensor_sem_leitura
+   - comunicacao_indisponivel
+   - leitura_stale
+   - dados_insuficientes
+   - carga_termica_alta
+   - zona_mal_balanceada
+   - manutencao_vencida
+
+6. Severidade:
+   - CRITICAL: risco operacional alto, ambiente muito fora da faixa, equipamento crítico sem resposta ou tendência muito rápida.
+   - HIGH: desconforto relevante, baixa eficiência clara, temperatura acima da faixa por tempo relevante ou falha provável.
+   - MEDIUM: alerta preventivo, tendência ruim, manutenção vencida ou perda moderada de eficiência.
+   - LOW: observação leve, sem impacto imediato.
+
+7. email_worthy só deve ser true quando:
+   - houver impacto real no conforto da loja;
+   - houver falha provável de equipamento;
+   - houver risco de manutenção;
+   - houver comunicação perdida em equipamento importante;
+   - ou a severidade for HIGH/CRITICAL.
+
+8. Quando os dados forem insuficientes:
+   - issue_detected pode ser true se houver problema de telemetria;
+   - severity deve ser LOW ou MEDIUM, exceto se o equipamento for crítico;
+   - root_cause deve indicar "dados_insuficientes", "sensor_sem_leitura", "comunicacao_indisponivel" ou "leitura_stale";
+   - recommended_action deve pedir verificação de leitura/comunicação, não comando de climatização.
+
+Retorne exatamente o JSON solicitado no prompt do usuário."""
 
 _SEVERITY_RULES = {
     "CRITICAL": {"label": "CRITICAL", "email": True},
@@ -195,6 +247,14 @@ def _build_prompt(device: dict) -> str:
     days_maint = device.get("days_since_maintenance") # dias sem manutenção
     alerts_30d = device.get("alerts_30d", 0)
     uptime    = device.get("uptime_pct")
+    device_type = device.get("device_type", "ar_condicionado")
+    is_sensor = bool(device.get("is_external_sensor"))
+    remote_ok = bool(device.get("remote_control_enabled"))
+    blocked = bool(device.get("blocked"))
+    comm_ok = bool(device.get("communication_ok"))
+    reading_age = device.get("reading_age_minutes")
+    state = device.get("state")
+    mode_device = device.get("mode_device")
 
     zone = device.get("zone") or {}
     zone_label    = zone.get("zone_label") or device.get("sector_name", "?")
@@ -209,9 +269,16 @@ def _build_prompt(device: dict) -> str:
 
     lines = [
         f"Equipamento: {device['device_name']}",
+        f"Tipo do dispositivo: {device_type}",
+        f"Sensor externo/medidor: {'SIM' if is_sensor else 'NÃO'}",
+        f"Aceita comando remoto: {'SIM' if remote_ok else 'NÃO'}",
+        f"Bloqueado/DND: {'SIM' if blocked else 'NÃO'}",
+        f"Comunicação/leitura confiável: {'SIM' if comm_ok else 'NÃO'}",
+        f"Idade da última leitura: {f'{reading_age:.1f} min' if reading_age is not None else 'sem leitura'}",
         f"Local: {device.get('store_name','?')} › {zone_label}",
         f"Ambiente crítico: {'SIM' if is_crit else 'NÃO'}",
         f"Status atual: {device['status']}",
+        f"Estado power explícito: {'ligado' if state is True else ('desligado' if state is False else 'desconhecido')} | mode_device={mode_device if mode_device is not None else 'desconhecido'}", 
         "",
         "── Zona térmica ──",
         f"Tipo de área: {zone_type}",
@@ -253,6 +320,7 @@ def _build_prompt(device: dict) -> str:
 
     lines += [
         "",
+        "Categorias recomendadas para root_cause quando aplicável: equipamento_desligado, setpoint_inadequado, baixa_eficiencia, possivel_falta_de_gas, filtro_sujo, evaporadora_obstruida, condensadora_obstruida, sensor_sem_leitura, comunicacao_indisponivel, leitura_stale, dados_insuficientes, carga_termica_alta, zona_mal_balanceada, manutencao_vencida.",
         "Com base em todos os dados acima, analise o problema e retorne o JSON:",
         schema,
     ]
@@ -319,20 +387,67 @@ def _fallback_analysis(device: dict) -> DeviceAnalysis:
 
 # ── Análise de zona ───────────────────────────────────────────────────────────
 
-ZONE_SYSTEM_PROMPT = """Você é um especialista em diagnóstico de sistemas de climatização para ambientes comerciais.
+ZONE_SYSTEM_PROMPT = """Você é um especialista em climatização de ambientes comerciais de varejo.
 
-Seu papel é analisar o estado térmico de uma ZONA completa (grupo de setores com controle unificado) e identificar problemas, causas raiz e ações corretivas para o operador ou técnico.
+Sua função é analisar UMA ZONA TÉRMICA completa, considerando sensores, aparelhos de ar-condicionado, leituras, tendência, faixa ideal e qualidade dos dados.
 
-Conhecimentos aplicáveis:
-- A temperatura média da zona é a referência principal; avalie o estado coletivo, não individualmente
-- Tendência positiva (°C/hora) em zona QUENTE ou CRÍTICA exige ação imediata
-- SALA_FECHADA tem inércia térmica maior: problemas se acumulam lentamente mas são mais difíceis de reverter
-- Zona em modo manual sem ação do operador é risco operacional quando fora da faixa ideal
-- Alta variância entre dispositivos indica fluxo de ar desequilibrado ou falha pontual em um equipamento
-- Zona em early_warning (confortável mas aquecendo rapidamente) deve ser ajustada antes de sair da faixa
-- Dispositivos com eficiência < 60% são suspeitos de filtro sujo ou baixo nível de gás
+Responda SOMENTE com JSON puro, sem markdown e sem texto fora do JSON.
 
-Responda SOMENTE com JSON puro, sem markdown, sem texto fora do JSON."""
+Objetivo principal:
+Avaliar conforto térmico da zona e indicar a melhor ação operacional ou técnica, sem confundir ausência de leitura com ausência de aparelho.
+
+Regras obrigatórias:
+
+1. Analise a zona, não apenas equipamentos isolados.
+   Considere temperatura média, faixa ideal, tendência, tipo da zona, confiança da leitura, sensores, aparelhos vinculados, aparelhos ligados/desligados, bloqueados, sem comunicação, sem permissão de comando e anomalias.
+
+2. Nunca conclua que a zona não possui ar-condicionado apenas porque está sem leitura térmica.
+   Estados diferentes precisam ser tratados separadamente:
+   - zona_sem_leitura_termica
+   - zona_sem_sensor
+   - zona_sem_aparelhos_vinculados
+   - aparelhos_sem_comunicacao
+   - aparelhos_bloqueados
+   - aparelhos_nao_controlaveis
+   - api_com_erro
+   - leitura_stale
+   - dados_insuficientes
+
+3. Para zona quente:
+   Se temperatura_media > faixa_ideal_max:
+   - primeiro verifique se existem aparelhos desligados, disponíveis, comunicando e controláveis;
+   - se existirem, recomende ligar aparelho(s) antes de reduzir setpoint;
+   - só recomende reduzir setpoint se os aparelhos disponíveis já estiverem ligados;
+   - nunca recomende reduzir setpoint se o novo valor for igual ao atual;
+   - se não houver ação segura, informe o motivo técnico.
+
+4. Para zona fria:
+   Se temperatura_media < faixa_ideal_min:
+   - primeiro recomende aumentar setpoint dos aparelhos ligados;
+   - depois avalie desligar aparelhos excedentes;
+   - nunca recomende desligar aparelho já desligado;
+   - nunca recomende comando sem mudança real.
+
+5. Para zona sem leitura confiável:
+   - não gere comando automático agressivo;
+   - use última leitura válida apenas se estiver marcada como stale;
+   - reduza a confiança do diagnóstico;
+   - recomende verificar sensor/API/telemetria;
+   - mantenha os aparelhos vinculados visíveis no diagnóstico.
+
+6. Para zona com aparelhos mas nenhum ajustável, explique o motivo: todos bloqueados, todos sem comunicação, todos não controláveis, todos já no limite operacional, falta permissão de comando, API indisponível ou dados insuficientes.
+
+7. Severidade:
+   - CRITICAL: zona muito fora da faixa, tendência rápida, área crítica ou sem controle operacional.
+   - HIGH: zona fora da faixa com impacto real e ação necessária.
+   - MEDIUM: zona próxima do limite, tendência ruim ou alerta preventivo.
+   - LOW: observação sem impacto imediato.
+
+8. recommended_action deve ser uma recomendação clara para operador ou técnico.
+
+9. Não invente IDs, aparelhos, sensores ou valores. Use apenas dados recebidos. Se faltarem dados, indique dados_insuficientes.
+
+Retorne exatamente o JSON solicitado no prompt do usuário."""
 
 
 class ZoneAnalysis(BaseModel):
@@ -429,7 +544,15 @@ def _build_zone_prompt(twin: dict) -> str:
     devices   = twin.get("contributing_devices", [])
     p30       = twin.get("predicted_temp_30m")
 
-    active = [d for d in devices if not d.get("is_external_sensor") and d.get("status") not in ("DESLIGADO", "SEM_LEITURA")]
+    ac_devices = [d for d in devices if not d.get("is_external_sensor")]
+    sensors = [d for d in devices if d.get("is_external_sensor")]
+    active = [d for d in ac_devices if d.get("state") is True or (d.get("state") is None and d.get("status") not in ("DESLIGADO", "SEM_LEITURA", "UNKNOWN", None))]
+    off_devices = [d for d in ac_devices if d.get("state") is False or d.get("status") == "DESLIGADO"]
+    blocked_devices = [d for d in ac_devices if d.get("blocked")]
+    no_comm_devices = [d for d in ac_devices if not d.get("communication_ok", True)]
+    controllable_devices = [d for d in ac_devices if d.get("controllable") and d.get("communication_ok", True) and not d.get("blocked")]
+    stale_devices = [d for d in devices if d.get("is_stale")]
+    sensors_no_reading = [d for d in sensors if d.get("status") in ("SEM_LEITURA", "UNKNOWN") or d.get("temperature") is None]
     anomalous = [d for d in active if d.get("status") not in ("NORMAL",)]
 
     lines = [
@@ -446,6 +569,17 @@ def _build_zone_prompt(twin: dict) -> str:
         f"Alerta preemptivo: {'SIM — zona confortável mas aquecendo rapidamente' if early else 'Não'}",
         f"Confiança da leitura: {round(confidence * 100)}%",
         "",
+        "── Inventário operacional ──",
+        f"Aparelhos vinculados: {len(ac_devices)}",
+        f"Aparelhos ligados: {len(active)}",
+        f"Aparelhos desligados: {len(off_devices)}",
+        f"Aparelhos bloqueados: {len(blocked_devices)}",
+        f"Aparelhos sem comunicação/leitura confiável: {len(no_comm_devices)}",
+        f"Aparelhos controláveis agora: {len(controllable_devices)}",
+        f"Sensores ativos/vinculados: {len(sensors)}",
+        f"Sensores sem leitura: {len(sensors_no_reading)}",
+        f"Leituras stale: {len(stale_devices)}",
+        "",
         f"── Dispositivos ({len(devices)} total, {len(active)} ACs ativos, {len(anomalous)} com anomalia) ──",
     ]
 
@@ -453,7 +587,11 @@ def _build_zone_prompt(twin: dict) -> str:
         temp_s = f"{d['temperature']:.1f}°C" if d.get("temperature") is not None else "—"
         eff_s  = f"{round(d['efficiency_score'] * 100)}%" if d.get("efficiency_score") is not None else "—"
         ext    = " [sensor externo]" if d.get("is_external_sensor") else ""
-        lines.append(f"  • {d['name']}: {temp_s}, status={d['status']}, efic.={eff_s}{ext}")
+        state_s = "ligado" if d.get("state") is True else ("desligado" if d.get("state") is False else "estado desconhecido")
+        ctrl_s = "controlável" if d.get("controllable") else "não controlável"
+        comm_s = "comunicando" if d.get("communication_ok", True) else "sem comunicação/leitura confiável"
+        stale_s = ", stale" if d.get("is_stale") else ""
+        lines.append(f"  • {d['name']}: {temp_s}, status={d['status']}, {state_s}, {ctrl_s}, {comm_s}{stale_s}, efic.={eff_s}{ext}")
 
     schema = (
         f'{{"zone_key":"{twin["zone_key"]}",'
@@ -468,6 +606,8 @@ def _build_zone_prompt(twin: dict) -> str:
 
     lines += [
         "",
+        "Estados que devem ser diferenciados quando aplicável: zona_sem_leitura_termica, zona_sem_sensor, zona_sem_aparelhos_vinculados, aparelhos_sem_comunicacao, aparelhos_bloqueados, aparelhos_nao_controlaveis, api_com_erro, leitura_stale, dados_insuficientes.",
+        "Para zona quente, priorize ligar aparelhos desligados disponíveis antes de reduzir setpoint. Para zona fria, priorize aumentar setpoint dos aparelhos ligados antes de desligar excedentes.",
         "Com base no estado coletivo da zona, identifique o problema e retorne o JSON:",
         schema,
     ]

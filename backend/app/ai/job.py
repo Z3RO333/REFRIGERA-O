@@ -136,6 +136,9 @@ async def _fetch_anomalous_devices() -> tuple[list[dict], dict[str, dict]]:
                 Device.btu,
                 Device.is_critical_environment,
                 Device.last_maintenance,
+                Device.source_url,
+                Device.dnd,
+                Device.active,
                 DeviceStatusLatest.status_classification,
                 DeviceStatusLatest.temperature,
                 DeviceStatusLatest.delta_temp,
@@ -146,6 +149,7 @@ async def _fetch_anomalous_devices() -> tuple[list[dict], dict[str, dict]]:
                 DeviceStatusLatest.accumulated_on_minutes,
                 DeviceStatusLatest.accumulated_off_minutes,
                 DeviceParameters.setpoint_cool,
+                DeviceParameters.mode_device,
                 StoreSector.name.label("sector_name"),
                 StoreSector.store_id.label("store_id"),
                 Store.name.label("store_name"),
@@ -166,10 +170,13 @@ async def _fetch_anomalous_devices() -> tuple[list[dict], dict[str, dict]]:
 
         custom_zones = await _load_all_custom_zones(session)
         sector_to_zone: dict = {}  # custom zones usam device_ids, não sector_names
+        device_to_zone: dict[str, object] = {}
 
         # Temperatura média por zona customizada (via device_ids)
         zone_avg_map: dict[str, float] = {}
         for zone_cfg in custom_zones.values():
+            for dev_id in zone_cfg.device_ids or []:
+                device_to_zone[str(dev_id)] = zone_cfg
             if not zone_cfg.device_ids:
                 continue
             avg_res = await session.execute(
@@ -220,14 +227,29 @@ async def _fetch_anomalous_devices() -> tuple[list[dict], dict[str, dict]]:
             else:
                 trend_label = "estável"
 
+        reading_age_minutes = None
+        if row.updated_at:
+            reading_age_minutes = round((datetime.utcnow() - row.updated_at).total_seconds() / 60, 1)
+        is_external_sensor = row.source_url is not None
+        communication_ok = bool(row.updated_at) and row.status_classification not in {"SEM_LEITURA"}
+        if reading_age_minutes is not None and reading_age_minutes > 30:
+            communication_ok = False
+
         info = {
             "device_id": did,
             "device_name": row.name,
             "store_name": row.store_name,
             "sector_name": row.sector_name,
+            "device_type": "sensor_externo" if is_external_sensor else "ar_condicionado",
+            "is_external_sensor": is_external_sensor,
+            "remote_control_enabled": not is_external_sensor and not row.dnd and bool(row.active),
+            "blocked": bool(row.dnd),
+            "communication_ok": communication_ok,
+            "reading_age_minutes": reading_age_minutes,
             "status": row.status_classification,
             "temperature": row.temperature,
             "setpoint_cool": row.setpoint_cool or 24,
+            "mode_device": row.mode_device,
             "delta_temp": row.delta_temp,
             "humidity": row.humidity,
             "efficiency_score": row.efficiency_score,
@@ -245,7 +267,7 @@ async def _fetch_anomalous_devices() -> tuple[list[dict], dict[str, dict]]:
         }
 
         # Contexto de zona
-        zone_cfg = sector_to_zone.get(row.sector_name or "")
+        zone_cfg = device_to_zone.get(did) or sector_to_zone.get(row.sector_name or "")
         if zone_cfg:
             auto_mode = automation_map.get((str(row.store_id), zone_cfg.key), "manual")
             info["zone"] = {

@@ -233,7 +233,7 @@ export default function AIAnalysisPage() {
     onSuccess: (data) => {
       setChatFeedback(
         `✅ ${data.success}/${data.total} aplicados` +
-        (data.skipped_dnd ? ` · ${data.skipped_dnd} em DND` : '') +
+        (data.skipped ? ` · ${data.skipped} bloqueados/no-op` : '') +
         (data.failed ? ` · ${data.failed} falharam` : '')
       )
       setChatMessage('')

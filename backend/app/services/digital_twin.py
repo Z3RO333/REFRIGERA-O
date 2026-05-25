@@ -278,8 +278,11 @@ async def compute_zone_twin(
         if status.temperature is not None:
             temps_now.append(float(status.temperature))
 
-        if status.updated_at and status.updated_at < stale_cut:
+        is_stale = bool(status.updated_at and status.updated_at < stale_cut)
+        if is_stale:
             readings_fresh = False
+        controllable = not is_ext and not device.dnd
+        communication_ok = status.status_classification not in {"SEM_LEITURA"} and not is_stale
 
         contributing.append({
             "device_id": str(device.id),
@@ -287,7 +290,12 @@ async def compute_zone_twin(
             "name": device.name,
             "temperature": status.temperature,
             "status": status.status_classification or "UNKNOWN",
+            "state": status.state,
             "is_external_sensor": is_ext,
+            "is_stale": is_stale,
+            "communication_ok": communication_ok,
+            "controllable": controllable,
+            "blocked": bool(device.dnd),
             "efficiency_score": status.efficiency_score,
             "updated_at": status.updated_at.isoformat() if status.updated_at else None,
         })

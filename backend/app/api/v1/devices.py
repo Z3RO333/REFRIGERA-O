@@ -1,6 +1,6 @@
 import asyncio
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +20,7 @@ from app.api.v1.auth import get_current_user, require_role
 from app.services.audit_service import log_action
 from app.services.zone_controller import KILL_SWITCH_KEY
 from app.services.device_refresh import refresh_after_command
+from app.config import settings
 
 router = APIRouter()
 
@@ -34,6 +35,47 @@ DEFAULT_PARAMETERS = {
     "eco_cool": 22,
     "eco_heat": 18,
 }
+
+
+def _validate_control_action(
+    device: Device,
+    status: DeviceStatusLatest | None,
+    current_params: dict,
+    next_params: dict,
+    command: DeviceControlCommand,
+) -> tuple[str, str] | None:
+    if device.source_url is not None:
+        return "INVALID_TARGET_SENSOR", "Sensor externo não recebe comandos"
+    if device.dnd:
+        return "DEVICE_BLOCKED", "Dispositivo em modo DND — comando bloqueado pelo equipamento"
+    if not device.active:
+        return "DEVICE_BLOCKED", "Dispositivo inativo — comando bloqueado"
+
+    communication_bad = status is None
+    if status:
+        if status.status_classification == "SEM_LEITURA":
+            communication_bad = True
+        elif status.updated_at and status.updated_at < datetime.utcnow() - timedelta(minutes=settings.offline_threshold_minutes):
+            communication_bad = True
+    if communication_bad:
+        return "DEVICE_WITHOUT_COMMUNICATION", "Dispositivo sem comunicação/leitura confiável — valide telemetria antes de comandar"
+
+    if command.action == "power_on":
+        already_on = status.state is True if status and status.state is not None else current_params.get("mode_device") == 1
+        if already_on:
+            return "NO_OP_ALREADY_ON", "Equipamento já está ligado"
+    elif command.action == "power_off":
+        already_off = status.state is False if status and status.state is not None else current_params.get("mode_device") == 0
+        if already_off:
+            return "NO_OP_ALREADY_OFF", "Equipamento já está desligado"
+    elif command.action in {"temperature_up", "temperature_down", "set_temperature"}:
+        temperature = next_params.get("setpoint_cool")
+        if temperature is None or temperature < SETPOINT_COOL_MIN or temperature > SETPOINT_COOL_MAX:
+            return "INVALID_TEMPERATURE_RANGE", "Temperatura fora da faixa permitida (18-28°C)"
+        if next_params.get("setpoint_cool") == current_params.get("setpoint_cool"):
+            return "NO_OP_SETPOINT_EQUALS_CURRENT", "Setpoint solicitado é igual ao setpoint atual ou já está no limite operacional"
+
+    return None
 
 @router.get("")
 async def list_devices(db: AsyncSession = Depends(get_db)):
@@ -170,10 +212,6 @@ async def control_device(
     device = await db.get(Device, device_id)
     if not device:
         raise HTTPException(404, "Dispositivo não encontrado")
-    if device.dnd:
-        raise HTTPException(409, "Dispositivo em modo DND — comando bloqueado pelo equipamento")
-    if device.source_url is not None:
-        raise HTTPException(409, "Sensor externo não recebe comandos Brise")
 
     # Bug 4: respeitar kill switch global — bloqueia automação E comandos manuais
     if await redis_client.exists(KILL_SWITCH_KEY):
@@ -188,6 +226,49 @@ async def control_device(
     sector_row = sector_store.first()
     _sector = sector_row[0] if sector_row else None
     _store  = sector_row[1] if sector_row else None
+
+    status = await db.get(DeviceStatusLatest, device_id)
+    should_pre_validate = (
+        device.source_url is not None
+        or device.dnd
+        or not device.active
+        or status is None
+        or bool(status and (
+            status.status_classification == "SEM_LEITURA"
+            or (
+                status.updated_at
+                and status.updated_at < datetime.utcnow() - timedelta(minutes=settings.offline_threshold_minutes)
+            )
+        ))
+    )
+    pre_validation = (
+        _validate_control_action(device, status, DEFAULT_PARAMETERS.copy(), DEFAULT_PARAMETERS.copy(), command)
+        if should_pre_validate else None
+    )
+    if pre_validation:
+        validation_code, validation_message = pre_validation
+        action_labels = {
+            "power_on": "ligar",
+            "power_off": "desligar",
+            "temperature_up": "aumentar setpoint",
+            "temperature_down": "reduzir setpoint",
+        }
+        label = action_labels.get(command.action, command.action)
+        await log_action(
+            db, "device_control",
+            f"{current_user.name} tentou {label} — {device.name}, mas o comando foi bloqueado: {validation_message}"
+            + (f" [{_sector.name}]" if _sector else ""),
+            user=current_user,
+            device_id=device_id,
+            device_name=device.name,
+            store_id=_store.id if _store else None,
+            store_name=_store.name if _store else None,
+            sector_name=_sector.name if _sector else None,
+            extra_data={"action": command.action, "step": command.step, "confirmed": False, "rejected": validation_code},
+            severity="LOW" if validation_code.startswith("NO_OP") else "MEDIUM",
+        )
+        await db.commit()
+        raise HTTPException(409, validation_message)
 
     current_params = await _get_current_parameters(device_id, device.brise_device_id, db)
     next_params = current_params.copy()
@@ -208,9 +289,6 @@ async def control_device(
             next_params["setpoint_cool"] - command.step,
         )
 
-    brise_params = _to_brise_params(next_params)
-    confirmed = await brise_client.put_parameters(device.brise_device_id, brise_params)
-
     is_temp_action = "temperature" in command.action
     is_power_action = command.action in {"power_on", "power_off"}
     old_sp = current_params.get("setpoint_cool")
@@ -224,6 +302,30 @@ async def control_device(
         "temperature_down": f"↓ setpoint {old_sp}°C → {new_sp}°C",
     }
     label = action_labels.get(command.action, command.action)
+
+    validation_error = _validate_control_action(device, status, current_params, next_params, command)
+    if validation_error:
+        validation_code, validation_message = validation_error
+        await log_action(
+            db, "device_control",
+            f"{current_user.name} tentou {label} — {device.name}, mas o comando foi bloqueado: {validation_message}"
+            + (f" [{_sector.name}]" if _sector else ""),
+            user=current_user,
+            device_id=device_id,
+            device_name=device.name,
+            store_id=_store.id if _store else None,
+            store_name=_store.name if _store else None,
+            sector_name=_sector.name if _sector else None,
+            old_value=str(old_sp) if is_temp_action else (str(old_power) if is_power_action else None),
+            new_value=str(new_sp) if is_temp_action else (str(new_power) if is_power_action else None),
+            extra_data={"action": command.action, "step": command.step, "confirmed": False, "rejected": validation_code},
+            severity="LOW" if validation_code.startswith("NO_OP") else "MEDIUM",
+        )
+        await db.commit()
+        raise HTTPException(409, validation_message)
+
+    brise_params = _to_brise_params(next_params)
+    confirmed = await brise_client.put_parameters(device.brise_device_id, brise_params)
 
     if not confirmed:
         await log_action(
@@ -254,7 +356,6 @@ async def control_device(
     await _persist_device_parameters(device_id, next_params, db)
 
     if command.action in {"power_on", "power_off"}:
-        status = await db.get(DeviceStatusLatest, device_id)
         if status:
             status.state = command.action == "power_on"
             if command.action == "power_off":
@@ -364,7 +465,7 @@ async def get_brise_schedules(device_id: uuid.UUID, db: AsyncSession = Depends(g
 
 
 def _format_schedule(s) -> dict:
-    from datetime import datetime, timezone
+    from datetime import timezone
     days_map = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"]
     rep_val = s.repetitionValue or 0
     active_days = [days_map[i] for i in range(7) if rep_val & (1 << i)]

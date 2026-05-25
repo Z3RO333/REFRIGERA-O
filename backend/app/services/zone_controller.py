@@ -378,8 +378,24 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
             and not d.device.dnd
         ]
 
-        # Ajustáveis via comando: apenas ACs (sensores externos têm source_url)
-        readable = [d for d in temp_sources if not d.device.source_url]
+        # Fallback: ACs classificados como DESLIGADO mas ainda reportando temperatura.
+        # Isso ocorre quando a API Brise retorna state=false transitoriamente para ACs ligados.
+        # Nesse caso, usamos a temperatura disponível e tentamos ligar os ACs, mas sem
+        # enviar comandos de setpoint (readable vazio).
+        if not temp_sources:
+            off_with_temp = [
+                d for d in devices
+                if not d.device.source_url
+                and not d.device.dnd
+                and d.status.temperature is not None
+                and d.status.status_classification == "DESLIGADO"
+            ]
+            if off_with_temp:
+                temp_sources = off_with_temp
+            readable = []
+        else:
+            # Ajustáveis via comando: apenas ACs (sensores externos têm source_url)
+            readable = [d for d in temp_sources if not d.device.source_url]
 
         if not temp_sources:
             # Sem leitura térmica disponível — diagnóstico detalhado com rate-limit anti-spam
