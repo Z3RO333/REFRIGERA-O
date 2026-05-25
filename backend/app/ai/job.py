@@ -3,6 +3,7 @@ Job de análise de IA: roda após cada ciclo de polling.
 Consulta devices com anomalias, envia ao Ollama para diagnóstico
 e dispara emails para severidades HIGH/CRITICAL.
 """
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -47,7 +48,15 @@ async def run_ai_analysis() -> None:
             return
 
         logger.info("AI analysis: analisando %d dispositivos anômalos", len(devices_data))
-        analyses = await analyze_anomalies(devices_data)
+        try:
+            analyses = await asyncio.wait_for(
+                analyze_anomalies(devices_data),
+                timeout=120,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("AI analysis: timeout de 120s atingido — usando fallback para todos")
+            from app.ai.analyzer import _fallback_analysis
+            analyses = [_fallback_analysis(d) for d in devices_data]
 
         alerts_buffered = 0
         for analysis in analyses:

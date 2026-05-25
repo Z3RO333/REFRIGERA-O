@@ -18,7 +18,7 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-_SEM = asyncio.Semaphore(1)
+_SEM = asyncio.Semaphore(3)
 
 SYSTEM_PROMPT = """Você é um especialista em diagnóstico de sistemas de ar-condicionado para ambientes comerciais de varejo.
 
@@ -161,18 +161,21 @@ def analyze_no_reading(device: dict) -> DeviceAnalysis:
 # ── Pipeline principal ────────────────────────────────────────────────────────
 
 async def analyze_anomalies(devices_data: list[dict]) -> list[DeviceAnalysis]:
-    results: list[DeviceAnalysis] = []
-
     rule_based = [d for d in devices_data if d["status"] in ("SEM_LEITURA", "DESLIGADO")]
     needs_llm  = [d for d in devices_data if d["status"] not in ("SEM_LEITURA", "DESLIGADO")]
 
-    for d in rule_based:
-        results.append(analyze_no_reading(d))
+    results: list[DeviceAnalysis] = [analyze_no_reading(d) for d in rule_based]
 
-    for device in needs_llm:
-        analysis = await _analyze_one(device)
-        if analysis:
-            results.append(analysis)
+    if needs_llm:
+        llm_outcomes = await asyncio.gather(
+            *[_analyze_one(d) for d in needs_llm],
+            return_exceptions=True,
+        )
+        for outcome in llm_outcomes:
+            if isinstance(outcome, DeviceAnalysis):
+                results.append(outcome)
+            elif isinstance(outcome, Exception):
+                logger.warning("analyze_anomalies: exceção em dispositivo: %s", outcome)
 
     return results
 
@@ -210,7 +213,7 @@ async def analyze_one_deep(device: dict) -> DeviceAnalysis | None:
 async def _call_llm(device: dict, model: str, max_tokens: int) -> DeviceAnalysis | None:
     msg = _build_prompt(device)
     try:
-        async with httpx.AsyncClient(timeout=360) as client:
+        async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
                 f"{settings.ollama_url}/v1/chat/completions",
                 json={
@@ -508,7 +511,7 @@ async def analyze_zone_deep(twin: dict) -> ZoneAnalysis:
 async def _call_zone_llm(twin: dict, model: str, max_tokens: int) -> ZoneAnalysis | None:
     msg = _build_zone_prompt(twin)
     try:
-        async with httpx.AsyncClient(timeout=360) as client:
+        async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
                 f"{settings.ollama_url}/v1/chat/completions",
                 json={
