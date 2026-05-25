@@ -159,7 +159,9 @@ _STATEMENTS = [
          ) THEN
            UPDATE zone_automations
            SET max_daily_adjustments = 9999
-           WHERE max_daily_adjustments < 9999;
+           WHERE max_daily_adjustments IS NULL OR max_daily_adjustments < 9999;
+           ALTER TABLE zone_automations ALTER COLUMN max_daily_adjustments DROP NOT NULL;
+           ALTER TABLE zone_automations ALTER COLUMN max_daily_adjustments DROP DEFAULT;
          END IF;
        END $$""",
     # migra zonas antigas com x/y/w/h para geometry JSONB em percentual (viewBox 800x556)

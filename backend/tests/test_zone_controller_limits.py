@@ -100,4 +100,6 @@ def test_migration_max_daily_adjustments_eh_guardada_por_coluna_existente():
     source = Path("app/db/migrations.py").read_text()
     assert "column_name='max_daily_adjustments'" in source
     assert "UPDATE zone_automations" in source
+    assert "ALTER COLUMN max_daily_adjustments DROP NOT NULL" in source
+    assert "ALTER COLUMN max_daily_adjustments DROP DEFAULT" in source
     assert "IF EXISTS" in source
