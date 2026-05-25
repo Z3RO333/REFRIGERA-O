@@ -41,6 +41,10 @@ BLOCKED_STATUSES = {"SEM_LEITURA", "AGUARDANDO_LEITURA", "DESLIGADO", "COMPRESSO
 # Cooldown entre execuções na mesma zona (segundos)
 ZONE_COOLDOWN_SECONDS = 900  # 15 min
 
+# Proteção por janela curta — evita rajadas sem bloquear o dia inteiro
+DEVICE_WINDOW_SECONDS = 900      # janela de 15 min por device
+DEVICE_WINDOW_MAX_CMDS = 4       # máximo de 4 comandos por device por janela
+
 # Janela de verificação: verifica ações com 12-18 min de vida
 VERIFY_MIN_AGE_MINUTES = 12
 VERIFY_MAX_AGE_MINUTES = 18
@@ -465,16 +469,6 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
             return
         # Nota: o acquire_lock atômico acontece antes de executar (ver abaixo)
 
-        # Limite diário
-        today_count = await _daily_count(automation.store_id, zone.key, session)
-        if today_count >= automation.max_daily_adjustments:
-            await _log_blocked(
-                automation, zone, avg_temp,
-                f"Limite diário de {automation.max_daily_adjustments} ajustes atingido",
-                session,
-            )
-            return
-
         # Falhas consecutivas (≥3 → alerta manutenção)
         if await _consecutive_failures(automation.store_id, zone.key, session) >= 3:
             await _raise_zone_alert(automation, zone, avg_temp, session)
@@ -493,19 +487,27 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
             block_reason = None
 
             if automation.mode in ("auto", "semi"):
-                if not await redis_client.acquire_lock(cooldown_key, ttl=ZONE_COOLDOWN_SECONDS):
-                    return
-                ok = await _execute_power_on(power_device.device, power_params, session)
-                if ok:
-                    action_status = "pending_verification"
-                    logger.info(
-                        "Zone %s [%s]: ligando %s para resfriar zona (conf=%.0f%%)",
-                        zone.key, automation.mode, power_device.device.name, confidence * 100,
-                    )
-                else:
+                if not await _device_window_ok(power_device.device.id):
                     action_status = "blocked"
-                    block_reason = "Falha ao ligar aparelho pela Brise API"
-                    await redis_client.release_lock(cooldown_key)
+                    block_reason = (
+                        f"Limite de {DEVICE_WINDOW_MAX_CMDS} comandos em "
+                        f"{DEVICE_WINDOW_SECONDS // 60} min atingido para "
+                        f"{power_device.device.name}"
+                    )
+                elif not await redis_client.acquire_lock(cooldown_key, ttl=ZONE_COOLDOWN_SECONDS):
+                    return
+                else:
+                    ok = await _execute_power_on(power_device.device, power_params, session)
+                    if ok:
+                        action_status = "pending_verification"
+                        logger.info(
+                            "Zone %s [%s]: ligando %s para resfriar zona (conf=%.0f%%)",
+                            zone.key, automation.mode, power_device.device.name, confidence * 100,
+                        )
+                    else:
+                        action_status = "blocked"
+                        block_reason = "Falha ao ligar aparelho pela Brise API"
+                        await redis_client.release_lock(cooldown_key)
 
             action = ZoneAction(
                 store_id=automation.store_id,
@@ -585,6 +587,15 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
         block_reason = None
 
         if automation.mode in ("auto", "semi"):
+            if not await _device_window_ok(best_device.device.id):
+                await _log_blocked(
+                    automation, zone, avg_temp,
+                    f"Limite de {DEVICE_WINDOW_MAX_CMDS} comandos em "
+                    f"{DEVICE_WINDOW_SECONDS // 60} min atingido para "
+                    f"{best_device.device.name}",
+                    session,
+                )
+                return
             # acquire_lock é atômico (SET NX EX) — evita race entre múltiplos workers
             if not await redis_client.acquire_lock(cooldown_key, ttl=ZONE_COOLDOWN_SECONDS):
                 return  # outro worker chegou primeiro entre o exists() e agora
@@ -882,6 +893,8 @@ async def _execute_setpoint(
     return success
 
 
+# Mantido para métricas informacionais (daily_count no payload da API).
+# Não é mais usado como guard de limite — o limite diário foi removido.
 async def _daily_count(store_id: uuid.UUID, zone_key: str, session: AsyncSession) -> int:
     # Bug 16: usa meia-noite em horário de Manaus, não UTC
     from datetime import timezone
@@ -898,6 +911,22 @@ async def _daily_count(store_id: uuid.UUID, zone_key: str, session: AsyncSession
         )
     )
     return result.scalar() or 0
+
+
+async def _device_window_ok(device_id: uuid.UUID) -> bool:
+    """Retorna True se o device pode receber mais um comando na janela de 15 min.
+    Usa Redis INCR via pipeline atômico. Fail-open: se Redis indisponível, permite o comando."""
+    key = f"device:cmd_window:{device_id}"
+    try:
+        async with redis_client.client.pipeline(transaction=False) as pipe:
+            await pipe.incr(key)
+            await pipe.expire(key, DEVICE_WINDOW_SECONDS)
+            results = await pipe.execute()
+        count = results[0]
+        return count <= DEVICE_WINDOW_MAX_CMDS
+    except Exception as exc:
+        logger.warning("_device_window_ok: Redis indisponível, permitindo comando (%s)", exc)
+        return True
 
 
 async def _consecutive_failures(store_id: uuid.UUID, zone_key: str, session: AsyncSession) -> int:
