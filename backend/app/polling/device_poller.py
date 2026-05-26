@@ -52,6 +52,13 @@ async def poll_device(
                 poll_error = f"Erro inesperado: {err_str[:120]}"
             logger.warning("poll_device [%s/%s] falhou: %s", brise_id, device_id, poll_error)
 
+        # A chamada de rede para /parameters não pode segurar conexão do banco aberta.
+        remote_params = None
+        try:
+            remote_params = await brise_client.get_parameters(brise_id)
+        except Exception as exc:
+            logger.warning("get_parameters durante polling [%s/%s] falhou: %s", brise_id, device_id, exc)
+
         async with AsyncSessionLocal() as session:
             status_row = await session.get(DeviceStatusLatest, device_id)
             params_result = await session.execute(
@@ -60,12 +67,6 @@ async def poll_device(
             params_row = params_result.scalar_one_or_none()
 
             # A Brise é a fonte de verdade para setpoint atual. DeviceParameters é cache.
-            remote_params = None
-            try:
-                remote_params = await brise_client.get_parameters(brise_id)
-            except Exception as exc:
-                logger.warning("get_parameters durante polling [%s/%s] falhou: %s", brise_id, device_id, exc)
-
             if remote_params:
                 if params_row is None:
                     params_row = DeviceParameters(device_id=device_id)

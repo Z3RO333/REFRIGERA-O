@@ -47,7 +47,7 @@ class BriseClient:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=8),
-        retry=retry_if_exception_type((httpx.TimeoutException, httpx.ConnectError)),
+        retry=retry_if_exception_type(httpx.TransportError),
     )
     async def _request(self, method: str, path: str, **kwargs) -> dict | None:
         async with self._semaphore:
@@ -59,7 +59,7 @@ class BriseClient:
                     headers=headers,
                     **kwargs,
                 )
-            except (httpx.TimeoutException, httpx.ConnectError):
+            except httpx.TransportError:
                 raise  # tenacity vai capturar e fazer retry
             except httpx.HTTPError as exc:
                 logger.warning("Brise HTTP error em %s %s: %s", method, path, exc)
