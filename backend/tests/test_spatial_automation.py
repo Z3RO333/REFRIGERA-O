@@ -268,6 +268,96 @@ def test_select_power_on_falls_back_to_btu_without_hotspot():
     )
 
 
+def test_select_power_on_allows_desligado_with_slightly_stale_updated_at():
+    """DESLIGADO com updated_at entre 30-120 min ainda é elegível para power_on.
+
+    Aparelhos desligados não emitem temperatura — usar o mesmo threshold de 30 min
+    dos aparelhos ligados os descarta indevidamente. Threshold estendido (4x) permite
+    selecionar o FARMA 91 mesmo que o último poll tenha sido 45 min atrás.
+    """
+    from datetime import timedelta
+    from app.services.zone_controller import _select_power_on_candidate
+
+    hotspot = Hotspot(x=400, y=200, peak_temp=28.0, avg_hotspot_temp=27.0, has_coordinates=True)
+    row, params = _make_device_row("FARMA_91", x=405, y=205, btu=12000)
+    row.status.status_classification = "DESLIGADO"
+    row.status.state = False
+    params.mode_device = 0
+    # Simula updated_at 45 min atrás — passa no threshold estendido (120 min), falha no padrão (30 min)
+    row.status.updated_at = datetime.utcnow() - timedelta(minutes=45)
+
+    result = _select_power_on_candidate(
+        devices=[row],
+        params_map={row.device.id: params},
+        hotspot=hotspot,
+    )
+
+    assert result is not None, (
+        "FARMA_91 com updated_at 45 min atrás e status DESLIGADO deve ser elegível para power_on"
+    )
+    best_row, _ = result
+    assert best_row.device.name == "FARMA_91"
+
+
+def test_select_power_on_excludes_desligado_with_very_stale_updated_at():
+    """DESLIGADO com updated_at > 120 min é excluído — hub provavelmente offline."""
+    from datetime import timedelta
+    from app.services.zone_controller import _select_power_on_candidate
+
+    row, params = _make_device_row("FARMA_91_OFFLINE", x=405, y=205, btu=12000)
+    row.status.status_classification = "DESLIGADO"
+    row.status.state = False
+    params.mode_device = 0
+    # 150 min: além do threshold estendido de 4 × 30 = 120 min
+    row.status.updated_at = datetime.utcnow() - timedelta(minutes=150)
+
+    result = _select_power_on_candidate(
+        devices=[row],
+        params_map={row.device.id: params},
+        hotspot=None,
+    )
+
+    assert result is None, (
+        "FARMA_91 com updated_at 150 min atrás deve ser excluído — hub provavelmente inacessível"
+    )
+
+
+def test_select_power_on_desligado_inside_hotspot_beats_ligado_outside():
+    """Aparelho desligado dentro do hotspot tem prioridade sobre ligado fora.
+
+    Reproduz o bug FARMA 91: aparelho OFF dentro da área quente deve ser selecionado
+    para power_on antes de qualquer ajuste de setpoint em aparelhos ligados distantes.
+    """
+    from app.services.zone_controller import _select_power_on_candidate
+
+    hotspot = Hotspot(x=400, y=200, peak_temp=26.0, avg_hotspot_temp=25.5, has_coordinates=True)
+
+    # FARMA 91 — desligado, dentro da área quente (posição próxima ao hotspot)
+    farma_91, params_91 = _make_device_row("FARMA_91", x=410, y=205, btu=12000)
+    farma_91.status.status_classification = "DESLIGADO"
+    farma_91.status.state = False
+    params_91.mode_device = 0
+
+    # FARMA 88 — desligado, fora da área quente (posição distante)
+    farma_88, params_88 = _make_device_row("FARMA_88", x=100, y=450, btu=18000)
+    farma_88.status.status_classification = "DESLIGADO"
+    farma_88.status.state = False
+    params_88.mode_device = 0
+
+    result = _select_power_on_candidate(
+        devices=[farma_91, farma_88],
+        params_map={farma_91.device.id: params_91, farma_88.device.id: params_88},
+        hotspot=hotspot,
+    )
+
+    assert result is not None
+    best_row, _ = result
+    assert best_row.device.name == "FARMA_91", (
+        f"FARMA_91 (dentro do hotspot) deve ser preferido sobre FARMA_88 (fora); "
+        f"obteve {best_row.device.name}"
+    )
+
+
 def test_select_power_on_skips_device_without_communication():
     """Mesmo com mode_device=0, SEM_LEITURA não pode receber comando de power_on."""
     from app.services.zone_controller import _select_power_on_candidate

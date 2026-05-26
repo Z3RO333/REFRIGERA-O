@@ -1099,7 +1099,12 @@ def _local_hotspot_status(hotspot: Hotspot | None, zone: ZoneConfig) -> str | No
 
 
 def _device_command_communication_ok(row: _DeviceRow) -> bool:
-    """Valida se o aparelho tem telemetria recente o bastante para receber comando."""
+    """Valida se o aparelho tem telemetria recente o bastante para receber comando.
+
+    Aparelhos DESLIGADO não emitem leitura de temperatura entre polls; usam janela
+    4× maior para não serem descartados indevidamente do pool de power_on.
+    SEM_LEITURA / AGUARDANDO_LEITURA / COMPRESSOR_CYCLING → inelegíveis em qualquer caso.
+    """
     status = row.status.status_classification
     if status in {"SEM_LEITURA", "AGUARDANDO_LEITURA", "COMPRESSOR_CYCLING"}:
         return False
@@ -1107,7 +1112,13 @@ def _device_command_communication_ok(row: _DeviceRow) -> bool:
     updated_at = getattr(row.status, "updated_at", None)
     if not isinstance(updated_at, datetime):
         return False
-    return updated_at >= datetime.utcnow() - timedelta(minutes=settings.offline_threshold_minutes)
+
+    is_confirmed_off = status == "DESLIGADO" or row.status.state is False
+    threshold_minutes = (
+        settings.offline_threshold_minutes * 4 if is_confirmed_off
+        else settings.offline_threshold_minutes
+    )
+    return updated_at >= datetime.utcnow() - timedelta(minutes=threshold_minutes)
 
 
 def _hotspot_area_key(hotspot: Hotspot | None) -> str:
@@ -1281,7 +1292,16 @@ def _select_power_on_candidate(
     for row in devices:
         if row.device.dnd or row.device.source_url:
             continue
-        if not _device_command_communication_ok(row):
+        comm_ok = _device_command_communication_ok(row)
+        if not comm_ok:
+            logger.debug(
+                "power_on_candidate: %s excluído — communication_ok=False "
+                "(status=%s, updated_at=%s, state=%s)",
+                row.device.name,
+                row.status.status_classification,
+                getattr(row.status, "updated_at", None),
+                row.status.state,
+            )
             continue
         params = params_map.get(row.device.id)
         is_off = (
@@ -1293,6 +1313,12 @@ def _select_power_on_candidate(
             candidates.append(row)
 
     if not candidates:
+        logger.debug(
+            "power_on_candidate: nenhum candidato OFF disponível "
+            "(hotspot=%s)",
+            f"({hotspot.x:.0f},{hotspot.y:.0f}) peak={hotspot.peak_temp:.1f}°C"
+            if hotspot and hotspot.has_coordinates else hotspot,
+        )
         return None
 
     candidates.sort(
@@ -1309,6 +1335,23 @@ def _select_power_on_candidate(
         reverse=True,
     )
     best = candidates[0]
+    best_prox = proximity_score(
+        best.device.position_x,
+        best.device.position_y,
+        hotspot=hotspot,
+        influence_radius_m=float(best.device.influence_radius_m or 8),
+    )
+    logger.debug(
+        "power_on_candidate: %s selecionado (proximity=%.3f, btu=%s, pos=(%s,%s), hotspot=%s)",
+        best.device.name,
+        best_prox,
+        best.device.btu,
+        best.device.position_x,
+        best.device.position_y,
+        f"({hotspot.x:.0f},{hotspot.y:.0f}) peak={hotspot.peak_temp:.1f}°C"
+        if hotspot and hotspot.has_coordinates else hotspot,
+    )
+
     # Se não há params, cria um objeto temporário com defaults seguros para ligar
     params = params_map.get(best.device.id)
     if params is None:
