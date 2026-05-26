@@ -1,6 +1,6 @@
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 import asyncio
 from sqlalchemy import func, select, update
 
@@ -21,6 +21,70 @@ from app.rules.classifier import (
     STATUS_NO_READING, STATUS_OFF, CONSECUTIVE_READINGS_REQUIRED,
 )
 from app.rules.alert_generator import generate_alert_if_needed
+
+TRANSIENT_RESTORE_MAX_AGE_HOURS = 24
+
+
+def _latest_status_needs_restore(status_row: DeviceStatusLatest | None) -> bool:
+    if status_row is None:
+        return True
+    return status_row.status_classification == STATUS_NO_READING or status_row.temperature is None
+
+
+def _apply_last_good_reading_to_status(
+    status_row: DeviceStatusLatest,
+    last_good: DeviceReading,
+    poll_error: str,
+    now: datetime,
+) -> None:
+    status_row.state = last_good.state
+    status_row.temperature = last_good.temperature
+    status_row.humidity = last_good.humidity
+    status_row.consumption = last_good.consumption
+    status_row.consumption_estimated = last_good.consumption_estimated
+    status_row.status_classification = last_good.status_classification
+    status_row.delta_temp = last_good.delta_temp
+    status_row.efficiency_score = last_good.efficiency_score
+    status_row.consecutive_readings_count = max(status_row.consecutive_readings_count or 0, 1)
+    status_row.accumulated_on_minutes = last_good.accumulated_on_minutes
+    status_row.accumulated_off_minutes = last_good.accumulated_off_minutes
+    status_row.updated_at = last_good.time
+    status_row.last_success_at = status_row.last_success_at or last_good.time
+    status_row.last_error = poll_error
+    status_row.last_error_at = now
+    status_row.consecutive_failures = (status_row.consecutive_failures or 0) + 1
+
+
+async def _restore_latest_status_from_history(
+    session,
+    device_id: uuid.UUID,
+    status_row: DeviceStatusLatest | None,
+    poll_error: str,
+    now: datetime,
+) -> tuple[DeviceStatusLatest | None, DeviceReading | None]:
+    cutoff = now - timedelta(hours=TRANSIENT_RESTORE_MAX_AGE_HOURS)
+    last_good_result = await session.execute(
+        select(DeviceReading)
+        .where(
+            DeviceReading.device_id == device_id,
+            DeviceReading.temperature.is_not(None),
+            DeviceReading.status_classification.is_not(None),
+            DeviceReading.status_classification != STATUS_NO_READING,
+            DeviceReading.time >= cutoff,
+        )
+        .order_by(DeviceReading.time.desc())
+        .limit(1)
+    )
+    last_good = last_good_result.scalar_one_or_none()
+    if last_good is None:
+        return status_row, None
+
+    if status_row is None:
+        status_row = DeviceStatusLatest(device_id=device_id)
+        session.add(status_row)
+
+    _apply_last_good_reading_to_status(status_row, last_good, poll_error, now)
+    return status_row, last_good
 
 async def poll_device(
     device_id: uuid.UUID,
@@ -132,11 +196,50 @@ async def poll_device(
                 else:
                     consecutive_count = 1
             else:
-                if transient_api_error and status_row is not None:
-                    status_row.last_error = poll_error
-                    status_row.last_error_at = datetime.utcnow()
-                    status_row.consecutive_failures = (status_row.consecutive_failures or 0) + 1
-                    await session.commit()
+                if transient_api_error:
+                    now = datetime.utcnow()
+                    restored_reading = None
+                    if _latest_status_needs_restore(status_row):
+                        status_row, restored_reading = await _restore_latest_status_from_history(
+                            session,
+                            device_id,
+                            status_row,
+                            poll_error,
+                            now,
+                        )
+                    elif status_row is not None:
+                        status_row.last_error = poll_error
+                        status_row.last_error_at = now
+                        status_row.consecutive_failures = (status_row.consecutive_failures or 0) + 1
+
+                    if status_row is not None:
+                        await session.commit()
+                        if restored_reading is not None:
+                            logger.warning(
+                                "poll_device [%s/%s]: Brise instável; restaurando latest com última leitura boa de %s",
+                                brise_id,
+                                device_id,
+                                restored_reading.time.isoformat(),
+                            )
+                            cache_data = {
+                                "device_id": str(device_id),
+                                "brise_id": brise_id,
+                                "status": status_row.status_classification,
+                                "temperature": status_row.temperature,
+                                "humidity": status_row.humidity,
+                                "delta_temp": status_row.delta_temp,
+                                "efficiency_score": status_row.efficiency_score,
+                                "state": status_row.state,
+                                "setpoint_cool": setpoint_cool,
+                                "current_setpoint": setpoint_cool,
+                                "setpoint_synced_at": params_row.synced_at.isoformat() if params_row and params_row.synced_at else None,
+                                "setpoint_source": "brise_parameters_cache" if params_row else "default",
+                                "updated_at": status_row.updated_at.isoformat() if status_row.updated_at else now.isoformat(),
+                                "telemetry_stale": True,
+                                "last_error": poll_error,
+                            }
+                            await set_device_status(device_id, cache_data)
+                            await redis_client.publish("device.reading.new", cache_data)
                     return
 
                 if (
