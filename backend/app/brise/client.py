@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import RetryError, retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from app.config import settings
 from app.brise.token_manager import token_manager
 from app.brise.schemas import BriseVariables, BriseParameters, BriseConfig, BriseSchedule
@@ -93,6 +93,8 @@ class BriseClient:
         try:
             data = await self._request("GET", f"/device/{device_id}/variables")
             return BriseVariables(**data) if data else None
+        except RetryError:
+            raise
         except BriseAPIError as exc:
             logger.warning("get_variables(%s) falhou: %s", device_id, exc)
             return None

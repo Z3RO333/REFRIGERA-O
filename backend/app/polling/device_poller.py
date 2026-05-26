@@ -44,6 +44,8 @@ async def poll_device(
                 poll_error = f"Timeout na API Brise ({type(exc).__name__})"
             elif "Connect" in type(exc).__name__ or "connection" in err_str.lower():
                 poll_error = f"Falha de conexão com a API Brise"
+            elif "RetryError" in type(exc).__name__ or "RetryError" in err_str:
+                poll_error = f"Falha transitória na API Brise após retentativas ({type(exc).__name__})"
             elif "401" in err_str:
                 poll_error = "Erro de autenticação na API Brise (401)"
             elif "403" in err_str:
@@ -98,6 +100,14 @@ async def poll_device(
             consecutive_count = (status_row.consecutive_readings_count or 0) if status_row else 0
             current_status = status_row.status_classification if status_row else None
             prev_state = status_row.state if status_row else None
+            transient_api_error = bool(
+                poll_error
+                and (
+                    "transitória" in poll_error
+                    or "Timeout" in poll_error
+                    or "conexão" in poll_error
+                )
+            )
 
             if variables:
                 prev_status = current_status
@@ -122,6 +132,13 @@ async def poll_device(
                 else:
                     consecutive_count = 1
             else:
+                if transient_api_error and status_row is not None:
+                    status_row.last_error = poll_error
+                    status_row.last_error_at = datetime.utcnow()
+                    status_row.consecutive_failures = (status_row.consecutive_failures or 0) + 1
+                    await session.commit()
+                    return
+
                 if (
                     last_reading_time
                     and (datetime.utcnow() - last_reading_time).total_seconds()
