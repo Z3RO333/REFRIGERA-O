@@ -17,6 +17,7 @@ from app.db.migrations import run_migrations, seed_external_sensors, seed_floor_
 from app.cache.redis_client import redis_client
 from app.config import settings
 from app.polling.scheduler import start_scheduler, stop_scheduler
+from app.polling.device_poller import poll_all_devices
 from app.brise.client import brise_client
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,7 @@ async def lifespan(app: FastAPI):
     await seed_floor_plans()
     await start_scheduler()
     await start_redis_listener()
+    asyncio.create_task(poll_all_devices())   # poll imediato sem esperar 5 min
     yield
     await stop_scheduler()
     await brise_client.aclose()
