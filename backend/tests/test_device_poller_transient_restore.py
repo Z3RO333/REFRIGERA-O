@@ -7,7 +7,7 @@ from app.polling.device_poller import (
     _apply_last_good_reading_to_status,
     _latest_status_needs_restore,
 )
-from app.rules.classifier import STATUS_NO_READING
+from app.rules.classifier import STATUS_NO_READING, STATUS_STALE_READING
 
 
 def test_latest_status_needs_restore_when_latest_was_wiped_to_no_reading():
@@ -53,7 +53,7 @@ def test_transient_brise_error_restores_latest_from_last_good_reading():
         now,
     )
 
-    assert status.status_classification == "NORMAL"
+    assert status.status_classification == STATUS_STALE_READING
     assert status.temperature == 23.7
     assert status.state is True
     assert status.updated_at == old_time

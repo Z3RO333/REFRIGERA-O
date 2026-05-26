@@ -6,7 +6,7 @@ import { storesApi } from '../api/client'
 import DeviceCard from '../components/DeviceCard'
 import StatusBadge from '../components/StatusBadge'
 
-const STATUS_OPTIONS = ['Todos', 'NORMAL', 'ATENÇÃO', 'CRÍTICO', 'BAIXA_EFICIÊNCIA', 'SEM_LEITURA', 'DESLIGADO']
+const STATUS_OPTIONS = ['Todos', 'NORMAL', 'ATENÇÃO', 'CRÍTICO', 'BAIXA_EFICIÊNCIA', 'SEM_LEITURA', 'LEITURA_STALE', 'DESLIGADO']
 
 export default function StoreView() {
   const { storeId } = useParams<{ storeId: string }>()
@@ -42,7 +42,7 @@ export default function StoreView() {
     <div className="space-y-6">
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div className="flex items-center gap-3 flex-wrap">
-          {['CRÍTICO', 'ATENÇÃO', 'BAIXA_EFICIÊNCIA', 'SEM_LEITURA'].filter(s => counts[s]).map(s => (
+          {['CRÍTICO', 'ATENÇÃO', 'BAIXA_EFICIÊNCIA', 'SEM_LEITURA', 'LEITURA_STALE'].filter(s => counts[s]).map(s => (
             <StatusBadge key={s} status={s} />
           ))}
         </div>

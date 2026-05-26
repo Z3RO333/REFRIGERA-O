@@ -2,7 +2,7 @@
 Análise de anomalias de refrigeração via Ollama.
 
 Estratégia de modelos:
-- SEM_LEITURA / DESLIGADO  → regra determinística (instantâneo)
+- SEM_LEITURA / LEITURA_STALE / DESLIGADO  → regra determinística (instantâneo)
 - ATENÇÃO / CRÍTICO / BAIXA_EFICIÊNCIA → Nemotron-9B (análise rica)
   └─ fallback: llama3.2:3b → fallback: regras determinísticas
 """
@@ -124,7 +124,7 @@ class DeviceAnalysis(BaseModel):
             return 48
 
 
-# ── Análise determinística para SEM_LEITURA / DESLIGADO ──────────────────────
+# ── Análise determinística para SEM_LEITURA / LEITURA_STALE / DESLIGADO ─────
 
 def analyze_no_reading(device: dict) -> DeviceAnalysis:
     status = device.get("status", "SEM_LEITURA")
@@ -161,8 +161,8 @@ def analyze_no_reading(device: dict) -> DeviceAnalysis:
 # ── Pipeline principal ────────────────────────────────────────────────────────
 
 async def analyze_anomalies(devices_data: list[dict]) -> list[DeviceAnalysis]:
-    rule_based = [d for d in devices_data if d["status"] in ("SEM_LEITURA", "DESLIGADO")]
-    needs_llm  = [d for d in devices_data if d["status"] not in ("SEM_LEITURA", "DESLIGADO")]
+    rule_based = [d for d in devices_data if d["status"] in ("SEM_LEITURA", "LEITURA_STALE", "DESLIGADO")]
+    needs_llm  = [d for d in devices_data if d["status"] not in ("SEM_LEITURA", "LEITURA_STALE", "DESLIGADO")]
 
     results: list[DeviceAnalysis] = [analyze_no_reading(d) for d in rule_based]
 
@@ -556,7 +556,7 @@ def _build_zone_prompt(twin: dict) -> str:
 
     ac_devices = [d for d in devices if not d.get("is_external_sensor")]
     sensors = [d for d in devices if d.get("is_external_sensor")]
-    active = [d for d in ac_devices if d.get("state") is True or (d.get("state") is None and d.get("status") not in ("DESLIGADO", "SEM_LEITURA", "UNKNOWN", None))]
+    active = [d for d in ac_devices if d.get("state") is True or (d.get("state") is None and d.get("status") not in ("DESLIGADO", "SEM_LEITURA", "LEITURA_STALE", "UNKNOWN", None))]
     off_devices = [d for d in ac_devices if d.get("state") is False or d.get("status") == "DESLIGADO"]
     blocked_devices = [d for d in ac_devices if d.get("blocked")]
     no_comm_devices = [d for d in ac_devices if not d.get("communication_ok", True)]
@@ -572,7 +572,7 @@ def _build_zone_prompt(twin: dict) -> str:
         and d.get("setpoint_cool") > d.get("setpoint_min", ideal_min if ideal_min is not None else 18)
     ]
     stale_devices = [d for d in devices if d.get("is_stale")]
-    sensors_no_reading = [d for d in sensors if d.get("status") in ("SEM_LEITURA", "UNKNOWN") or d.get("temperature") is None]
+    sensors_no_reading = [d for d in sensors if d.get("status") in ("SEM_LEITURA", "LEITURA_STALE", "UNKNOWN") or d.get("temperature") is None]
     anomalous = [d for d in active if d.get("status") not in ("NORMAL",)]
 
     lines = [
@@ -671,7 +671,7 @@ def _fallback_zone_analysis(twin: dict) -> ZoneAnalysis:
     trend     = twin.get("trend_c_per_hour") or 0.0
     ideal_max = twin.get("ideal_max", 24)
     devices   = twin.get("contributing_devices", [])
-    anomalous = [d for d in devices if d.get("status") not in ("NORMAL", "DESLIGADO", "SEM_LEITURA")]
+    anomalous = [d for d in devices if d.get("status") not in ("NORMAL", "DESLIGADO", "SEM_LEITURA", "LEITURA_STALE")]
 
     if risk == "CRITICAL" or status == "CRITICAL":
         severity, urgency = "CRITICAL", 0

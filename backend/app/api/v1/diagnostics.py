@@ -49,9 +49,9 @@ def _device_diag(device: Device, status: DeviceStatusLatest | None) -> dict:
     if status.consecutive_failures and status.consecutive_failures >= 3:
         health = "FALHA_API"
         reason = status.last_error or "Falhas consecutivas na API Brise"
-    elif status.status_classification == "SEM_LEITURA":
+    elif status.status_classification in {"SEM_LEITURA", "LEITURA_STALE"}:
         if status.last_error:
-            health = "FALHA_API"
+            health = "DADO_ATRASADO" if status.status_classification == "LEITURA_STALE" else "FALHA_API"
             reason = status.last_error
         elif minutes_since and minutes_since > STALE_MINUTES:
             health = "OFFLINE"

@@ -18,7 +18,7 @@ from app.cache.device_cache import (
 from app.cache.redis_client import redis_client
 from app.rules.classifier import (
     NO_READING_THRESHOLD_MINUTES, classify_status,
-    STATUS_NO_READING, STATUS_OFF, CONSECUTIVE_READINGS_REQUIRED,
+    STATUS_NO_READING, STATUS_STALE_READING, STATUS_OFF, CONSECUTIVE_READINGS_REQUIRED,
 )
 from app.rules.alert_generator import generate_alert_if_needed
 
@@ -42,7 +42,7 @@ def _apply_last_good_reading_to_status(
     status_row.humidity = last_good.humidity
     status_row.consumption = last_good.consumption
     status_row.consumption_estimated = last_good.consumption_estimated
-    status_row.status_classification = last_good.status_classification
+    status_row.status_classification = STATUS_STALE_READING
     status_row.delta_temp = last_good.delta_temp
     status_row.efficiency_score = last_good.efficiency_score
     status_row.consecutive_readings_count = max(status_row.consecutive_readings_count or 0, 1)
@@ -70,6 +70,7 @@ async def _restore_latest_status_from_history(
             DeviceReading.temperature.is_not(None),
             DeviceReading.status_classification.is_not(None),
             DeviceReading.status_classification != STATUS_NO_READING,
+            DeviceReading.status_classification != STATUS_STALE_READING,
             DeviceReading.time >= cutoff,
         )
         .order_by(DeviceReading.time.desc())

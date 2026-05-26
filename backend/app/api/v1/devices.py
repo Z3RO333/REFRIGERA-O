@@ -54,7 +54,7 @@ def _validate_control_action(
 
     communication_bad = status is None
     if status:
-        if status.status_classification == "SEM_LEITURA":
+        if status.status_classification in {"SEM_LEITURA", "LEITURA_STALE"}:
             communication_bad = True
         elif status.updated_at and status.updated_at < datetime.utcnow() - timedelta(minutes=settings.offline_threshold_minutes):
             communication_bad = True
@@ -266,7 +266,7 @@ async def control_device(
         or not device.active
         or status is None
         or bool(status and (
-            status.status_classification == "SEM_LEITURA"
+            status.status_classification in {"SEM_LEITURA", "LEITURA_STALE"}
             or (
                 status.updated_at
                 and status.updated_at < datetime.utcnow() - timedelta(minutes=settings.offline_threshold_minutes)

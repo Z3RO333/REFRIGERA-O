@@ -134,7 +134,7 @@ function StoreHealthCard({ store, onOpen, onMap }: { store: Store; onOpen: () =>
   })
 
   const total = data?.total_devices ?? store.device_count ?? 0
-  const offline = (data?.devices_no_reading ?? 0) + (data?.devices_off ?? 0)
+  const offline = (data?.devices_no_reading ?? 0) + (data?.devices_stale ?? 0) + (data?.devices_off ?? 0)
   const critical = data?.devices_critical ?? 0
   const warning = (data?.devices_warning ?? 0) + (data?.devices_low_efficiency ?? 0)
   const statusKey: StoreStatusKey =

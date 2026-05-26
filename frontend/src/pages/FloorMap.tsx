@@ -333,7 +333,7 @@ export default function FloorMap() {
       </div>
 
       <div className="flex items-center gap-4 text-xs text-gray-500">
-        {['NORMAL', 'ATENÇÃO', 'CRÍTICO', 'BAIXA_EFICIÊNCIA', 'SEM_LEITURA', 'DESLIGADO'].map(s => (
+        {['NORMAL', 'ATENÇÃO', 'CRÍTICO', 'BAIXA_EFICIÊNCIA', 'SEM_LEITURA', 'LEITURA_STALE', 'DESLIGADO'].map(s => (
           <StatusBadge key={s} status={s} size="sm" />
         ))}
       </div>

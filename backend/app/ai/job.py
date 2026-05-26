@@ -25,7 +25,7 @@ EMAIL_COOLDOWN_SECONDS = 3600  # 1 hora
 AI_ANALYSIS_LOCK_SECONDS = 900  # evita análises duplicadas por trigger/polling concorrente
 
 # Statuses que merecem análise
-ANOMALOUS_STATUSES = {"ATENÇÃO", "CRÍTICO", "BAIXA_EFICIÊNCIA", "SEM_LEITURA", "DESLIGADO"}
+ANOMALOUS_STATUSES = {"ATENÇÃO", "CRÍTICO", "BAIXA_EFICIÊNCIA", "SEM_LEITURA", "LEITURA_STALE", "DESLIGADO"}
 
 
 async def run_ai_analysis() -> None:
@@ -240,7 +240,7 @@ async def _fetch_anomalous_devices() -> tuple[list[dict], dict[str, dict]]:
         if row.updated_at:
             reading_age_minutes = round((datetime.utcnow() - row.updated_at).total_seconds() / 60, 1)
         is_external_sensor = row.source_url is not None
-        communication_ok = bool(row.updated_at) and row.status_classification not in {"SEM_LEITURA"}
+        communication_ok = bool(row.updated_at) and row.status_classification not in {"SEM_LEITURA", "LEITURA_STALE"}
         if reading_age_minutes is not None and reading_age_minutes > 30:
             communication_ok = False
 

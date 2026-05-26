@@ -299,7 +299,7 @@ async def compute_zone_twin(
         if is_stale:
             readings_fresh = False
         controllable = not is_ext and not device.dnd
-        communication_ok = status.status_classification not in {"SEM_LEITURA"} and not is_stale
+        communication_ok = status.status_classification not in {"SEM_LEITURA", "LEITURA_STALE"} and not is_stale
         params = params_map.get(device.id)
 
         contributing.append({

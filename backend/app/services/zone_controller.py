@@ -41,7 +41,7 @@ from app.services.thermal_spatial import DevicePoint, Hotspot, detect_hotspot, p
 logger = logging.getLogger(__name__)
 
 # Statuses que impedem comandos
-BLOCKED_STATUSES = {"SEM_LEITURA", "AGUARDANDO_LEITURA", "DESLIGADO", "COMPRESSOR_CYCLING"}
+BLOCKED_STATUSES = {"SEM_LEITURA", "LEITURA_STALE", "AGUARDANDO_LEITURA", "DESLIGADO", "COMPRESSOR_CYCLING"}
 
 # Cooldown entre execuções na mesma zona (segundos)
 ZONE_COOLDOWN_SECONDS = 900  # 15 min
@@ -417,7 +417,7 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
             n_total = len(ac_devices)
             n_off = sum(1 for d in ac_devices if d.status.status_classification == "DESLIGADO")
             n_waiting = sum(1 for d in ac_devices if d.status.status_classification == "AGUARDANDO_LEITURA")
-            n_no_comm = sum(1 for d in ac_devices if d.status.status_classification == "SEM_LEITURA")
+            n_no_comm = sum(1 for d in ac_devices if d.status.status_classification in {"SEM_LEITURA", "LEITURA_STALE"})
             n_cycling = sum(1 for d in ac_devices if d.status.status_classification == "COMPRESSOR_CYCLING")
 
             if n_total == 0:
@@ -1103,10 +1103,10 @@ def _device_command_communication_ok(row: _DeviceRow) -> bool:
 
     Aparelhos DESLIGADO não emitem leitura de temperatura entre polls; usam janela
     4× maior para não serem descartados indevidamente do pool de power_on.
-    SEM_LEITURA / AGUARDANDO_LEITURA / COMPRESSOR_CYCLING → inelegíveis em qualquer caso.
+    SEM_LEITURA / LEITURA_STALE / AGUARDANDO_LEITURA / COMPRESSOR_CYCLING → inelegíveis em qualquer caso.
     """
     status = row.status.status_classification
-    if status in {"SEM_LEITURA", "AGUARDANDO_LEITURA", "COMPRESSOR_CYCLING"}:
+    if status in {"SEM_LEITURA", "LEITURA_STALE", "AGUARDANDO_LEITURA", "COMPRESSOR_CYCLING"}:
         return False
 
     updated_at = getattr(row.status, "updated_at", None)

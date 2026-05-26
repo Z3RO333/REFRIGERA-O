@@ -12,6 +12,7 @@ export const STATUS_CONFIG: Record<DeviceStatus, { color: string; bg: string; bo
   CRÍTICO: { color: '#EF4444', bg: 'bg-red-500/10', border: 'border-red-500/30', label: 'Crítico', pulse: true },
   BAIXA_EFICIÊNCIA: { color: '#F97316', bg: 'bg-orange-500/10', border: 'border-orange-500/30', label: 'Baixa Eficiência', pulse: false },
   SEM_LEITURA: { color: '#6B7280', bg: 'bg-gray-500/10', border: 'border-gray-500/30', label: 'Sem Leitura', pulse: false },
+  LEITURA_STALE: { color: '#94A3B8', bg: 'bg-slate-500/10', border: 'border-slate-500/30', label: 'Leitura Defasada', pulse: false },
   AGUARDANDO_LEITURA: { color: '#60A5FA', bg: 'bg-blue-400/10', border: 'border-blue-400/30', label: 'Ligando…', pulse: true },
   DESLIGADO: { color: '#3B82F6', bg: 'bg-blue-500/10', border: 'border-blue-500/30', label: 'Desligado', pulse: false },
   COMPRESSOR_CYCLING: { color: '#A855F7', bg: 'bg-purple-500/10', border: 'border-purple-500/30', label: 'Compres. Ciclando', pulse: true },

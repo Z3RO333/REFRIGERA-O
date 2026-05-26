@@ -15,7 +15,7 @@ export default function DeviceMarker({ device, onClick, scale = 1, showLabel, is
   const size = 22 * scale
   const isCritical = device.status === 'CRÍTICO'
   const isOff = device.status === 'DESLIGADO'
-  const noReading = device.status === 'SEM_LEITURA'
+  const noReading = device.status === 'SEM_LEITURA' || device.status === 'LEITURA_STALE'
   const isSensor = Boolean(device.is_external_sensor)
   const label = isSensor ? device.name : (device.brise_id || device.name)
 

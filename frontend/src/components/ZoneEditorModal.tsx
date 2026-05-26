@@ -92,7 +92,7 @@ export default function ZoneEditorModal({ storeId, editZone, onClose }: Props) {
   const STATUS_COLOR: Record<string, string> = {
     NORMAL: 'text-green-500', ATENÇÃO: 'text-yellow-500',
     CRÍTICO: 'text-red-500', BAIXA_EFICIÊNCIA: 'text-orange-400',
-    SEM_LEITURA: 'text-gray-400', DESLIGADO: 'text-gray-300',
+    SEM_LEITURA: 'text-gray-400', LEITURA_STALE: 'text-slate-400', DESLIGADO: 'text-gray-300',
   }
 
   return (

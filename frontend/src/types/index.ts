@@ -1,4 +1,4 @@
-export type DeviceStatus = 'NORMAL' | 'ATENÇÃO' | 'CRÍTICO' | 'BAIXA_EFICIÊNCIA' | 'SEM_LEITURA' | 'AGUARDANDO_LEITURA' | 'DESLIGADO' | 'COMPRESSOR_CYCLING'
+export type DeviceStatus = 'NORMAL' | 'ATENÇÃO' | 'CRÍTICO' | 'BAIXA_EFICIÊNCIA' | 'SEM_LEITURA' | 'LEITURA_STALE' | 'AGUARDANDO_LEITURA' | 'DESLIGADO' | 'COMPRESSOR_CYCLING'
 export type AlertSeverity = 'P1' | 'P2' | 'P3' | 'P4'
 export type AlertStatus = 'OPEN' | 'ACK' | 'RESOLVED'
 export type DeviceControlAction = 'power_on' | 'power_off' | 'temperature_up' | 'temperature_down'
@@ -92,6 +92,7 @@ export interface KPISummary {
   devices_warning: number
   devices_critical: number
   devices_no_reading: number
+  devices_stale: number
   devices_low_efficiency: number
   devices_off: number
   devices_online: number

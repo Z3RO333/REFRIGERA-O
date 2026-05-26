@@ -6,7 +6,7 @@ import DeviceCard from '../components/DeviceCard'
 import { cn } from '../lib/utils'
 import type { Device, DeviceStatus, Store } from '../types'
 
-const STATUS_OPTIONS: Array<'TODOS' | DeviceStatus> = ['TODOS', 'NORMAL', 'ATENÇÃO', 'CRÍTICO', 'BAIXA_EFICIÊNCIA', 'SEM_LEITURA', 'DESLIGADO']
+const STATUS_OPTIONS: Array<'TODOS' | DeviceStatus> = ['TODOS', 'NORMAL', 'ATENÇÃO', 'CRÍTICO', 'BAIXA_EFICIÊNCIA', 'SEM_LEITURA', 'LEITURA_STALE', 'DESLIGADO']
 
 export default function EquipmentOverview() {
   const [query, setQuery] = useState('')

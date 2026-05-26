@@ -13,6 +13,7 @@ export default function StatusDonut({ kpis }: Props) {
     { name: 'Crítico', value: kpis.devices_critical, color: STATUS_CONFIG.CRÍTICO.color },
     { name: 'Baixa Efic.', value: kpis.devices_low_efficiency, color: STATUS_CONFIG.BAIXA_EFICIÊNCIA.color },
     { name: 'Sem Leitura', value: kpis.devices_no_reading, color: STATUS_CONFIG.SEM_LEITURA.color },
+    { name: 'Defasada', value: kpis.devices_stale ?? 0, color: STATUS_CONFIG.LEITURA_STALE.color },
     { name: 'Desligado', value: kpis.devices_off, color: STATUS_CONFIG.DESLIGADO.color },
   ].filter(d => d.value > 0)
 
