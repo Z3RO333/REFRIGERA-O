@@ -421,15 +421,23 @@ async def poll_all_devices():
         )
         rows = result.all()
 
+    from app.config import settings as _settings
+    semaphore = asyncio.Semaphore(max(1, _settings.max_concurrent_polls))
+
+    async def _poll_with_sem(device_id, brise_id, is_critical, zone_min, zone_max):
+        async with semaphore:
+            return await poll_device(device_id, brise_id, is_critical,
+                                     zone_ideal_min=zone_min, zone_ideal_max=zone_max)
+
     tasks = []
     for device, sector_name in rows:
         zone_range = device_zone_range.get(device.id)
-        tasks.append(poll_device(
+        tasks.append(_poll_with_sem(
             device.id,
             device.brise_device_id,
             device.is_critical_environment,
-            zone_ideal_min=zone_range[0] if zone_range else None,
-            zone_ideal_max=zone_range[1] if zone_range else None,
+            zone_range[0] if zone_range else None,
+            zone_range[1] if zone_range else None,
         ))
     devices = [row[0] for row in rows]
     if tasks:

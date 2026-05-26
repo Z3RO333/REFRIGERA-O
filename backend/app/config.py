@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     poll_variables_interval: int = 300
     poll_parameters_interval: int = 1800
     poll_configs_interval: int = 21600
-    max_concurrent_polls: int = 3
+    max_concurrent_polls: int = 15
     no_reading_threshold_minutes: int = 15
     offline_threshold_minutes: int = 30
     alert_cooldown_hours: int = 4
