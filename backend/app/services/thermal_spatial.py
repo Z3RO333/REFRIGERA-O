@@ -14,6 +14,10 @@ HOTSPOT_VARIANCE_THRESHOLD = 1.5
 # Devices com temperatura >= t_min + range * HOTSPOT_PERCENTILE são "quentes"
 HOTSPOT_PERCENTILE = 0.65
 
+# Distância máxima para considerar dois pontos quentes como o mesmo bolsão.
+# Evita que dois cantos quentes sejam fundidos em um centroide artificial no meio.
+HOTSPOT_CLUSTER_MIN_RADIUS_PX = 90.0
+
 
 @dataclass
 class DevicePoint:
@@ -64,11 +68,13 @@ def detect_hotspot(devices: list[DevicePoint]) -> Hotspot | None:
     if not hot_devices:
         return None
 
-    peak_temp = max(d.temperature for d in hot_devices)
-    avg_hotspot = sum(d.temperature for d in hot_devices) / len(hot_devices)
-    names = [d.device_name for d in hot_devices]
+    selected_hot_devices = _select_hotspot_cluster(hot_devices)
 
-    with_pos = [d for d in hot_devices if d.pos_x is not None and d.pos_y is not None]
+    peak_temp = max(d.temperature for d in selected_hot_devices)
+    avg_hotspot = sum(d.temperature for d in selected_hot_devices) / len(selected_hot_devices)
+    names = [d.device_name for d in selected_hot_devices]
+
+    with_pos = [d for d in selected_hot_devices if d.pos_x is not None and d.pos_y is not None]
     if not with_pos:
         return Hotspot(
             x=0.0, y=0.0,
@@ -90,6 +96,53 @@ def detect_hotspot(devices: list[DevicePoint]) -> Hotspot | None:
         contributing_names=names,
         has_coordinates=True,
     )
+
+
+def _distance(a: DevicePoint, b: DevicePoint) -> float | None:
+    if a.pos_x is None or a.pos_y is None or b.pos_x is None or b.pos_y is None:
+        return None
+    return math.sqrt((a.pos_x - b.pos_x) ** 2 + (a.pos_y - b.pos_y) ** 2)
+
+
+def _cluster_radius(device: DevicePoint) -> float:
+    return max(float(device.influence_radius_m or 8.0) * 14.0, HOTSPOT_CLUSTER_MIN_RADIUS_PX)
+
+
+def _select_hotspot_cluster(hot_devices: list[DevicePoint]) -> list[DevicePoint]:
+    """Escolhe o bolsão quente mais relevante.
+
+    Antes o hotspot usava o centroide de todos os pontos quentes. Em lojas com
+    dois cantos quentes, isso criava um ponto médio falso e podia selecionar um
+    AC distante do canto realmente mais quente.
+    """
+    positioned = [d for d in hot_devices if d.pos_x is not None and d.pos_y is not None]
+    if len(positioned) <= 1:
+        return hot_devices
+
+    clusters: list[list[DevicePoint]] = []
+    remaining = positioned[:]
+    while remaining:
+        seed = remaining.pop(0)
+        cluster = [seed]
+        changed = True
+        while changed:
+            changed = False
+            for candidate in remaining[:]:
+                if any(
+                    (dist := _distance(candidate, member)) is not None
+                    and dist <= max(_cluster_radius(candidate), _cluster_radius(member))
+                    for member in cluster
+                ):
+                    cluster.append(candidate)
+                    remaining.remove(candidate)
+                    changed = True
+        clusters.append(cluster)
+
+    def rank(cluster: list[DevicePoint]) -> tuple[float, float, int]:
+        temps = [float(d.temperature or 0.0) for d in cluster]
+        return (max(temps), sum(temps) / len(temps), len(cluster))
+
+    return max(clusters, key=rank)
 
 
 def proximity_score(

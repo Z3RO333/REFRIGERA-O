@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.config import settings
 from app.db.session import get_db
 from app.models.store import Store, StoreSector
 from app.models.device import Device, DeviceParameters, DeviceStatusLatest
@@ -106,6 +107,12 @@ async def get_store_devices(store_id: uuid.UUID, db: AsyncSession = Depends(get_
             "status": status.status_classification if status else "SEM_LEITURA",
             "temperature": status.temperature if status else None,
             "humidity": status.humidity if status else None,
+            "consumption": status.consumption if status else None,
+            "consumption_estimated": status.consumption_estimated if status else None,
+            "consumption_estimated_kw": (
+                status.consumption_estimated * settings.energy_consumption_scale
+                if status and status.consumption_estimated is not None else None
+            ),
             "delta_temp": status.delta_temp if status else None,
             "efficiency_score": status.efficiency_score if status else None,
             "state": status.state if status else None,

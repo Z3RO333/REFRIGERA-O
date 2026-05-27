@@ -13,7 +13,7 @@ import DeviceMarker from '../components/map/DeviceMarker'
 import ZoneEditor from '../components/map/ZoneEditor'
 import { cn, formatRelativeTime, formatTemp } from '../lib/utils'
 import { useAuthStore } from '../store/useAuthStore'
-import type { AutomationStatus, Device, DigitalTwinZone, Sector, ZoneAutomationState, ZoneMode, ZoneType } from '../types'
+import type { AutomationStatus, Device, DigitalTwinZone, Sector, ZoneAutomationState, ZoneMode, ZonePriority, ZoneType } from '../types'
 
 type ThermalStatus = 'COLD' | 'COMFORT' | 'WARM' | 'HOT' | 'CRITICAL' | 'NO_READING'
 type SourceType = 'zone' | 'brise' | 'sensor' | 'merged'
@@ -230,6 +230,7 @@ export default function ThermalComfortMap() {
   const visibleZones = statusFilter === 'ALL'
     ? zoneStates
     : zoneStates.filter(z => z.status === statusFilter)
+  const legacyRectZones = visibleZones.filter(z => z.w > 0 && z.h > 0)
 
   // ── Heat points ────────────────────────────────────────────────────────────
   const heatPoints = useMemo(() => {
@@ -616,8 +617,8 @@ export default function ThermalComfortMap() {
               />
             )}
 
-            {/* 4. Zonas — borda colorida + label de temperatura */}
-            {layers.zones && visibleZones.map(zone => {
+            {/* 4. Zonas legadas — custom zones são desenhadas pelo ZoneEditor */}
+            {layers.zones && legacyRectZones.map(zone => {
               const meta = STATUS_META[zone.status]
               const isSelected = zone.key === selectedZoneKey
               return (
@@ -869,7 +870,10 @@ function ZoneAlertRow({
   const action = recommendedControlAction(zone.status)
   const acDevices = zone.actionableDevices.filter((d: Device) => !d.is_external_sensor)
   const offAcDevices = zone.devices.filter((d: Device) => !d.is_external_sensor && d.status === 'DESLIGADO')
-  const canPowerOn = action === 'temperature_down' && acDevices.length === 0 && offAcDevices.length > 0 && !isLocked && phase !== 'loading'
+  const hotOffAcDevices = offAcDevices.filter((d: Device) => d.temperature != null && d.temperature > zone.idealMax)
+  const powerOnTargets = hotOffAcDevices.length > 0 ? hotOffAcDevices : offAcDevices
+  const shouldPowerOn = action === 'temperature_down' && powerOnTargets.length > 0 && (hotOffAcDevices.length > 0 || acDevices.length === 0)
+  const canPowerOn = shouldPowerOn && !isLocked && phase !== 'loading'
   const canAdjust = action != null && acDevices.length > 0 && !isLocked && phase !== 'loading'
 
   const quickAdjust = async () => {
@@ -898,7 +902,7 @@ function ZoneAlertRow({
     if (!canPowerOn) return
     setPhase('loading')
     try {
-      const targets = offAcDevices.slice(0, 4)
+      const targets = powerOnTargets.slice(0, 4)
       await Promise.all(targets.map((d: Device) => devicesApi.control(d.id, 'power_on', 1)))
       setPhase('done')
       setLockedUntil(Date.now() + 2 * 60 * 1000)
@@ -947,7 +951,7 @@ function ZoneAlertRow({
           type="button"
           title={
             canPowerOn
-              ? `Ligar ${offAcDevices.length} AC(s) desligado(s) em ${zone.label}`
+              ? `Ligar ${powerOnTargets.length} AC(s) desligado(s) em ${zone.label}`
               : action === 'temperature_down'
               ? `Reduzir 1°C em ${acDevices.length} AC(s) de ${zone.label}`
               : `Aumentar 1°C em ${acDevices.length} AC(s) de ${zone.label}`
@@ -1001,6 +1005,13 @@ const ZONE_MODES: { key: ZoneMode; label: string; description: string; adminOnly
   { key: 'maintenance', label: 'Manutenção',  description: 'Bloqueia toda automação até liberação explícita.', adminOnly: true },
 ]
 
+const ZONE_PRIORITIES: { key: ZonePriority; label: string; description: string }[] = [
+  { key: 'conforto',     label: 'Conforto',   description: 'Conforto térmico com proteção contra desperdício.' },
+  { key: 'estabilidade', label: 'Balanceado', description: 'Equilibra conforto, consumo e poucos comandos.' },
+  { key: 'economia',     label: 'Econômico',  description: 'Opera perto do limite superior da faixa ideal.' },
+  { key: 'critico',      label: 'Crítico',    description: 'Resposta rápida para área sensível, ainda em passos seguros.' },
+]
+
 const ACTION_STATUS_META: Record<string, { label: string; color: string }> = {
   suggestion:           { label: 'Sugestão',          color: 'text-blue-500' },
   pending_verification: { label: 'Verificando…',      color: 'text-yellow-500' },
@@ -1008,62 +1019,6 @@ const ACTION_STATUS_META: Record<string, { label: string; color: string }> = {
   blocked:              { label: 'Bloqueado',          color: 'text-gray-500' },
   verified_success:     { label: 'Eficaz ✓',          color: 'text-green-600' },
   verified_failure:     { label: 'Sem efeito ✗',      color: 'text-red-500' },
-}
-
-function PowerOnPanel({ devices, onRefetch }: { devices: Device[]; onRefetch: () => void }) {
-  const [phase, setPhase] = useState<'idle' | 'loading' | 'done' | 'error'>('idle')
-  const [lockedUntil, setLockedUntil] = useState(0)
-  const isLocked = Date.now() < lockedUntil
-
-  const handlePowerOn = async () => {
-    if (isLocked || phase === 'loading') return
-    setPhase('loading')
-    try {
-      await Promise.all(devices.slice(0, 4).map(d => devicesApi.control(d.id, 'power_on', 1)))
-      setPhase('done')
-      setLockedUntil(Date.now() + 2 * 60 * 1000)
-      onRefetch()
-      setTimeout(() => setPhase('idle'), 8000)
-    } catch {
-      setPhase('error')
-      setTimeout(() => setPhase('idle'), 4000)
-    }
-  }
-
-  if (phase === 'done') return (
-    <div className="rounded-lg bg-green-50 px-3 py-2 dark:bg-green-950/30 text-xs text-green-700 dark:text-green-400">
-      ✓ Comando enviado — ACs sendo ligados. Próximo ajuste disponível em 2 min.
-    </div>
-  )
-  if (phase === 'error') return (
-    <div className="rounded-lg bg-red-50 px-3 py-2 dark:bg-red-950/30 text-xs text-red-600 dark:text-red-400">
-      ✗ Falha ao ligar. Verifique a conectividade com a Brise API.
-    </div>
-  )
-
-  return (
-    <div className="space-y-1.5">
-      {devices.slice(0, 4).map(d => (
-        <div key={d.id} className="flex items-center gap-2 text-xs text-gray-500">
-          <span className="h-1.5 w-1.5 rounded-full bg-blue-400 flex-shrink-0" />
-          <span className="truncate">{d.name}</span>
-        </div>
-      ))}
-      <button
-        type="button"
-        disabled={isLocked || phase === 'loading'}
-        onClick={handlePowerOn}
-        className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
-      >
-        {phase === 'loading'
-          ? <><RefreshCw className="h-3.5 w-3.5 animate-spin" /> Ligando…</>
-          : isLocked
-          ? <><Wind className="h-3.5 w-3.5" /> Aguardar cooldown</>
-          : <><Wind className="h-3.5 w-3.5" /> Ligar {devices.length} AC{devices.length !== 1 ? 's' : ''}</>
-        }
-      </button>
-    </div>
-  )
 }
 
 type ManualPhase = 'idle' | 'confirming' | 'sending' | 'done' | 'error'
@@ -1080,10 +1035,11 @@ function ZonePanel({
   onRefetch: () => void
 }) {
   const [changingMode, setChangingMode] = useState(false)
+  const [changingPriority, setChangingPriority] = useState(false)
   const [triggering, setTriggering] = useState(false)
   const [manualPhase, setManualPhase] = useState<ManualPhase>('idle')
   const [manualLockedUntil, setManualLockedUntil] = useState(0)
-  const [manualResult, setManualResult] = useState<{ targetSp: number; count: number } | null>(null)
+  const [manualResult, setManualResult] = useState<{ kind: 'setpoint' | 'power_on'; targetSp?: number; count: number } | null>(null)
   const [manualError, setManualError] = useState<string | null>(null)
   const [maintenanceReason, setMaintenanceReason] = useState('')
   const [maintenanceUntil, setMaintenanceUntil] = useState('')
@@ -1098,6 +1054,8 @@ function ZonePanel({
 
   const acDevices: Device[] = zone.actionableDevices.filter((d: Device) => !d.is_external_sensor)
   const offAcDevices: Device[] = zone.devices.filter((d: Device) => !d.is_external_sensor && d.status === 'DESLIGADO')
+  const hotOffAcDevices: Device[] = offAcDevices.filter((d: Device) => d.temperature != null && d.temperature > zone.idealMax)
+  const powerOnTargets: Device[] = hotOffAcDevices.length > 0 ? hotOffAcDevices : offAcDevices
   // Prefere dispositivo com setpoint disponível + maior delta; se nenhum tem setpoint, usa o de maior delta mesmo
   const bestDevice: Device | null =
     ([...acDevices].filter(d => d.setpoint_cool != null)
@@ -1126,7 +1084,9 @@ function ZonePanel({
   const step = targetSp != null && currentSp != null ? Math.abs(targetSp - currentSp) : 1
   const atLimit = currentSp != null && targetSp === currentSp
   const isLocked = Date.now() < manualLockedUntil
-  const canShowManual = acDevices.length > 0 && !!ctrlAction && !isLocked
+  const shouldPowerOn = ctrlAction === 'temperature_down' && powerOnTargets.length > 0 && (hotOffAcDevices.length > 0 || acDevices.length === 0)
+  const canShowPowerOn = canWrite && shouldPowerOn && !isLocked
+  const canShowManual = acDevices.length > 0 && !!ctrlAction && !isLocked && !shouldPowerOn
 
   // Só ajusta ACs cuja temperatura individual está realmente fora da faixa
   const needsAdjust = (d: Device) => {
@@ -1148,7 +1108,7 @@ function ZonePanel({
     try {
       const targets = adjustTargets.slice(0, 8)
       await Promise.all(targets.map(d => devicesApi.control(d.id, action, step)))
-      setManualResult({ targetSp: targetSp ?? (currentSp ?? 0) + (action === 'temperature_up' ? 1 : -1), count: targets.length })
+      setManualResult({ kind: 'setpoint', targetSp: targetSp ?? (currentSp ?? 0) + (action === 'temperature_up' ? 1 : -1), count: targets.length })
       setManualPhase('done')
       setManualLockedUntil(Date.now() + 2 * 60 * 1000)
       onRefetch()
@@ -1158,11 +1118,43 @@ function ZonePanel({
     }
   }
 
+  const handlePowerOnManual = async () => {
+    if (!canShowPowerOn) return
+    setManualPhase('sending')
+    setManualError(null)
+    try {
+      const targets = powerOnTargets.slice(0, 4)
+      await Promise.all(targets.map(d => devicesApi.control(d.id, 'power_on', 1)))
+      setManualResult({ kind: 'power_on', count: targets.length })
+      setManualPhase('done')
+      setManualLockedUntil(Date.now() + 2 * 60 * 1000)
+      onRefetch()
+    } catch {
+      setManualError('Falha ao ligar o aparelho pela Brise API.')
+      setManualPhase('error')
+    }
+  }
+
   const currentMode: ZoneMode = automation?.mode ?? 'manual'
+  const currentPriority: ZonePriority = automation?.priority ?? 'conforto'
   const lastAction = automation?.last_action ?? null
   const cooldownS = automation?.cooldown_remaining_s ?? null
   const consecFail = automation?.consecutive_failures ?? 0
   const isInMaintenance = currentMode === 'maintenance'
+
+  const onDevices = zone.devices.filter((d: Device) => !d.is_external_sensor && d.state === true)
+  const estimatedKw = onDevices.reduce((sum: number, d: Device) => {
+    const fromTelemetry = d.consumption_estimated_kw ?? null
+    if (fromTelemetry != null) return sum + fromTelemetry
+    return sum + Math.max(0.5, ((d.btu || 12000) / 12000) * 1.1)
+  }, 0)
+  const lowSetpointCount = onDevices.filter((d: Device) => {
+    const sp = d.current_setpoint ?? d.setpoint_cool
+    return sp != null && sp < Math.ceil(zone.idealMin)
+  }).length
+  const comfortable = zone.status === 'COMFORT'
+  const economyOpportunity =
+    comfortable && (estimatedKw >= 4 || lowSetpointCount > 0 || (onDevices.length >= 3 && zone.avgTemp != null && zone.avgTemp <= zone.idealMin + 0.4))
 
   const handleMode = async (mode: ZoneMode) => {
     if (!canWrite) return
@@ -1172,6 +1164,15 @@ function ZonePanel({
     }
     setChangingMode(true)
     await onModeChange(mode).finally(() => setChangingMode(false))
+  }
+
+  const handlePriority = async (priority: ZonePriority) => {
+    if (!canWrite) return
+    setChangingPriority(true)
+    await zonesApi.setMode(storeId, zone.key, { mode: currentMode, priority }).finally(() => {
+      setChangingPriority(false)
+      onRefetch()
+    })
   }
 
   const handleMaintenanceConfirm = async () => {
@@ -1207,9 +1208,30 @@ function ZonePanel({
       {/* Métricas */}
       <div className="grid grid-cols-2 gap-3">
         <PanelMetric label="Temperatura" value={zone.avgTemp != null ? formatTemp(zone.avgTemp) : '—'} />
-        <PanelMetric label="Aparelhos"   value={zone.devices.length} />
-        <PanelMetric label="Com leitura" value={zone.devices.filter((d: Device) => d.temperature != null).length} />
-        <PanelMetric label="Ajustáveis"  value={zone.actionableDevices.length} />
+        <PanelMetric label="Ligados" value={onDevices.length} />
+        <PanelMetric label="Potência est." value={`${estimatedKw.toFixed(1)} kW`} />
+        <PanelMetric label="Setpoints baixos" value={lowSetpointCount} />
+      </div>
+
+      <div className={cn(
+        'rounded-lg border p-3',
+        economyOpportunity
+          ? 'border-amber-200 bg-amber-50 dark:border-amber-900/70 dark:bg-amber-950/20'
+          : 'border-emerald-200 bg-emerald-50 dark:border-emerald-900/70 dark:bg-emerald-950/20',
+      )}>
+        <div className="flex items-start gap-2">
+          <Zap className={cn('mt-0.5 h-4 w-4', economyOpportunity ? 'text-amber-500' : 'text-emerald-500')} />
+          <div className="min-w-0">
+            <div className={cn('text-xs font-semibold uppercase', economyOpportunity ? 'text-amber-700 dark:text-amber-300' : 'text-emerald-700 dark:text-emerald-300')}>
+              {economyOpportunity ? 'Oportunidade de economia' : 'Consumo compatível'}
+            </div>
+            <p className="mt-1 text-xs text-gray-600 dark:text-gray-400">
+              {economyOpportunity
+                ? 'Zona confortável com consumo ou setpoint abaixo do necessário. A automação deve preferir elevar 1°C ou reduzir redundância.'
+                : 'Sem indicação de ação extra: mantém conforto evitando ligar ou reduzir setpoint sem necessidade.'}
+            </p>
+          </div>
+        </div>
       </div>
 
       {/* ── Automação Inteligente ── */}
@@ -1263,6 +1285,40 @@ function ZonePanel({
             {ZONE_MODES.find(m => m.key === currentMode) && (
               <p className="mt-1 text-xs text-gray-400">{ZONE_MODES.find(m => m.key === currentMode)!.description}</p>
             )}
+          </div>
+
+          <div>
+            <div className="mb-1.5 flex items-center justify-between">
+              <span className="text-xs text-gray-500">Estratégia energética</span>
+              {changingPriority && <RefreshCw className="h-3 w-3 animate-spin text-gray-400" />}
+            </div>
+            <div className="grid grid-cols-2 gap-1">
+              {ZONE_PRIORITIES.map(p => {
+                const isActive = currentPriority === p.key
+                const isDisabled = changingPriority || !canWrite
+                return (
+                  <button
+                    key={p.key}
+                    type="button"
+                    disabled={isDisabled}
+                    title={p.description}
+                    onClick={() => handlePriority(p.key)}
+                    className={cn(
+                      'rounded-md px-2 py-1.5 text-xs font-medium transition-colors text-center',
+                      isActive
+                        ? 'bg-emerald-600 text-white'
+                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-400 dark:hover:bg-gray-700',
+                      isDisabled && 'opacity-40 cursor-not-allowed',
+                    )}
+                  >
+                    {p.label}
+                  </button>
+                )
+              })}
+            </div>
+            <p className="mt-1 text-xs text-gray-400">
+              {ZONE_PRIORITIES.find(p => p.key === currentPriority)?.description}
+            </p>
           </div>
 
           {/* Banner de manutenção */}
@@ -1445,17 +1501,34 @@ function ZonePanel({
           )}
 
           {/* ACs desligados — zona precisa resfriar */}
-          {!canShowManual && canWrite && acDevices.length === 0 && offAcDevices.length > 0 && ctrlAction === 'temperature_down' && !isLocked && (
+          {!canShowManual && canShowPowerOn && (
             <div className="space-y-2">
               <p className="text-xs text-blue-600 dark:text-blue-400">
-                {offAcDevices.length} AC{offAcDevices.length !== 1 ? 's' : ''} desligado{offAcDevices.length !== 1 ? 's' : ''} nesta zona.
-                Ligue para iniciar o resfriamento.
+                {hotOffAcDevices.length > 0
+                  ? `${hotOffAcDevices.length} AC${hotOffAcDevices.length !== 1 ? 's' : ''} desligado${hotOffAcDevices.length !== 1 ? 's' : ''} no ponto quente. Ligue para resfriar esse canto.`
+                  : `${powerOnTargets.length} AC${powerOnTargets.length !== 1 ? 's' : ''} desligado${powerOnTargets.length !== 1 ? 's' : ''} nesta zona. Ligue para iniciar o resfriamento.`}
               </p>
-              <PowerOnPanel devices={offAcDevices} onRefetch={onRefetch} />
+              <div className="space-y-1.5">
+                {powerOnTargets.slice(0, 4).map(d => (
+                  <div key={d.id} className="flex items-center gap-2 text-xs text-gray-500">
+                    <span className="h-1.5 w-1.5 rounded-full bg-blue-400 flex-shrink-0" />
+                    <span className="truncate">{d.name}</span>
+                    {d.temperature != null && <span className="ml-auto">{formatTemp(d.temperature)}</span>}
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  onClick={handlePowerOnManual}
+                  className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500"
+                >
+                  <Wind className="h-4 w-4" />
+                  Ligar {powerOnTargets.length} AC{powerOnTargets.length !== 1 ? 's' : ''}
+                </button>
+              </div>
             </div>
           )}
 
-          {!canShowManual && canWrite && !(acDevices.length === 0 && offAcDevices.length > 0 && ctrlAction === 'temperature_down') && (
+          {!canShowManual && canWrite && !canShowPowerOn && (
             <p className="text-sm text-gray-500">
               {isLocked
                 ? 'Aguarde antes de reaplicar (cooldown de 2 min).'
@@ -1582,8 +1655,9 @@ function ZonePanel({
               <div className="rounded-lg bg-green-50 p-3 dark:bg-green-950/30 space-y-1">
                 <p className="text-xs font-semibold text-green-700 dark:text-green-400">✓ Comando enviado</p>
                 <p className="text-xs text-green-800 dark:text-green-300">
-                  Setpoint ajustado para <strong>{manualResult.targetSp}°C</strong> em{' '}
-                  {manualResult.count} aparelho{manualResult.count !== 1 ? 's' : ''}.
+                  {manualResult.kind === 'power_on'
+                    ? <>Ligando {manualResult.count} aparelho{manualResult.count !== 1 ? 's' : ''} desligado{manualResult.count !== 1 ? 's' : ''}.</>
+                    : <>Setpoint ajustado para <strong>{manualResult.targetSp}°C</strong> em {manualResult.count} aparelho{manualResult.count !== 1 ? 's' : ''}.</>}
                 </p>
                 <p className="text-xs text-green-600 dark:text-green-500">
                   Reavaliar em 10–15 minutos para verificar o efeito.

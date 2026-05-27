@@ -5,7 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 ZoneMode = Literal["manual", "suggestion", "semi", "auto", "maintenance"]
-ZonePriority = Literal["conforto", "economia", "estabilidade", "manutencao"]
+ZonePriority = Literal["conforto", "economia", "estabilidade", "manutencao", "critico"]
 ZoneType = Literal["ABERTA", "SALA_FECHADA"]
 
 

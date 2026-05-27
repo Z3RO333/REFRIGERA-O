@@ -24,6 +24,9 @@ export interface Device {
   temperature: number | null
   historical_avg?: number | null
   humidity: number | null
+  consumption?: number | null
+  consumption_estimated?: number | null
+  consumption_estimated_kw?: number | null
   delta_temp: number | null
   efficiency_score: number | null
   state: boolean | null
@@ -135,7 +138,7 @@ export interface HistoryStats {
 }
 
 export type ZoneMode = 'manual' | 'suggestion' | 'semi' | 'auto' | 'maintenance'
-export type ZonePriority = 'conforto' | 'economia' | 'estabilidade' | 'manutencao'
+export type ZonePriority = 'conforto' | 'economia' | 'estabilidade' | 'manutencao' | 'critico'
 export type ZoneType = 'ABERTA' | 'SALA_FECHADA'
 export type ZoneActionStatus =
   | 'suggestion'

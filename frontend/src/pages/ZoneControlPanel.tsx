@@ -39,6 +39,7 @@ const PRIORITY_META: Record<ZonePriority, { label: string; icon: string }> = {
   economia:     { label: 'Economia',     icon: '💰' },
   estabilidade: { label: 'Estabilidade', icon: '⚖️' },
   manutencao:   { label: 'Manutenção',   icon: '🔧' },
+  critico:      { label: 'Crítico',      icon: '⚠️' },
 }
 
 const SUMMARY_COLORS: Record<ThermalStatus, string> = {

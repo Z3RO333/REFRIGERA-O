@@ -79,6 +79,23 @@ def test_hotspot_detected_with_variance():
     assert h.has_coordinates is True
 
 
+def test_hotspot_uses_hottest_local_cluster_not_centroid_between_islands():
+    """Dois cantos quentes não devem virar um hotspot falso no meio da loja."""
+    devices = [
+        _dp("FARMA_91_AREA_QUENTE", 390, 210, 23.5),
+        _dp("FARMA_93_OUTRO_CANTO", 690, 210, 23.1),
+        _dp("CENTRO_FRIO", 530, 330, 15.8),
+    ]
+
+    h = detect_hotspot(devices)
+
+    assert h is not None
+    assert h.has_coordinates is True
+    assert h.x < 450
+    assert "FARMA_91_AREA_QUENTE" in h.contributing_names
+    assert "FARMA_93_OUTRO_CANTO" not in h.contributing_names
+
+
 def test_hotspot_has_coordinates_false_when_no_positions():
     """Hotspot detectado pela temperatura mas sem posições → has_coordinates=False."""
     devices = [
@@ -127,7 +144,18 @@ def test_proximity_score_returns_half_when_hotspot_no_coords():
 
 # ── Spatial selection in zone_controller helpers ───────────────────────────────
 
-def _make_device_row(name, x, y, btu, influence_radius_m=8, delta_temp=2.0, setpoint_cool=22):
+def _make_device_row(
+    name,
+    x,
+    y,
+    btu,
+    influence_radius_m=8,
+    delta_temp=2.0,
+    setpoint_cool=22,
+    temperature=24.0,
+    efficiency_score=80,
+    consumption_estimated=None,
+):
     """Build a minimal _DeviceRow-like object for testing selection helpers."""
     device = MagicMock()
     device.id = uuid.uuid4()
@@ -141,6 +169,11 @@ def _make_device_row(name, x, y, btu, influence_radius_m=8, delta_temp=2.0, setp
 
     status = MagicMock()
     status.delta_temp = delta_temp
+    status.temperature = temperature
+    status.efficiency_score = efficiency_score
+    status.consumption_estimated = consumption_estimated
+    status.accumulated_on_minutes = 120
+    status.accumulated_off_minutes = 60
     status.status_classification = "LIGADO"
     status.state = True
     status.updated_at = datetime.utcnow()
@@ -153,6 +186,22 @@ def _make_device_row(name, x, y, btu, influence_radius_m=8, delta_temp=2.0, setp
     row.device = device
     row.status = status
     return row, params
+
+
+def test_desligado_with_temperature_is_thermal_observation_not_setpoint_target():
+    """FARMA 91 desligado pode denunciar hotspot, mas nao deve receber setpoint."""
+    from app.services.zone_controller import (
+        _is_setpoint_readable_source,
+        _is_thermal_observation_source,
+    )
+
+    row, params = _make_device_row("FARMA_91", x=410, y=205, btu=12000, temperature=24.7)
+    row.status.status_classification = "DESLIGADO"
+    row.status.state = False
+    params.mode_device = 0
+
+    assert _is_thermal_observation_source(row) is True
+    assert _is_setpoint_readable_source(row) is False
 
 
 def test_select_best_device_prefers_closer_to_hotspot():
@@ -241,8 +290,8 @@ def test_select_power_on_prefers_closer_to_hotspot():
     )
 
 
-def test_select_power_on_falls_back_to_btu_without_hotspot():
-    """Without hotspot, _select_power_on_candidate falls back to highest BTU."""
+def test_select_power_on_without_hotspot_avoids_oversized_consumption():
+    """Without hotspot, equivalent options should not default to the largest BTU."""
     from app.services.zone_controller import _select_power_on_candidate
 
     row_hi, params_hi = _make_device_row("HIGH_BTU", x=100, y=100, btu=18000)
@@ -263,8 +312,8 @@ def test_select_power_on_falls_back_to_btu_without_hotspot():
 
     assert result is not None
     best_row, _ = result
-    assert best_row.device.name == "HIGH_BTU", (
-        f"Expected HIGH_BTU (largest BTU) but got {best_row.device.name}"
+    assert best_row.device.name == "LOW_BTU", (
+        f"Expected LOW_BTU (menor consumo estimado) but got {best_row.device.name}"
     )
 
 
@@ -518,3 +567,155 @@ def test_local_hotspot_status_detects_subarea_above_range():
 
     assert _local_hotspot_status(hotspot, zone) == "WARM"
     assert _local_hotspot_status(Hotspot(400, 200, 24.0, 24.0), zone) is None
+
+
+def test_energy_policy_does_not_use_min_setpoint_as_normal_target():
+    """Zona quente deve reduzir só até a faixa ideal, não até o mínimo do aparelho."""
+    from app.services.zone_controller import ZoneConfig, _build_setpoint_candidates
+
+    zone = ZoneConfig(key="farma", label="Farma", sector_names=[], ideal_min=21, ideal_max=23)
+    automation = MagicMock()
+    automation.setpoint_min = 18
+    automation.setpoint_max = 28
+    automation.priority = "economia"
+    automation.is_critical_zone = False
+
+    row, params = _make_device_row("FARMA_100", x=400, y=200, btu=12000, setpoint_cool=24)
+    candidates = _build_setpoint_candidates(
+        [row],
+        {row.device.id: params},
+        direction="down",
+        setpoint_min=automation.setpoint_min,
+        setpoint_max=automation.setpoint_max,
+        hotspot=None,
+        zone=zone,
+        automation=automation,
+        status="WARM",
+        strategy="economy",
+    )
+
+    assert candidates
+    assert candidates[0].setpoint_after == 23
+
+    params.setpoint_cool = 23
+    assert _build_setpoint_candidates(
+        [row],
+        {row.device.id: params},
+        direction="down",
+        setpoint_min=automation.setpoint_min,
+        setpoint_max=automation.setpoint_max,
+        hotspot=None,
+        zone=zone,
+        automation=automation,
+        status="WARM",
+        strategy="economy",
+    ) == []
+
+
+def test_energy_power_on_prefers_efficient_equipment_when_thermal_impact_is_equivalent():
+    """Quando resolve igual, o AC de menor consumo/maior eficiência ganha."""
+    from app.services.zone_controller import _select_power_on_candidate
+
+    efficient, params_eff = _make_device_row(
+        "EFICIENTE", x=400, y=200, btu=12000, efficiency_score=95, consumption_estimated=1.0
+    )
+    wasteful, params_waste = _make_device_row(
+        "GASTAO", x=400, y=200, btu=12000, efficiency_score=45, consumption_estimated=3.0
+    )
+    for row, params in [(efficient, params_eff), (wasteful, params_waste)]:
+        row.status.status_classification = "DESLIGADO"
+        row.status.state = False
+        params.mode_device = 0
+
+    result = _select_power_on_candidate(
+        [wasteful, efficient],
+        {efficient.device.id: params_eff, wasteful.device.id: params_waste},
+        hotspot=None,
+        strategy="economy",
+    )
+
+    assert result is not None
+    assert result[0].device.name == "EFICIENTE"
+
+
+def test_energy_hotspot_prefers_local_device_over_far_global_adjustment():
+    """Hotspot local deve priorizar aparelho local, sem ajuste global distante."""
+    from app.services.zone_controller import _select_power_on_candidate
+
+    hotspot = Hotspot(x=410, y=205, peak_temp=24.8, avg_hotspot_temp=24.5, has_coordinates=True)
+    local, params_local = _make_device_row(
+        "FARMA_91", x=412, y=206, btu=12000, efficiency_score=70, consumption_estimated=2.0
+    )
+    far, params_far = _make_device_row(
+        "FARMA_93", x=700, y=430, btu=24000, efficiency_score=95, consumption_estimated=1.0
+    )
+    for row, params in [(local, params_local), (far, params_far)]:
+        row.status.status_classification = "DESLIGADO"
+        row.status.state = False
+        params.mode_device = 0
+
+    result = _select_power_on_candidate(
+        [far, local],
+        {local.device.id: params_local, far.device.id: params_far},
+        hotspot=hotspot,
+        strategy="balanced",
+    )
+
+    assert result is not None
+    assert result[0].device.name == "FARMA_91"
+
+
+def test_cold_zone_raises_setpoint_before_powering_off():
+    """Zona fria economiza primeiro elevando setpoint em 1°C."""
+    from app.services.zone_controller import ZoneConfig, _build_setpoint_candidates
+
+    zone = ZoneConfig(key="farma", label="Farma", sector_names=[], ideal_min=21, ideal_max=23)
+    automation = MagicMock()
+    automation.setpoint_min = 18
+    automation.setpoint_max = 28
+    automation.priority = "economia"
+    automation.is_critical_zone = False
+
+    row, params = _make_device_row("FARMA_100", x=400, y=200, btu=12000, setpoint_cool=20, temperature=20.5)
+    candidates = _build_setpoint_candidates(
+        [row],
+        {row.device.id: params},
+        direction="up",
+        setpoint_min=automation.setpoint_min,
+        setpoint_max=automation.setpoint_max,
+        hotspot=None,
+        zone=zone,
+        automation=automation,
+        status="COLD",
+        strategy="economy",
+    )
+
+    assert candidates
+    assert candidates[0].action == "set_temperature_up"
+    assert candidates[0].setpoint_after == 21
+
+
+def test_energy_decision_payload_includes_energy_reasoning():
+    """Log estruturado precisa expor estratégia e score energético."""
+    from app.services.zone_controller import ZoneConfig, _build_power_on_candidates, _energy_decision_payload
+
+    zone = ZoneConfig(key="farma", label="Farma", sector_names=[], ideal_min=21, ideal_max=23)
+    row, params = _make_device_row("FARMA_91", x=400, y=200, btu=12000, efficiency_score=90, consumption_estimated=1.2)
+    row.status.status_classification = "DESLIGADO"
+    row.status.state = False
+    params.mode_device = 0
+    candidates = _build_power_on_candidates([row], {row.device.id: params}, hotspot=None, strategy="economy")
+    payload = _energy_decision_payload(
+        zone=zone,
+        status="WARM",
+        strategy="economy",
+        avg_temp=24.5,
+        devices=[row],
+        params_map={row.device.id: params},
+        selected=candidates[0],
+        candidates=candidates,
+    )
+
+    assert payload["energy_strategy"] == "economy"
+    assert payload["candidate_actions"][0]["energy_cost_score"] > 0
+    assert "custo" in payload["selected_reason"] or "localizada" in payload["selected_reason"]

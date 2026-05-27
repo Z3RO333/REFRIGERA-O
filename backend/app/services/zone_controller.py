@@ -14,6 +14,7 @@ Ciclo por zona:
 import logging
 import hashlib
 import json
+import math
 import time
 import uuid
 from dataclasses import dataclass
@@ -42,6 +43,7 @@ logger = logging.getLogger(__name__)
 
 # Statuses que impedem comandos
 BLOCKED_STATUSES = {"SEM_LEITURA", "LEITURA_STALE", "AGUARDANDO_LEITURA", "DESLIGADO", "COMPRESSOR_CYCLING"}
+THERMAL_OBSERVATION_BLOCKED_STATUSES = BLOCKED_STATUSES - {"DESLIGADO"}
 
 # Cooldown entre execuções na mesma zona (segundos)
 ZONE_COOLDOWN_SECONDS = 900  # 15 min
@@ -49,6 +51,11 @@ ZONE_COOLDOWN_SECONDS = 900  # 15 min
 # Proteção por janela curta — evita rajadas sem bloquear o dia inteiro
 DEVICE_WINDOW_SECONDS = 900      # janela de 15 min por device
 DEVICE_WINDOW_MAX_CMDS = 4       # máximo de 4 comandos por device por janela
+
+# Penalidades de ciclo curto. O controle por zona já evita rajadas; estes limites
+# evitam economia agressiva que liga/desliga equipamento recém acionado.
+MIN_ON_BEFORE_ECONOMY_OFF_MINUTES = 30
+MIN_OFF_BEFORE_POWER_ON_MINUTES = 8
 
 # Janela de verificação: verifica ações com 12-18 min de vida
 VERIFY_MIN_AGE_MINUTES = 12
@@ -72,6 +79,18 @@ class ZoneConfig:
     zone_type: str = "ABERTA"
     # Se definido, a zona usa IDs de device em vez de nomes de setor (zonas personalizadas)
     device_ids: list[uuid.UUID] | None = None
+
+
+@dataclass
+class EnergyCandidate:
+    action: str
+    row: object
+    params: object
+    thermal_impact_score: float
+    energy_cost_score: float
+    final_score: float
+    reason: str
+    setpoint_after: int | None = None
 
 
 # ── Zonas abertas (departamentos amplos) ──────────────────────────────────────
@@ -319,8 +338,8 @@ async def _quick_trend(
 
 
 def _step_size(status: str) -> int:
-    """Passo de ajuste de setpoint: 2°C para zona crítica, 1°C nos demais casos."""
-    return 2 if status == "CRITICAL" else 1
+    """Passo conservador: automação sempre altera 1°C por ciclo."""
+    return 1
 
 
 async def _log_trending(
@@ -365,6 +384,62 @@ async def _log_trending(
     })
 
 
+async def _log_energy_saving_suggestion(
+    automation: ZoneAutomation,
+    zone: ZoneConfig,
+    avg_temp: float,
+    reason: str,
+    energy_payload: dict,
+    session: AsyncSession,
+) -> None:
+    """Registra oportunidade de economia quando a zona já está confortável."""
+    cooldown_key = f"zone:energy_suggestion:{automation.store_id}:{zone.key}"
+    if await redis_client.exists(cooldown_key):
+        return
+    await redis_client.set(cooldown_key, "1", ttl=1800)
+
+    full_reason = _append_energy_decision(
+        reason + " Zona confortável: não reduzir setpoint nem ligar aparelho adicional.",
+        energy_payload,
+    )
+    action = ZoneAction(
+        store_id=automation.store_id,
+        zone_key=zone.key,
+        zone_label=zone.label,
+        temp_before=round(avg_temp, 2),
+        ideal_min=zone.ideal_min,
+        ideal_max=zone.ideal_max,
+        direction="up",
+        reason=full_reason,
+        confidence=0.72,
+        mode=automation.mode,
+        status="suggestion",
+        suggestion_signature=_suggestion_signature(
+            zone=zone,
+            hotspot=None,
+            issue_type="energy_waste",
+            action_type="economy_review",
+            target_devices=[],
+            severity="COMFORT",
+        ),
+    )
+    _, deduped = await _save_zone_action(action, session)
+    if deduped:
+        return
+
+    await redis_client.publish("zone.action.created", {
+        "store_id": str(automation.store_id),
+        "zone_key": zone.key,
+        "zone_label": zone.label,
+        "direction": "up",
+        "status": "suggestion",
+        "confidence": 72,
+        "action": "economy_review",
+        "energy_strategy": energy_payload.get("energy_strategy"),
+        "energy_decision": energy_payload,
+    })
+
+
 # ── Avaliação de uma zona ─────────────────────────────────────────────────────
 
 async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig | None = None) -> None:
@@ -383,33 +458,13 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
         devices, params_map = await _get_zone_devices(automation.store_id, zone, session)
         await _sync_zone_parameters_from_brise(devices, params_map, session)
 
-        # Fontes de temperatura: ACs ativos + sensores externos (exclui DND, status bloqueado)
-        # Separação: sensores contribuem para avg_temp mas não recebem comandos
-        temp_sources = [
-            d for d in devices
-            if d.status.temperature is not None
-            and d.status.status_classification not in BLOCKED_STATUSES
-            and not d.device.dnd
-        ]
+        # Fontes de temperatura: ACs ativos + sensores externos + ACs desligados que
+        # ainda reportam temperatura. DESLIGADO observa o hotspot, mas nao recebe setpoint.
+        temp_sources = [d for d in devices if _is_thermal_observation_source(d)]
 
-        # Fallback: ACs classificados como DESLIGADO mas ainda reportando temperatura.
-        # Isso ocorre quando a API Brise retorna state=false transitoriamente para ACs ligados.
-        # Nesse caso, usamos a temperatura disponível e tentamos ligar os ACs, mas sem
-        # enviar comandos de setpoint (readable vazio).
-        if not temp_sources:
-            off_with_temp = [
-                d for d in devices
-                if not d.device.source_url
-                and not d.device.dnd
-                and d.status.temperature is not None
-                and d.status.status_classification == "DESLIGADO"
-            ]
-            if off_with_temp:
-                temp_sources = off_with_temp
-            readable = []
-        else:
-            # Ajustáveis via comando: apenas ACs (sensores externos têm source_url)
-            readable = [d for d in temp_sources if not d.device.source_url]
+        # Ajustáveis via comando: apenas ACs ligados/comunicando. AC desligado com
+        # leitura alimenta a decisao espacial e deve ser tratado por power_on.
+        readable = [d for d in temp_sources if _is_setpoint_readable_source(d)]
 
         if not temp_sources:
             # Sem leitura térmica disponível — diagnóstico detalhado com rate-limit anti-spam
@@ -479,6 +534,7 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
 
         # Tendência térmica (últimos 30 min)
         trend = await _quick_trend(automation.store_id, zone, session)
+        energy_strategy = _energy_strategy(automation)
 
         if status == "COMFORT":
             local_status = _local_hotspot_status(hotspot, zone)
@@ -500,13 +556,30 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                     await _raise_zone_alert(automation, zone, avg_temp, session)
                     return
 
-                power_on_candidate = _select_power_on_candidate(devices, params_map, hotspot=hotspot)
+                power_candidates = _build_power_on_candidates(
+                    devices, params_map, hotspot=hotspot, strategy=energy_strategy
+                )
+                power_on_candidate = (
+                    (power_candidates[0].row, power_candidates[0].params) if power_candidates else None
+                )
                 if power_on_candidate is not None:
                     power_device, power_params = power_on_candidate
                     confidence = _confidence(hotspot.peak_temp, zone, local_status, max(len(readable), 1))
+                    power_setpoint = _power_on_setpoint(power_params, zone, automation, local_status)
+                    energy_payload = _energy_decision_payload(
+                        zone=zone,
+                        status="hotspot",
+                        strategy=energy_strategy,
+                        avg_temp=avg_temp,
+                        devices=devices,
+                        params_map=params_map,
+                        selected=power_candidates[0],
+                        candidates=power_candidates,
+                    )
                     reason = _build_local_hotspot_power_on_reason(
                         avg_temp, zone, local_status, power_device.device, trend, hotspot
                     )
+                    reason = _append_energy_decision(reason, energy_payload)
                     setpoint_before = power_params.setpoint_cool
                     action_status = "suggestion"
                     block_reason = None
@@ -523,7 +596,9 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                         elif not await redis_client.acquire_lock(cooldown_key, ttl=ZONE_COOLDOWN_SECONDS):
                             return
                         else:
-                            ok, _api_ms = await _execute_power_on(power_device.device, power_params, session)
+                            ok, _api_ms = await _execute_power_on(
+                                power_device.device, power_params, session, target_setpoint=power_setpoint
+                            )
                             if ok:
                                 action_status = "pending_verification"
                                 logger.info(
@@ -547,7 +622,7 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                         ideal_min=zone.ideal_min,
                         ideal_max=zone.ideal_max,
                         setpoint_before=setpoint_before,
-                        setpoint_after=setpoint_before,
+                        setpoint_after=power_setpoint,
                         reason=reason,
                         confidence=confidence,
                         mode=automation.mode,
@@ -580,20 +655,34 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                         "status": action_status,
                         "confidence": round(confidence * 100),
                         "setpoint_before": setpoint_before,
-                        "setpoint_after": setpoint_before,
+                        "setpoint_after": power_setpoint,
                         "action": "power_on",
+                        "energy_strategy": energy_strategy,
+                        "energy_decision": energy_payload,
                         "local_hotspot": True,
                         "hotspot_temp": hotspot.peak_temp,
                     })
                     return
 
-                setpoint_candidates = _select_hotspot_setpoint_candidates(
-                    readable, params_map, automation.setpoint_min, hotspot=hotspot
+                scored_setpoint_candidates = _build_setpoint_candidates(
+                    readable,
+                    params_map,
+                    direction="down",
+                    setpoint_min=automation.setpoint_min,
+                    setpoint_max=automation.setpoint_max,
+                    hotspot=hotspot,
+                    zone=zone,
+                    automation=automation,
+                    status=local_status,
+                    strategy=energy_strategy,
                 )
+                setpoint_candidates = [
+                    (candidate.row, candidate.params) for candidate in scored_setpoint_candidates
+                ]
                 if setpoint_candidates:
                     best_device, best_params = setpoint_candidates[0]
                     setpoint_before = best_params.setpoint_cool
-                    new_setpoint = max(automation.setpoint_min, setpoint_before - 1)
+                    new_setpoint = scored_setpoint_candidates[0].setpoint_after
                     if new_setpoint == setpoint_before:
                         await _log_local_hotspot_suggestion(
                             automation, zone, avg_temp, local_status, trend, hotspot, session,
@@ -602,6 +691,16 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                         return
 
                     confidence = _confidence(hotspot.peak_temp, zone, local_status, max(len(readable), 1))
+                    energy_payload = _energy_decision_payload(
+                        zone=zone,
+                        status="hotspot",
+                        strategy=energy_strategy,
+                        avg_temp=avg_temp,
+                        devices=devices,
+                        params_map=params_map,
+                        selected=scored_setpoint_candidates[0],
+                        candidates=scored_setpoint_candidates,
+                    )
                     reason = _build_local_hotspot_setpoint_reason(
                         avg_temp,
                         zone,
@@ -613,6 +712,7 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                         hotspot,
                         [row.device.name for row, _ in setpoint_candidates[:3]],
                     )
+                    reason = _append_energy_decision(reason, energy_payload)
                     action_status = "suggestion"
                     block_reason = None
                     _api_ms: int | None = None
@@ -690,6 +790,8 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                         "setpoint_before": setpoint_before,
                         "setpoint_after": new_setpoint,
                         "action": "set_temperature",
+                        "energy_strategy": energy_strategy,
+                        "energy_decision": energy_payload,
                         "local_hotspot": True,
                         "hotspot_temp": hotspot.peak_temp,
                     })
@@ -701,6 +803,22 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
             # Zona confortável mas aquecendo rapidamente → suggestion preemptiva
             if trend is not None and trend > 2.5:
                 await _log_trending(automation, zone, avg_temp, trend, session)
+                return
+            waste, waste_reason = _zone_energy_waste(devices, params_map, zone, avg_temp, trend)
+            if waste:
+                payload = _energy_decision_payload(
+                    zone=zone,
+                    status="comfortable",
+                    strategy=energy_strategy,
+                    avg_temp=avg_temp,
+                    devices=devices,
+                    params_map=params_map,
+                    selected=None,
+                    candidates=[],
+                )
+                await _log_energy_saving_suggestion(
+                    automation, zone, avg_temp, waste_reason, payload, session
+                )
             return
 
         # Zona WARM mas já resfriando — dar tempo ao AC anterior de responder
@@ -722,11 +840,29 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
         direction = "down" if status in ("WARM", "HOT", "CRITICAL") else "up"
         step = _step_size(status)
 
-        power_on_candidate = _select_power_on_candidate(devices, params_map, hotspot=hotspot) if direction == "down" else None
+        power_candidates = (
+            _build_power_on_candidates(devices, params_map, hotspot=hotspot, strategy=energy_strategy)
+            if direction == "down" else []
+        )
+        power_on_candidate = (
+            (power_candidates[0].row, power_candidates[0].params) if power_candidates else None
+        )
         if power_on_candidate is not None:
             power_device, power_params = power_on_candidate
             confidence = _confidence(avg_temp, zone, status, max(len(readable), 1))
+            power_setpoint = _power_on_setpoint(power_params, zone, automation, status)
+            energy_payload = _energy_decision_payload(
+                zone=zone,
+                status=status,
+                strategy=energy_strategy,
+                avg_temp=avg_temp,
+                devices=devices,
+                params_map=params_map,
+                selected=power_candidates[0],
+                candidates=power_candidates,
+            )
             reason = _build_power_on_reason(avg_temp, zone, status, power_device.device, trend, hotspot=hotspot)
+            reason = _append_energy_decision(reason, energy_payload)
             setpoint_before = power_params.setpoint_cool
             action_status = "suggestion"
             block_reason = None
@@ -743,7 +879,9 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                 elif not await redis_client.acquire_lock(cooldown_key, ttl=ZONE_COOLDOWN_SECONDS):
                     return
                 else:
-                    ok, _api_ms = await _execute_power_on(power_device.device, power_params, session)
+                    ok, _api_ms = await _execute_power_on(
+                        power_device.device, power_params, session, target_setpoint=power_setpoint
+                    )
                     if ok:
                         action_status = "pending_verification"
                         logger.info(
@@ -767,7 +905,7 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                 ideal_min=zone.ideal_min,
                 ideal_max=zone.ideal_max,
                 setpoint_before=setpoint_before,
-                setpoint_after=setpoint_before,
+                setpoint_after=power_setpoint,
                 reason=reason,
                 confidence=confidence,
                 mode=automation.mode,
@@ -796,13 +934,30 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                 "status": action_status,
                 "confidence": round(confidence * 100),
                 "setpoint_before": setpoint_before,
-                "setpoint_after": setpoint_before,
+                "setpoint_after": power_setpoint,
                 "action": "power_on",
+                "energy_strategy": energy_strategy,
+                "energy_decision": energy_payload,
             })
             return
 
         # Seleciona melhor device (com verificação de headroom de setpoint)
-        best = _select_best_device(readable, status, params_map, direction, automation.setpoint_min, automation.setpoint_max, hotspot=hotspot)
+        scored_setpoint_candidates = _build_setpoint_candidates(
+            readable,
+            params_map,
+            direction=direction,
+            setpoint_min=automation.setpoint_min,
+            setpoint_max=automation.setpoint_max,
+            hotspot=hotspot,
+            zone=zone,
+            automation=automation,
+            status=status,
+            strategy=energy_strategy,
+        )
+        best = (
+            (scored_setpoint_candidates[0].row, scored_setpoint_candidates[0].params)
+            if scored_setpoint_candidates else None
+        )
         if best is None:
             reason = _build_no_adjustable_reason(
                 readable, devices, params_map, direction,
@@ -812,7 +967,14 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
             return
 
         best_device, best_params = best
-        new_setpoint = best_params.setpoint_cool + (step if direction == "up" else -step)
+        new_setpoint = scored_setpoint_candidates[0].setpoint_after
+        if new_setpoint is None:
+            await _log_blocked(
+                automation, zone, avg_temp,
+                "Ação ignorada: não há ajuste de 1°C que respeite a faixa ideal e os limites do aparelho.",
+                session,
+            )
+            return
 
         if not (automation.setpoint_min <= new_setpoint <= automation.setpoint_max):
             await _log_blocked(
@@ -835,7 +997,18 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
             return
 
         confidence = _confidence(avg_temp, zone, status, len(readable))
+        energy_payload = _energy_decision_payload(
+            zone=zone,
+            status=status,
+            strategy=energy_strategy,
+            avg_temp=avg_temp,
+            devices=devices,
+            params_map=params_map,
+            selected=scored_setpoint_candidates[0],
+            candidates=scored_setpoint_candidates,
+        )
         reason = _build_reason(avg_temp, zone, status, best_device.device, direction, trend, hotspot=hotspot)
+        reason = _append_energy_decision(reason, energy_payload)
 
         # Captura ANTES de _execute_setpoint modificar params.setpoint_cool
         setpoint_before = best_params.setpoint_cool
@@ -912,6 +1085,8 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
             "confidence": round(confidence * 100),
             "setpoint_before": setpoint_before,
             "setpoint_after": new_setpoint,
+            "energy_strategy": energy_strategy,
+            "energy_decision": energy_payload,
         })
 
 
@@ -985,6 +1160,23 @@ class _DeviceRow:
     def __init__(self, device: Device, status: DeviceStatusLatest):
         self.device = device
         self.status = status
+
+
+def _is_thermal_observation_source(row: _DeviceRow) -> bool:
+    return (
+        row.status.temperature is not None
+        and row.status.status_classification not in THERMAL_OBSERVATION_BLOCKED_STATUSES
+        and not row.device.dnd
+    )
+
+
+def _is_setpoint_readable_source(row: _DeviceRow) -> bool:
+    return (
+        _is_thermal_observation_source(row)
+        and not row.device.source_url
+        and row.status.status_classification not in BLOCKED_STATUSES
+        and row.status.state is not False
+    )
 
 
 async def _get_zone_devices(
@@ -1121,6 +1313,411 @@ def _device_command_communication_ok(row: _DeviceRow) -> bool:
     return updated_at >= datetime.utcnow() - timedelta(minutes=threshold_minutes)
 
 
+def _safe_float(value, default: float | None = None) -> float | None:
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(value, default: int | None = None) -> int | None:
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _energy_strategy(automation: ZoneAutomation | None) -> str:
+    priority = getattr(automation, "priority", None) or "conforto"
+    if priority == "economia":
+        return "economy"
+    if priority == "estabilidade":
+        return "balanced"
+    if priority == "critico":
+        return "critical"
+    if getattr(automation, "is_critical_zone", False):
+        return "critical"
+    return "comfort_first"
+
+
+def _estimated_device_kw(row: _DeviceRow) -> float:
+    """Estimativa conservadora de kW para comparar candidatos.
+
+    A Brise pode fornecer `consumption_estimated`; quando não houver, cai para
+    uma aproximação por BTU para não escolher só por nome ou ordem da lista.
+    """
+    raw = _safe_float(getattr(row.status, "consumption_estimated", None))
+    if raw is not None and raw > 0:
+        return max(0.1, raw * settings.energy_consumption_scale)
+    btu = _safe_float(getattr(row.device, "btu", None), 12000.0) or 12000.0
+    return max(0.5, (btu / 12000.0) * 1.1)
+
+
+def _device_efficiency(row: _DeviceRow) -> float:
+    raw = _safe_float(getattr(row.status, "efficiency_score", None))
+    if raw is None:
+        return 0.72
+    if raw > 1:
+        raw = raw / 100.0
+    return max(0.2, min(1.0, raw))
+
+
+def _device_is_off(row: _DeviceRow, params: DeviceParameters | None) -> bool:
+    return (
+        row.status.status_classification == "DESLIGADO"
+        or row.status.state is False
+        or (params is not None and getattr(params, "mode_device", None) == 0)
+    )
+
+
+def _device_is_on(row: _DeviceRow, params: DeviceParameters | None) -> bool:
+    if _device_is_off(row, params):
+        return False
+    return row.status.state is True or (params is not None and getattr(params, "mode_device", None) == 1)
+
+
+def _minutes_since_state_change(row: _DeviceRow, on_state: bool) -> int | None:
+    attr = "accumulated_on_minutes" if on_state else "accumulated_off_minutes"
+    return _safe_int(getattr(row.status, attr, None))
+
+
+def _normal_cooling_floor(zone: ZoneConfig, automation: ZoneAutomation, status: str) -> int:
+    """Menor setpoint desejado para o ciclo atual.
+
+    WARM/HOT/hotspot trabalha perto do limite superior da faixa. CRITICAL pode
+    buscar a parte baixa da faixa, mas ainda em passos de 1°C e sem usar mínimo
+    do aparelho como alvo normal.
+    """
+    target = zone.ideal_min if status == "CRITICAL" else zone.ideal_max
+    return max(automation.setpoint_min, int(math.ceil(target)))
+
+
+def _power_on_setpoint(params: DeviceParameters, zone: ZoneConfig, automation: ZoneAutomation, status: str) -> int:
+    current = _safe_int(getattr(params, "setpoint_cool", None), int(math.ceil(zone.ideal_max))) or int(math.ceil(zone.ideal_max))
+    floor = _normal_cooling_floor(zone, automation, status)
+    return max(floor, min(automation.setpoint_max, current))
+
+
+def _planned_setpoint_after(
+    params: DeviceParameters,
+    direction: str,
+    zone: ZoneConfig | None,
+    automation: ZoneAutomation | None,
+    status: str,
+    *,
+    setpoint_min: int,
+    setpoint_max: int,
+) -> int | None:
+    current = _safe_int(getattr(params, "setpoint_cool", None))
+    if current is None:
+        return None
+    if direction == "up":
+        target = min(setpoint_max, current + 1)
+        return target if target != current else None
+    if zone is not None and automation is not None:
+        floor = _normal_cooling_floor(zone, automation, status)
+    else:
+        floor = setpoint_min
+    if current <= floor:
+        return None
+    target = max(floor, current - 1)
+    return target if target != current else None
+
+
+def _candidate_proximity(row: _DeviceRow, hotspot: Hotspot | None) -> float:
+    return proximity_score(
+        row.device.position_x,
+        row.device.position_y,
+        hotspot=hotspot,
+        influence_radius_m=float(row.device.influence_radius_m or 8),
+    )
+
+
+def _score_power_on_candidate(
+    row: _DeviceRow,
+    params: DeviceParameters,
+    *,
+    hotspot: Hotspot | None,
+    strategy: str,
+    devices_on: int,
+) -> EnergyCandidate | None:
+    off_minutes = _minutes_since_state_change(row, on_state=False)
+    if off_minutes is not None and off_minutes < MIN_OFF_BEFORE_POWER_ON_MINUTES:
+        return None
+
+    prox = _candidate_proximity(row, hotspot)
+    kw = _estimated_device_kw(row)
+    efficiency = _device_efficiency(row)
+    strategy_penalty = {"economy": 18.0, "balanced": 10.0, "comfort_first": 6.0, "critical": 2.0}.get(strategy, 10.0)
+    thermal = 42.0 + prox * 45.0 + min(float(row.device.btu or 0) / 24000.0, 1.0) * 8.0
+    energy_cost = kw * 14.0 + (1.0 - efficiency) * 18.0 + 16.0 + devices_on * 2.5 + strategy_penalty
+    if hotspot and hotspot.has_coordinates:
+        thermal += prox * 10.0
+    reason = (
+        "Aparelho desligado próximo ao hotspot; ação localizada evita baixar setpoint de vários aparelhos."
+        if hotspot else
+        "Aparelho desligado acrescenta capacidade; custo penalizado para evitar ligar equipamento sem necessidade."
+    )
+    return EnergyCandidate(
+        action="power_on",
+        row=row,
+        params=params,
+        thermal_impact_score=round(thermal, 1),
+        energy_cost_score=round(energy_cost, 1),
+        final_score=round(thermal - energy_cost, 1),
+        reason=reason,
+    )
+
+
+def _score_setpoint_candidate(
+    row: _DeviceRow,
+    params: DeviceParameters,
+    *,
+    direction: str,
+    zone: ZoneConfig | None,
+    automation: ZoneAutomation | None,
+    status: str,
+    hotspot: Hotspot | None,
+    setpoint_min: int,
+    setpoint_max: int,
+    strategy: str,
+) -> EnergyCandidate | None:
+    setpoint_after = _planned_setpoint_after(
+        params,
+        direction,
+        zone,
+        automation,
+        status,
+        setpoint_min=setpoint_min,
+        setpoint_max=setpoint_max,
+    )
+    if setpoint_after is None:
+        return None
+
+    prox = _candidate_proximity(row, hotspot)
+    kw = _estimated_device_kw(row)
+    efficiency = _device_efficiency(row)
+    delta_abs = abs(_safe_float(getattr(row.status, "delta_temp", None), 0.0) or 0.0)
+    thermal = 30.0 + prox * 38.0 + min(delta_abs * 6.0, 18.0)
+    if _device_is_on(row, params):
+        thermal += 8.0
+
+    low_setpoint_penalty = 0.0
+    if direction == "down" and zone is not None:
+        low_setpoint_penalty = max(0.0, zone.ideal_min - setpoint_after) * 18.0
+    strategy_penalty = {"economy": 10.0, "balanced": 5.0, "comfort_first": 2.0, "critical": 0.0}.get(strategy, 5.0)
+    energy_cost = kw * 10.0 + (1.0 - efficiency) * 16.0 + low_setpoint_penalty + strategy_penalty
+    action = "set_temperature_down" if direction == "down" else "set_temperature_up"
+    reason = (
+        "Ajuste de 1°C em aparelho já ligado e influente; evita ação global e setpoint agressivo."
+        if direction == "down" else
+        "Zona fria: elevar setpoint economiza energia antes de desligar equipamento."
+    )
+    return EnergyCandidate(
+        action=action,
+        row=row,
+        params=params,
+        thermal_impact_score=round(thermal, 1),
+        energy_cost_score=round(energy_cost, 1),
+        final_score=round(thermal - energy_cost, 1),
+        reason=reason,
+        setpoint_after=setpoint_after,
+    )
+
+
+def _build_power_on_candidates(
+    devices: list[_DeviceRow],
+    params_map: dict[uuid.UUID, DeviceParameters],
+    *,
+    hotspot: Hotspot | None,
+    strategy: str,
+) -> list[EnergyCandidate]:
+    devices_on = sum(1 for row in devices if _device_is_on(row, params_map.get(row.device.id)))
+    candidates: list[EnergyCandidate] = []
+    for row in devices:
+        if row.device.dnd or row.device.source_url:
+            continue
+        if not _device_command_communication_ok(row):
+            logger.debug(
+                "power_on_candidate: %s excluído — communication_ok=False "
+                "(status=%s, updated_at=%s, state=%s)",
+                row.device.name,
+                row.status.status_classification,
+                getattr(row.status, "updated_at", None),
+                row.status.state,
+            )
+            continue
+        params = params_map.get(row.device.id)
+        if params is None:
+            params = DeviceParameters(
+                device_id=row.device.id,
+                mode_device=0,
+                mode_ac=0,
+                fan_speed=1,
+                setpoint_cool=22,
+                setpoint_heat=28,
+                eco_cool=False,
+                eco_heat=False,
+            )
+        if not _device_is_off(row, params):
+            continue
+        scored = _score_power_on_candidate(row, params, hotspot=hotspot, strategy=strategy, devices_on=devices_on)
+        if scored is not None:
+            candidates.append(scored)
+
+    candidates.sort(
+        key=lambda item: (
+            item.final_score,
+            _candidate_proximity(item.row, hotspot),  # type: ignore[arg-type]
+            -(item.energy_cost_score),
+            getattr(item.row.device, "name", "") or "",  # type: ignore[attr-defined]
+        ),
+        reverse=True,
+    )
+    return candidates
+
+
+def _build_setpoint_candidates(
+    readable: list[_DeviceRow],
+    params_map: dict[uuid.UUID, DeviceParameters],
+    *,
+    direction: str,
+    setpoint_min: int,
+    setpoint_max: int,
+    hotspot: Hotspot | None,
+    zone: ZoneConfig | None,
+    automation: ZoneAutomation | None,
+    status: str,
+    strategy: str,
+) -> list[EnergyCandidate]:
+    candidates: list[EnergyCandidate] = []
+    for row in readable:
+        if row.device.dnd or row.device.source_url:
+            continue
+        if not _device_command_communication_ok(row):
+            continue
+        params = params_map.get(row.device.id)
+        if params is None or getattr(params, "setpoint_cool", None) is None:
+            continue
+        if direction == "down" and not _device_is_on(row, params):
+            continue
+        scored = _score_setpoint_candidate(
+            row,
+            params,
+            direction=direction,
+            zone=zone,
+            automation=automation,
+            status=status,
+            hotspot=hotspot,
+            setpoint_min=setpoint_min,
+            setpoint_max=setpoint_max,
+            strategy=strategy,
+        )
+        if scored is not None:
+            candidates.append(scored)
+
+    candidates.sort(
+        key=lambda item: (
+            item.final_score,
+            _candidate_proximity(item.row, hotspot),  # type: ignore[arg-type]
+            abs(_safe_float(getattr(item.row.status, "delta_temp", None), 0.0) or 0.0),  # type: ignore[attr-defined]
+            getattr(item.row.device, "name", "") or "",  # type: ignore[attr-defined]
+        ),
+        reverse=True,
+    )
+    return candidates
+
+
+def _energy_decision_payload(
+    *,
+    zone: ZoneConfig,
+    status: str,
+    strategy: str,
+    avg_temp: float,
+    devices: list[_DeviceRow],
+    params_map: dict[uuid.UUID, DeviceParameters],
+    selected: EnergyCandidate | None,
+    candidates: list[EnergyCandidate],
+) -> dict:
+    devices_on = sum(1 for row in devices if _device_is_on(row, params_map.get(row.device.id)))
+    devices_off = sum(1 for row in devices if _device_is_off(row, params_map.get(row.device.id)))
+    return {
+        "zone_label": zone.label,
+        "thermal_status": status.lower(),
+        "energy_strategy": strategy,
+        "current_temperature": round(avg_temp, 2),
+        "target_range": [zone.ideal_min, zone.ideal_max],
+        "devices_on": devices_on,
+        "devices_off": devices_off,
+        "candidate_actions": [
+            {
+                "action": candidate.action,
+                "device": getattr(candidate.row.device, "name", None),  # type: ignore[attr-defined]
+                "from": getattr(candidate.params, "setpoint_cool", None),
+                "to": candidate.setpoint_after,
+                "thermal_impact_score": candidate.thermal_impact_score,
+                "energy_cost_score": candidate.energy_cost_score,
+                "final_score": candidate.final_score,
+                "estimated_kw": round(_estimated_device_kw(candidate.row), 2),  # type: ignore[arg-type]
+                "reason": candidate.reason,
+            }
+            for candidate in candidates[:5]
+        ],
+        "selected_action": selected.action if selected else "none",
+        "selected_device": getattr(selected.row.device, "name", None) if selected else None,  # type: ignore[attr-defined]
+        "selected_reason": selected.reason if selected else "Nenhuma ação necessária com menor custo energético.",
+    }
+
+
+def _append_energy_decision(reason: str, payload: dict) -> str:
+    selected = payload.get("selected_device")
+    strategy = payload.get("energy_strategy")
+    action = payload.get("selected_action")
+    if selected:
+        summary = (
+            f"Energia: estratégia {strategy}; escolhido {action} em {selected} "
+            "por resolver localmente com menor custo estimado."
+        )
+    else:
+        summary = f"Energia: estratégia {strategy}; nenhuma ação para evitar consumo desnecessário."
+    return f"{reason} {summary}\n\nenergy_decision={json.dumps(payload, ensure_ascii=False)}"
+
+
+def _zone_energy_waste(
+    devices: list[_DeviceRow],
+    params_map: dict[uuid.UUID, DeviceParameters],
+    zone: ZoneConfig,
+    avg_temp: float,
+    trend: float | None,
+) -> tuple[bool, str]:
+    on_rows = [row for row in devices if not row.device.source_url and _device_is_on(row, params_map.get(row.device.id))]
+    if not on_rows:
+        return False, ""
+    low_setpoints = [
+        row for row in on_rows
+        if (params_map.get(row.device.id) is not None)
+        and (params_map[row.device.id].setpoint_cool or 99) < math.ceil(zone.ideal_min)
+    ]
+    total_kw = sum(_estimated_device_kw(row) for row in on_rows)
+    stable_or_falling = trend is None or trend <= 0.6
+    too_cold_edge = avg_temp <= zone.ideal_min + 0.3 and stable_or_falling
+    many_on = len(on_rows) >= 3 and stable_or_falling
+    high_kw = total_kw >= 4.0 and stable_or_falling
+    if low_setpoints or too_cold_edge or (many_on and high_kw):
+        reason = (
+            f"Zona confortável em {avg_temp:.1f}°C, {len(on_rows)} aparelho(s) ligado(s), "
+            f"potência estimada {total_kw:.1f} kW. "
+            "Oportunidade de economia: elevar setpoint em 1°C nos aparelhos mais baixos "
+            "ou desligar redundante após respeitar tempo mínimo ligado."
+        )
+        return True, reason
+    return False, ""
+
+
 def _hotspot_area_key(hotspot: Hotspot | None) -> str:
     if hotspot is None:
         return "no_hotspot"
@@ -1208,13 +1805,31 @@ def _select_best_device(
     setpoint_min: int,
     setpoint_max: int,
     hotspot: "Hotspot | None" = None,
+    zone: ZoneConfig | None = None,
+    automation: ZoneAutomation | None = None,
+    strategy: str = "balanced",
 ) -> tuple[_DeviceRow, DeviceParameters] | None:
+    scored = _build_setpoint_candidates(
+        readable,
+        params_map,
+        direction=direction,
+        setpoint_min=setpoint_min,
+        setpoint_max=setpoint_max,
+        hotspot=hotspot,
+        zone=zone,
+        automation=automation,
+        status=status,
+        strategy=strategy,
+    )
+    if scored:
+        best = scored[0]
+        return best.row, best.params  # type: ignore[return-value]
+
     going_down = direction == "down"
     candidates = [
         r for r in readable
         if r.device.id in params_map
         and not r.device.source_url
-        # Headroom: device must have room to move in the desired direction
         and (params_map[r.device.id].setpoint_cool > setpoint_min if going_down
              else params_map[r.device.id].setpoint_cool < setpoint_max)
     ]
@@ -1242,8 +1857,28 @@ def _select_hotspot_setpoint_candidates(
     params_map: dict[uuid.UUID, DeviceParameters],
     setpoint_min: int,
     hotspot: "Hotspot | None" = None,
+    zone: ZoneConfig | None = None,
+    automation: ZoneAutomation | None = None,
+    status: str = "WARM",
+    strategy: str = "balanced",
 ) -> list[tuple[_DeviceRow, DeviceParameters]]:
     """Retorna ACs ligados, comunicando e com margem real para reduzir setpoint."""
+    setpoint_max = automation.setpoint_max if automation is not None else 30
+    scored = _build_setpoint_candidates(
+        readable,
+        params_map,
+        direction="down",
+        setpoint_min=setpoint_min,
+        setpoint_max=setpoint_max,
+        hotspot=hotspot,
+        zone=zone,
+        automation=automation,
+        status=status,
+        strategy=strategy,
+    )
+    if scored:
+        return [(candidate.row, candidate.params) for candidate in scored]  # type: ignore[misc]
+
     candidates: list[_DeviceRow] = []
     for row in readable:
         if row.device.dnd or row.device.source_url:
@@ -1287,31 +1922,14 @@ def _select_power_on_candidate(
     devices: list[_DeviceRow],
     params_map: dict[uuid.UUID, DeviceParameters],
     hotspot: "Hotspot | None" = None,
+    strategy: str = "balanced",
 ) -> tuple[_DeviceRow, DeviceParameters] | None:
-    candidates = []
-    for row in devices:
-        if row.device.dnd or row.device.source_url:
-            continue
-        comm_ok = _device_command_communication_ok(row)
-        if not comm_ok:
-            logger.debug(
-                "power_on_candidate: %s excluído — communication_ok=False "
-                "(status=%s, updated_at=%s, state=%s)",
-                row.device.name,
-                row.status.status_classification,
-                getattr(row.status, "updated_at", None),
-                row.status.state,
-            )
-            continue
-        params = params_map.get(row.device.id)
-        is_off = (
-            row.status.status_classification == "DESLIGADO"
-            or row.status.state is False
-            or (params is not None and params.mode_device == 0)
-        )
-        if is_off:
-            candidates.append(row)
-
+    candidates = _build_power_on_candidates(
+        devices,
+        params_map,
+        hotspot=hotspot,
+        strategy=strategy,
+    )
     if not candidates:
         logger.debug(
             "power_on_candidate: nenhum candidato OFF disponível "
@@ -1321,20 +1939,8 @@ def _select_power_on_candidate(
         )
         return None
 
-    candidates.sort(
-        key=lambda row: (
-            proximity_score(
-                row.device.position_x,
-                row.device.position_y,
-                hotspot=hotspot,
-                influence_radius_m=float(row.device.influence_radius_m or 8),
-            ),
-            row.device.btu or 0,
-            row.device.name or "",
-        ),
-        reverse=True,
-    )
-    best = candidates[0]
+    best_candidate = candidates[0]
+    best = best_candidate.row  # type: ignore[assignment]
     best_prox = proximity_score(
         best.device.position_x,
         best.device.position_y,
@@ -1353,7 +1959,7 @@ def _select_power_on_candidate(
     )
 
     # Se não há params, cria um objeto temporário com defaults seguros para ligar
-    params = params_map.get(best.device.id)
+    params = best_candidate.params  # type: ignore[assignment]
     if params is None:
         params = DeviceParameters(
             device_id=best.device.id,
@@ -1372,12 +1978,14 @@ async def _execute_power_on(
     device: Device,
     params: DeviceParameters,
     session: AsyncSession,
+    target_setpoint: int | None = None,
 ) -> tuple[bool, int]:
+    setpoint_cool = target_setpoint or params.setpoint_cool or 22
     brise_params = {
         "modeDevice": 1,
         "modeAC": 0,
         "fanSpeed": params.fan_speed or 1,
-        "setpointCool": params.setpoint_cool or 22,
+        "setpointCool": setpoint_cool,
         "setpointHeat": params.setpoint_heat or 28,
         "ecoCool": params.eco_cool or False,
         "ecoHeat": params.eco_heat or False,
@@ -1389,6 +1997,7 @@ async def _execute_power_on(
     if success:
         params.mode_device = 1
         params.mode_ac = 0
+        params.setpoint_cool = setpoint_cool
         params.synced_at = datetime.utcnow()
         # Persiste o params se for novo (sem pk — device sem histórico de configuração)
         if params.id is None:

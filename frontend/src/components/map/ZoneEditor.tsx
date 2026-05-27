@@ -2,17 +2,18 @@
  * ZoneEditor — Editor visual de zonas térmicas no mapa SVG.
  * Geometria salva em % da planta (unit: "percent"), independente de resolução.
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Check, Trash2, X } from 'lucide-react'
+import { Check, Search, Trash2, X } from 'lucide-react'
 import { customZonesApi, storesApi } from '../../api/client'
 import { cn, formatTemp } from '../../lib/utils'
-import type { CustomZone, Device, ZoneGeometry } from '../../types'
+import type { CustomZone, Device, Sector, ZoneGeometry } from '../../types'
 
 const ZONE_COLORS = ['#3B82F6','#8B5CF6','#10B981','#F59E0B','#EF4444','#EC4899','#06B6D4','#84CC16']
 const STATUS_COLOR: Record<string,string> = { COLD:'#2563EB', COMFORT:'#22C55E', WARM:'#EAB308', HOT:'#F97316', CRITICAL:'#EF4444', NO_READING:'#6B7280' }
 
 type DrawMode = 'rect' | 'polygon'
+type PercentPoint = { x: number; y: number }
 
 interface Props {
   storeId: string; floor: number; editMode: boolean
@@ -22,13 +23,19 @@ interface Props {
   onZoneClick?: (zoneKey: string) => void
 }
 
+function clamp(n: number, min = 0, max = 100) {
+  return Math.min(max, Math.max(min, n))
+}
+function roundPct(n: number) {
+  return Math.round(clamp(n) * 100) / 100
+}
 function toPercent(svgX: number, svgY: number, vb: { w: number; h: number }) {
-  return { x: Math.round(svgX / vb.w * 10000) / 100, y: Math.round(svgY / vb.h * 10000) / 100 }
+  return { x: roundPct(svgX / vb.w * 100), y: roundPct(svgY / vb.h * 100) }
 }
 function fromPercent(px: number, py: number, vb: { w: number; h: number }) {
   return { x: px / 100 * vb.w, y: py / 100 * vb.h }
 }
-function pointInPolygon(px: number, py: number, pts: { x: number; y: number }[]) {
+function pointInPolygon(px: number, py: number, pts: PercentPoint[]) {
   let inside = false
   for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
     const { x: xi, y: yi } = pts[i], { x: xj, y: yj } = pts[j]
@@ -36,9 +43,18 @@ function pointInPolygon(px: number, py: number, pts: { x: number; y: number }[])
   }
   return inside
 }
-function geoBounds(pts: { x: number; y: number }[]) {
+function geoBounds(pts: PercentPoint[]) {
   const xs = pts.map(p => p.x), ys = pts.map(p => p.y)
   return { minX: Math.min(...xs), minY: Math.min(...ys), maxX: Math.max(...xs), maxY: Math.max(...ys) }
+}
+function movePointsWithinBounds(pts: PercentPoint[], dx: number, dy: number) {
+  const b = geoBounds(pts)
+  const safeDx = Math.min(100 - b.maxX, Math.max(-b.minX, dx))
+  const safeDy = Math.min(100 - b.maxY, Math.max(-b.minY, dy))
+  return pts.map(p => ({ x: roundPct(p.x + safeDx), y: roundPct(p.y + safeDy) }))
+}
+function geoKey(geo: ZoneGeometry) {
+  return geo.points.map(p => `${p.x}:${p.y}`).join('|')
 }
 function geoToSVGPoints(geo: ZoneGeometry, vb: { w: number; h: number }) {
   return geo.points.map(p => { const s = fromPercent(p.x, p.y, vb); return `${s.x},${s.y}` }).join(' ')
@@ -50,17 +66,18 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
   const [drawMode, setDrawMode] = useState<DrawMode>('rect')
   const [showForm, setShowForm] = useState(false)
   const [pendingGeo, setPendingGeo] = useState<ZoneGeometry | null>(null)
-  const [rectStart, setRectStart] = useState<{ x: number; y: number } | null>(null)
-  const [rectCur, setRectCur] = useState<{ x: number; y: number } | null>(null)
-  const [polyPoints, setPolyPoints] = useState<{ x: number; y: number }[]>([])
-  const [polyCur, setPolyCur] = useState<{ x: number; y: number } | null>(null)
-  const [livePos, setLivePos] = useState<Record<string, { x: number; y: number }[]>>({})
+  const [rectStart, setRectStart] = useState<PercentPoint | null>(null)
+  const [rectCur, setRectCur] = useState<PercentPoint | null>(null)
+  const [polyPoints, setPolyPoints] = useState<PercentPoint[]>([])
+  const [polyCur, setPolyCur] = useState<PercentPoint | null>(null)
+  const [livePos, setLivePos] = useState<Record<string, PercentPoint[]>>({})
   const livePosRef = useRef(livePos)  // ref para evitar stale closure no useEffect
   livePosRef.current = livePos
-  const [dragging, setDragging] = useState<{ zoneKey: string; startPts: { x: number; y: number }[]; startMouse: { x: number; y: number } } | null>(null)
+  const [dragging, setDragging] = useState<{ zoneKey: string; startPts: PercentPoint[]; startMouse: PercentPoint } | null>(null)
   const draggingRef = useRef(dragging)
   draggingRef.current = dragging
   const hasMoved = useRef(false)
+  const suppressClick = useRef(false)
 
   const [formName, setFormName] = useState('')
   const [formMin, setFormMin] = useState(20)
@@ -68,17 +85,24 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
   const [formType, setFormType] = useState<'ABERTA'|'SALA_FECHADA'>('ABERTA')
   const [formColor, setFormColor] = useState(ZONE_COLORS[0])
   const [formDevices, setFormDevices] = useState<string[]>([])
+  const [formSearch, setFormSearch] = useState('')
   const [formError, setFormError] = useState<string|null>(null)
+  const [autoLinkedGeoKey, setAutoLinkedGeoKey] = useState<string | null>(null)
 
   const { data: customZones = [] } = useQuery<CustomZone[]>({
     queryKey: ['custom-zones', storeId],
     queryFn: () => customZonesApi.list(storeId),
     refetchInterval: 30000,
   })
-  const { data: storeDevices = [] } = useQuery<Device[]>({
+  const { data: storeDevices = [], isFetched: devicesFetched } = useQuery<Device[]>({
     queryKey: ['store-devices', storeId],
     queryFn: () => storesApi.devices(storeId),
-    enabled: showForm,
+    enabled: editMode || showForm,
+  })
+  const { data: sectors = [], isFetched: sectorsFetched } = useQuery<Sector[]>({
+    queryKey: ['store-sectors', storeId],
+    queryFn: () => storesApi.sectors(storeId),
+    enabled: editMode || showForm,
   })
 
   const invalidate = () => {
@@ -103,6 +127,26 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
   })
 
   const floorZones = customZones.filter(z => z.floor === floor && z.geometry != null)
+  const sectorFloorById = useMemo(
+    () => new Map(sectors.map((s: Sector) => [s.id, s.floor])),
+    [sectors],
+  )
+  const acDevicesOnFloor = useMemo(
+    () => storeDevices.filter((d: Device) => {
+      const isSelectedInForm = formDevices.includes(d.id)
+      return !d.is_external_sensor && (sectorFloorById.get(d.sector_id || '') === floor || isSelectedInForm)
+    }),
+    [storeDevices, sectorFloorById, floor, formDevices],
+  )
+  const filteredFormDevices = useMemo(() => {
+    const q = formSearch.trim().toLowerCase()
+    if (!q) return acDevicesOnFloor
+    return acDevicesOnFloor.filter((d: Device) =>
+      d.name.toLowerCase().includes(q)
+      || d.brise_id.toLowerCase().includes(q)
+      || (d.sector_name ?? '').toLowerCase().includes(q)
+    )
+  }, [acDevicesOnFloor, formSearch])
 
   const screenToPct = useCallback((clientX: number, clientY: number) => {
     const el = svgRef.current
@@ -128,28 +172,42 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
 
   const devicesInsideGeo = useCallback((geo: ZoneGeometry) =>
     storeDevices.filter((d: Device) => {
+      if (d.is_external_sensor) return false
+      if (sectorFloorById.get(d.sector_id || '') !== floor) return false
       if (d.position_x == null || d.position_y == null) return false
       const p = toPercent(Number(d.position_x), Number(d.position_y), viewbox)
       return pointInPolygon(p.x, p.y, geo.points)
     }).map((d: Device) => d.id)
-  , [storeDevices, viewbox])
+  , [storeDevices, sectorFloorById, floor, viewbox])
 
   const openForm = useCallback((zone?: CustomZone, geo?: ZoneGeometry) => {
     if (zone) {
       setFormName(zone.name); setFormMin(zone.ideal_min); setFormMax(zone.ideal_max)
       setFormType(zone.zone_type as any); setFormColor(zone.color ?? ZONE_COLORS[0])
       setFormDevices(zone.device_ids)
+      setAutoLinkedGeoKey(null)
     } else {
       setFormName(''); setFormMin(20); setFormMax(24); setFormType('ABERTA')
       setFormColor(ZONE_COLORS[0])
       setFormDevices(geo ? devicesInsideGeo(geo) : [])
+      setAutoLinkedGeoKey(null)
     }
+    setFormSearch('')
     setFormError(null); setShowForm(true)
   }, [devicesInsideGeo])
 
   const closeForm = useCallback(() => {
-    setShowForm(false); setPendingGeo(null); setSelected(null); setFormError(null)
+    setShowForm(false); setPendingGeo(null); setSelected(null); setFormError(null); setFormSearch(''); setAutoLinkedGeoKey(null)
   }, [])
+
+  useEffect(() => {
+    if (!showForm || selected || !pendingGeo) return
+    if (!devicesFetched || !sectorsFetched) return
+    const key = geoKey(pendingGeo)
+    if (autoLinkedGeoKey === key) return
+    setFormDevices(devicesInsideGeo(pendingGeo))
+    setAutoLinkedGeoKey(key)
+  }, [showForm, selected, pendingGeo, devicesFetched, sectorsFetched, autoLinkedGeoKey, devicesInsideGeo])
 
   const handleSave = useCallback(() => {
     const name = formName.trim()
@@ -165,6 +223,37 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
     }
   }, [formName, formMin, formMax, formType, formColor, formDevices, selected, pendingGeo, floor, createMutation, updateMutation])
 
+  const cancelDrawing = useCallback(() => {
+    setRectStart(null)
+    setRectCur(null)
+    setPolyPoints([])
+    setPolyCur(null)
+    setDragging(null)
+    hasMoved.current = false
+    suppressClick.current = false
+  }, [])
+
+  useEffect(() => {
+    cancelDrawing()
+    if (!editMode) closeForm()
+  }, [drawMode, editMode, cancelDrawing, closeForm])
+
+  useEffect(() => {
+    if (!editMode) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (showForm) closeForm()
+        else cancelDrawing()
+      }
+      if (e.key === 'Enter' && drawMode === 'polygon' && polyPoints.length >= 3 && !showForm) {
+        const geo: ZoneGeometry = { type:'polygon', unit:'percent', points: polyPoints }
+        setPolyPoints([]); setPolyCur(null); setPendingGeo(geo); openForm(undefined, geo)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [editMode, showForm, closeForm, cancelDrawing, drawMode, polyPoints, openForm])
+
   // Listeners globais
   useEffect(() => {
     if (!editMode) return
@@ -175,8 +264,9 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
       const dr = draggingRef.current
       if (dr) {
         hasMoved.current = true
+        suppressClick.current = true
         const dx = pct.x - dr.startMouse.x, dy = pct.y - dr.startMouse.y
-        setLivePos(lp => ({ ...lp, [dr.zoneKey]: dr.startPts.map(p => ({ x: p.x + dx, y: p.y + dy })) }))
+        setLivePos(lp => ({ ...lp, [dr.zoneKey]: movePointsWithinBounds(dr.startPts, dx, dy) }))
       }
     }
     const onUp = (e: MouseEvent) => {
@@ -201,10 +291,11 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
     return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
-  }, [editMode, rectStart, polyPoints, livePos, screenToPct, updateMutation, openForm])
+  }, [editMode, rectStart, polyPoints, screenToPct, updateMutation, openForm])
 
   const onBgMouseDown = useCallback((e: React.MouseEvent<SVGRectElement>) => {
     if (!editMode || showForm || dragging || drawMode !== 'rect') return
+    if (e.button !== 0) return
     e.stopPropagation()
     const pct = screenToPct(e.clientX, e.clientY)
     setRectStart(pct); setRectCur(pct); hasMoved.current = false
@@ -212,6 +303,7 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
 
   const onBgClick = useCallback((e: React.MouseEvent<SVGRectElement>) => {
     if (!editMode || showForm || drawMode !== 'polygon') return
+    if (e.detail > 1) return
     e.stopPropagation()
     setPolyPoints(prev => [...prev, screenToPct(e.clientX, e.clientY)])
   }, [editMode, showForm, drawMode, screenToPct])
@@ -225,6 +317,7 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
 
   const onZoneMouseDown = useCallback((e: React.MouseEvent, zone: CustomZone) => {
     if (!editMode || !zone.geometry) return
+    if (e.button !== 0) return
     e.stopPropagation()
     hasMoved.current = false
     const pct = screenToPct(e.clientX, e.clientY)
@@ -234,6 +327,7 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
 
   const handleZoneClick = useCallback((e: React.MouseEvent, zone: CustomZone) => {
     e.stopPropagation()
+    if (suppressClick.current) { suppressClick.current = false; return }
     if (hasMoved.current) return
     if (editMode) { setSelected(zone); openForm(zone) }
     else onZoneClick?.(zone.zone_key)
@@ -383,7 +477,7 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
 
       {/* Painel de propriedades */}
       {showForm && (
-        <foreignObject x={10} y={10} width={265} height={470}>
+        <foreignObject x={10} y={10} width={285} height={520}>
           <div className="rounded-xl border border-violet-500/30 bg-gray-900/96 p-3 shadow-2xl backdrop-blur text-xs text-gray-300 space-y-2">
             <div className="flex items-center justify-between">
               <span className="font-semibold text-white text-sm">{selected ? 'Editar zona' : 'Nova zona'}</span>
@@ -427,8 +521,37 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
                 <span className="text-gray-400">Equipamentos</span>
                 <span className="text-[10px] text-violet-400">{formDevices.length} vinculados</span>
               </div>
+              <div className="mb-1.5 flex items-center gap-1">
+                <div className="relative min-w-0 flex-1">
+                  <Search className="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-gray-500" />
+                  <input
+                    value={formSearch}
+                    onChange={e => setFormSearch(e.target.value)}
+                    placeholder="Buscar AC"
+                    className="w-full rounded-md border border-gray-700 bg-gray-800 py-1.5 pl-7 pr-2 text-xs text-white placeholder-gray-500 focus:border-violet-500 focus:outline-none"
+                  />
+                </div>
+                {pendingGeo && !selected && (
+                  <button
+                    type="button"
+                    onClick={() => setFormDevices(devicesInsideGeo(pendingGeo))}
+                    className="rounded-md border border-violet-500/50 px-2 py-1.5 text-[10px] font-semibold text-violet-300 hover:bg-violet-900/40"
+                  >
+                    Dentro
+                  </button>
+                )}
+                {formDevices.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setFormDevices([])}
+                    className="rounded-md border border-gray-700 px-2 py-1.5 text-[10px] font-semibold text-gray-400 hover:bg-gray-800"
+                  >
+                    Limpar
+                  </button>
+                )}
+              </div>
               <div className="max-h-28 overflow-y-auto rounded-md border border-gray-700 bg-gray-800 p-1 space-y-0.5">
-                {storeDevices.filter((d: Device) => !d.is_external_sensor).map((d: Device) => (
+                {filteredFormDevices.map((d: Device) => (
                   <label key={d.id} className="flex cursor-pointer items-center gap-1.5 rounded px-1 py-0.5 hover:bg-gray-700">
                     <input type="checkbox" checked={formDevices.includes(d.id)}
                       onChange={() => toggleDevice(d.id)} className="accent-violet-500 h-3 w-3" />
@@ -436,6 +559,11 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
                     {d.temperature != null && <span className="ml-auto text-[10px] text-gray-500">{formatTemp(d.temperature)}</span>}
                   </label>
                 ))}
+                {filteredFormDevices.length === 0 && (
+                  <div className="px-2 py-3 text-center text-[11px] text-gray-500">
+                    {formSearch.trim() ? 'Nenhum resultado.' : 'Nenhum AC neste andar.'}
+                  </div>
+                )}
               </div>
             </div>
             <button type="button" disabled={!formName.trim()||formMin>=formMax||createMutation.isPending||updateMutation.isPending}
