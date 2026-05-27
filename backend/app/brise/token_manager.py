@@ -2,6 +2,7 @@ import asyncio
 import logging
 import time
 import httpx
+from sqlalchemy import text
 from app.config import settings
 from app.cache.redis_client import redis_client
 
@@ -20,8 +21,7 @@ class BriseTokenManager:
       2. POST /exchange-code  {grant_type:"authorization_code", code, client_id, client_secret, redirect_uri}
          → {access_token, refresh_token, expires_in}
 
-    O token expira em ~6 meses (15768000s), mas renovamos via refresh_token
-    quando estiver a menos de 5 minutos do vencimento.
+    Persistência dupla: Redis (cache rápido) + PostgreSQL (sobrevive restart).
     """
 
     def __init__(self):
@@ -32,12 +32,20 @@ class BriseTokenManager:
         expiry = await redis_client.get(REDIS_EXPIRY_KEY)
         if token and expiry and float(expiry) > time.time() + 300:
             return token
+        # Redis vazio (restart do container) — tenta carregar do banco antes de re-autenticar
+        await self._load_from_db_into_redis()
+        token = await redis_client.get(REDIS_TOKEN_KEY)
+        expiry = await redis_client.get(REDIS_EXPIRY_KEY)
+        if token and expiry and float(expiry) > time.time() + 300:
+            return token
         return await self._acquire_token()
 
     async def invalidate_token(self) -> None:
         """Força a expiração do token em cache (chamado após 401 do servidor)."""
         await redis_client.delete(REDIS_TOKEN_KEY)
         await redis_client.delete(REDIS_EXPIRY_KEY)
+        await self._db_delete("brise:token:access")
+        await self._db_delete("brise:token:expiry")
         logger.info("Brise token invalidado por resposta 401")
 
     async def _acquire_token(self) -> str:
@@ -51,7 +59,6 @@ class BriseTokenManager:
             # Lock distribuído protege múltiplos processos/workers
             acquired = await redis_client.acquire_lock("brise:token:refresh_lock", ttl=30)
             if not acquired:
-                # Outro processo já está renovando; aguarda e retorna o token novo
                 await asyncio.sleep(3)
                 token = await redis_client.get(REDIS_TOKEN_KEY)
                 if token:
@@ -124,7 +131,73 @@ class BriseTokenManager:
         await redis_client.set(REDIS_EXPIRY_KEY, str(expiry_ts), ttl=ttl)
         if refresh:
             await redis_client.set(REDIS_REFRESH_KEY, refresh, ttl=ttl + 86400)
+
+        # persistência no banco — sobrevive ao restart do container
+        await self._db_upsert("brise:token:access", access, expiry_ts)
+        await self._db_upsert("brise:token:expiry", str(expiry_ts), expiry_ts)
+        if refresh:
+            await self._db_upsert("brise:token:refresh", refresh, expiry_ts + 86400)
+
         return access
+
+    async def _load_from_db_into_redis(self) -> None:
+        """Carrega tokens do banco para o Redis após restart do container."""
+        try:
+            from app.db.session import AsyncSessionLocal
+            async with AsyncSessionLocal() as session:
+                rows = await session.execute(
+                    text("SELECT key, value, expires_at FROM brise_tokens WHERE key IN ('brise:token:access','brise:token:expiry','brise:token:refresh')")
+                )
+                data = {row.key: (row.value, row.expires_at) for row in rows}
+
+            now = time.time()
+            access_row = data.get("brise:token:access")
+            expiry_row = data.get("brise:token:expiry")
+
+            if not access_row or not expiry_row:
+                return
+
+            expiry_ts = float(expiry_row[0])
+            if expiry_ts <= now + 300:
+                return  # expirado — não vale restaurar
+
+            ttl = int(expiry_ts - now - 300)
+            await redis_client.set(REDIS_TOKEN_KEY, access_row[0], ttl=max(ttl, 60))
+            await redis_client.set(REDIS_EXPIRY_KEY, expiry_row[0], ttl=max(ttl, 60))
+
+            refresh_row = data.get("brise:token:refresh")
+            if refresh_row:
+                await redis_client.set(REDIS_REFRESH_KEY, refresh_row[0], ttl=max(ttl + 86400, 60))
+
+            logger.info("Brise tokens restaurados do banco após restart (expira em %.0fh)", ttl / 3600)
+        except Exception as exc:
+            logger.warning("Não foi possível restaurar tokens Brise do banco: %s", exc)
+
+    async def _db_upsert(self, key: str, value: str, expiry_ts: float) -> None:
+        try:
+            from app.db.session import AsyncSessionLocal
+            import datetime
+            expires_at = datetime.datetime.utcfromtimestamp(expiry_ts)
+            async with AsyncSessionLocal() as session:
+                await session.execute(
+                    text(
+                        "INSERT INTO brise_tokens (key, value, expires_at) VALUES (:k, :v, :e) "
+                        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, expires_at = EXCLUDED.expires_at"
+                    ),
+                    {"k": key, "v": value, "e": expires_at},
+                )
+                await session.commit()
+        except Exception as exc:
+            logger.warning("Falha ao persistir token Brise no banco (%s): %s", key, exc)
+
+    async def _db_delete(self, key: str) -> None:
+        try:
+            from app.db.session import AsyncSessionLocal
+            async with AsyncSessionLocal() as session:
+                await session.execute(text("DELETE FROM brise_tokens WHERE key = :k"), {"k": key})
+                await session.commit()
+        except Exception as exc:
+            logger.warning("Falha ao deletar token Brise do banco (%s): %s", key, exc)
 
 
 token_manager = BriseTokenManager()

@@ -180,6 +180,12 @@ _STATEMENTS = [
        )
        WHERE x IS NOT NULL AND y IS NOT NULL AND w IS NOT NULL AND h IS NOT NULL
          AND geometry IS NULL""",
+    # persistência de tokens Brise no PostgreSQL (sobrevive restart do container)
+    """CREATE TABLE IF NOT EXISTS brise_tokens (
+        key VARCHAR(80) PRIMARY KEY,
+        value TEXT NOT NULL,
+        expires_at TIMESTAMP
+    )""",
 ]
 
 
