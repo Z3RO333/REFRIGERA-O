@@ -348,7 +348,33 @@ export default function ThermalComfortMap() {
   const avgStoreTemp = average(zoneStates.map(z => z.avgTemp).filter((v): v is number => v != null))
 
   const floorConfig = useMemo(() => getFloorConfig(selectedFloor), [selectedFloor])
-  const thermalGrid = useMemo(() => buildThermalGrid(heatPoints, avgStoreTemp), [heatPoints, avgStoreTemp])
+
+  // Polígonos SVG para cada zona — usados para restringir o IDW a áreas mapeadas
+  const zonePolygons = useMemo<Pt[][]>(() => {
+    const polys: Pt[][] = []
+    for (const cz of floorCustomZones) {
+      const g = cz.geometry
+      if (g?.unit === 'percent' && g.points?.length >= 3) {
+        polys.push(g.points.map(p => ({ x: p.x / 100 * VIEWBOX.w, y: p.y / 100 * VIEWBOX.h })))
+      }
+    }
+    for (const z of legacyRectZones) {
+      if (z.w > 0 && z.h > 0) {
+        polys.push([
+          { x: z.x,       y: z.y       },
+          { x: z.x + z.w, y: z.y       },
+          { x: z.x + z.w, y: z.y + z.h },
+          { x: z.x,       y: z.y + z.h },
+        ])
+      }
+    }
+    return polys
+  }, [floorCustomZones, legacyRectZones])
+
+  const thermalGrid = useMemo(
+    () => buildThermalGrid(heatPoints, avgStoreTemp, zonePolygons),
+    [heatPoints, avgStoreTemp, zonePolygons],
+  )
 
   const lastUpdate = newestDate(floorDevices.map((d: Device) => d.updated_at).filter(Boolean) as string[])
   const externalSensorsOnFloor = floorDevices.filter((d: Device) => d.is_external_sensor)
@@ -2110,6 +2136,22 @@ function getFloorConfig(_floor: number): FloorConfig {
   return { imageX: 0, imageY: 0, imageW: VIEWBOX.w, imageH: VIEWBOX.h }
 }
 
+// ── Point-in-polygon (ray casting) ────────────────────────────────────────────
+
+type Pt = { x: number; y: number }
+
+function pointInPolygon(px: number, py: number, poly: Pt[]): boolean {
+  let inside = false
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i].x, yi = poly[i].y
+    const xj = poly[j].x, yj = poly[j].y
+    const intersect = (yi > py) !== (yj > py) &&
+      px < ((xj - xi) * (py - yi)) / (yj - yi) + xi
+    if (intersect) inside = !inside
+  }
+  return inside
+}
+
 // ── IDW interpolation ─────────────────────────────────────────────────────────
 
 function interpolateTemp(x: number, y: number, points: HeatPoint[]): number | null {
@@ -2134,16 +2176,23 @@ function interpolateTemp(x: number, y: number, points: HeatPoint[]): number | nu
 
 interface ThermalCell { x: number; y: number; color: string }
 
-function buildThermalGrid(points: HeatPoint[], fallbackTemp: number | null): ThermalCell[] {
+function buildThermalGrid(
+  points: HeatPoint[],
+  fallbackTemp: number | null,
+  zonePolygons: Pt[][],
+): ThermalCell[] {
   const valid = points.filter(p => p.temp != null)
   if (!valid.length && fallbackTemp == null) return []
 
+  const hasPolygons = zonePolygons.length > 0
   const cells: ThermalCell[] = []
   for (let y = 0; y < VIEWBOX.h; y += GRID_CELL) {
     for (let x = 0; x < VIEWBOX.w; x += GRID_CELL) {
-      const temp = valid.length
-        ? interpolateTemp(x + GRID_CELL / 2, y + GRID_CELL / 2, valid)
-        : fallbackTemp
+      const cx = x + GRID_CELL / 2
+      const cy = y + GRID_CELL / 2
+      // Só renderiza dentro de alguma zona definida — evita "calor fantasma" em corredores
+      if (hasPolygons && !zonePolygons.some(poly => pointInPolygon(cx, cy, poly))) continue
+      const temp = valid.length ? interpolateTemp(cx, cy, valid) : fallbackTemp
       if (temp == null) continue
       cells.push({ x, y, color: thermalColor(temp) })
     }
