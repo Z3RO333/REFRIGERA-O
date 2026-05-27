@@ -57,8 +57,8 @@ class BriseTokenManager:
                 return token
 
             # Lock distribuído protege múltiplos processos/workers
-            acquired = await redis_client.acquire_lock("brise:token:refresh_lock", ttl=30)
-            if not acquired:
+            lock_token = await redis_client.acquire_lock("brise:token:refresh_lock", ttl=30)
+            if not lock_token:
                 await asyncio.sleep(3)
                 token = await redis_client.get(REDIS_TOKEN_KEY)
                 if token:
@@ -77,8 +77,8 @@ class BriseTokenManager:
                 logger.info("Brise token obtido via auth completo")
                 return token
             finally:
-                if acquired:
-                    await redis_client.release_lock("brise:token:refresh_lock")
+                if lock_token:
+                    await redis_client.release_lock("brise:token:refresh_lock", lock_token)
 
     async def _full_auth(self) -> str:
         async with httpx.AsyncClient(verify=settings.brise_verify_tls, timeout=30) as client:

@@ -34,7 +34,8 @@ async def run_ai_analysis() -> None:
         return
 
     lock_key = "ai:analysis:lock"
-    if not await redis_client.acquire_lock(lock_key, ttl=AI_ANALYSIS_LOCK_SECONDS):
+    lock_token = await redis_client.acquire_lock(lock_key, ttl=AI_ANALYSIS_LOCK_SECONDS)
+    if not lock_token:
         logger.debug("AI analysis: execução ignorada, lock ativo")
         return
 
@@ -84,7 +85,7 @@ async def run_ai_analysis() -> None:
     except Exception as exc:
         logger.error("Erro no job de análise de IA: %s", exc, exc_info=True)
     finally:
-        await redis_client.release_lock(lock_key)
+        await redis_client.release_lock(lock_key, lock_token)
 
 
 from sqlalchemy import select, func

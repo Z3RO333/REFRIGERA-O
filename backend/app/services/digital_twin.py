@@ -292,12 +292,11 @@ async def compute_zone_twin(
             ):
                 active_ac += 1
 
-        if status.temperature is not None:
-            temps_now.append(float(status.temperature))
-
         is_stale = bool(status.updated_at and status.updated_at < stale_cut)
         if is_stale:
             readings_fresh = False
+        elif status.temperature is not None:
+            temps_now.append(float(status.temperature))
         controllable = not is_ext and not device.dnd
         communication_ok = status.status_classification not in {"SEM_LEITURA", "LEITURA_STALE"} and not is_stale
         params = params_map.get(device.id)

@@ -64,10 +64,25 @@ class RedisClient:
     async def lrange(self, key: str, start: int, end: int) -> list[str]:
         return await self.client.lrange(key, start, end)
 
-    async def acquire_lock(self, key: str, ttl: int = 240) -> bool:
-        return bool(await self.client.set(key, "1", nx=True, ex=ttl))
+    async def acquire_lock(self, key: str, ttl: int = 240) -> str | None:
+        """Retorna o token do lock (str truthy) se adquirido, None se já estava bloqueado."""
+        import secrets
+        token = secrets.token_hex(8)
+        acquired = await self.client.set(key, token, nx=True, ex=ttl)
+        return token if acquired else None
 
-    async def release_lock(self, key: str):
-        await self.client.delete(key)
+    # Script Lua para release atômico: só deleta se ainda for o dono do lock.
+    # Evita race onde o TTL expirou, outro processo adquiriu, e o primeiro libera indevidamente.
+    _RELEASE_LUA = (
+        "if redis.call('get', KEYS[1]) == ARGV[1] then "
+        "return redis.call('del', KEYS[1]) "
+        "else return 0 end"
+    )
+
+    async def release_lock(self, key: str, token: str | None = None) -> None:
+        if token:
+            await self.client.eval(self._RELEASE_LUA, 1, key, token)
+        else:
+            await self.client.delete(key)
 
 redis_client = RedisClient()

@@ -94,7 +94,8 @@ async def poll_device(
     zone_ideal_min: float | None = None,
     zone_ideal_max: float | None = None,
 ):
-    if not await acquire_polling_lock(device_id):
+    poll_lock_token = await acquire_polling_lock(device_id)
+    if not poll_lock_token:
         return
     poll_error: str | None = None  # definido antes do try para evitar NameError
     try:
@@ -392,7 +393,7 @@ async def poll_device(
                 })
             await redis_client.publish("device.reading.new", cache_data)
     finally:
-        await release_polling_lock(device_id)
+        await release_polling_lock(device_id, poll_lock_token)
 
 async def poll_all_devices():
     from app.models.store import StoreSector

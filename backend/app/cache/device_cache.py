@@ -28,9 +28,9 @@ async def set_alert_cooldown(device_id: uuid.UUID, alert_type: str, severity: st
     ttl = P1_ALERT_COOLDOWN_TTL if severity == "P1" else ALERT_COOLDOWN_TTL
     await redis_client.set(key, "1", ttl=ttl)
 
-async def acquire_polling_lock(device_id: uuid.UUID) -> bool:
+async def acquire_polling_lock(device_id: uuid.UUID) -> str | None:
     # TTL deve ser > poll_variables_interval (300s) para evitar sobreposição de ciclos
     return await redis_client.acquire_lock(f"polling:lock:{device_id}", ttl=360)
 
-async def release_polling_lock(device_id: uuid.UUID):
-    await redis_client.release_lock(f"polling:lock:{device_id}")
+async def release_polling_lock(device_id: uuid.UUID, token: str | None = None) -> None:
+    await redis_client.release_lock(f"polling:lock:{device_id}", token)

@@ -754,8 +754,6 @@ async def delete_custom_zone(
     if auto:
         auto.mode = "manual"
 
-    await db.commit()
-
     await log_action(db,
         action_type="custom_zone_deleted",
         description=f"Zona '{cz.name}' desativada (soft delete)",
@@ -763,6 +761,7 @@ async def delete_custom_zone(
         store_id=store_id,
         zone_key=zone_key,
     )
+    await db.commit()
 
     return {"deleted": zone_key}
 
@@ -782,7 +781,6 @@ async def restore_custom_zone(
         raise HTTPException(404, "Zona não encontrada")
     cz.active = True
     cz.updated_at = datetime.utcnow()
-    await db.commit()
     await log_action(db,
         action_type="custom_zone_restored",
         description=f"Zona '{cz.name}' restaurada",
@@ -790,6 +788,7 @@ async def restore_custom_zone(
         store_id=store_id,
         zone_key=zone_key,
     )
+    await db.commit()
     return {"restored": zone_key}
 
 

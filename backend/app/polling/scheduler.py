@@ -39,13 +39,14 @@ def _with_lock(job_id: str):
         @wraps(fn)
         async def wrapped():
             lock_key = f"sched:lock:{job_id}"
-            if not await redis_client.acquire_lock(lock_key, ttl=ttl):
+            lock_token = await redis_client.acquire_lock(lock_key, ttl=ttl)
+            if not lock_token:
                 logger.debug("Skipping job %s — locked by another worker", job_id)
                 return
             try:
                 await fn()
             finally:
-                await redis_client.release_lock(lock_key)
+                await redis_client.release_lock(lock_key, lock_token)
         return wrapped
     return decorator
 

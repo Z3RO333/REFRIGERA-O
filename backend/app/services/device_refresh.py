@@ -40,7 +40,8 @@ async def refresh_device_status(
     Retorna o payload de status atualizado, ou None se a Brise não respondeu.
     """
     lock_key = f"refresh:lock:{device_id}"
-    if not await redis_client.acquire_lock(lock_key, ttl=_REFRESH_LOCK_TTL):
+    lock_token = await redis_client.acquire_lock(lock_key, ttl=_REFRESH_LOCK_TTL)
+    if not lock_token:
         logger.debug("refresh_device_status [%s]: lock já ativo, skip", brise_id)
         return None
 
@@ -168,7 +169,7 @@ async def refresh_device_status(
         return cache_status
 
     finally:
-        await redis_client.release_lock(lock_key)
+        await redis_client.release_lock(lock_key, lock_token)
 
 
 async def refresh_after_command(
