@@ -202,6 +202,8 @@ _STATEMENTS = [
         updated_at TIMESTAMP NOT NULL DEFAULT now()
     )""",
     "CREATE INDEX IF NOT EXISTS ix_store_epochs_store ON store_epochs (store_id)",
+    # allow_auto_power_off: False em zonas comerciais (farma/loja) — AC nunca desliga automaticamente
+    "ALTER TABLE zone_automations ADD COLUMN IF NOT EXISTS allow_auto_power_off BOOLEAN NOT NULL DEFAULT true",
     # ── Aprendizado adaptativo (Fase 1) ──────────────────────────────────────
     """CREATE TABLE IF NOT EXISTS ai_decisions (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -498,6 +498,9 @@ async def update_zone_guardrails(
     if data.is_critical_zone is not None:
         automation.is_critical_zone = data.is_critical_zone
 
+    if data.allow_auto_power_off is not None:
+        automation.allow_auto_power_off = data.allow_auto_power_off
+
     start_total = automation.allowed_start_hour * 60 + automation.allowed_start_minute
     end_total   = automation.allowed_end_hour   * 60 + automation.allowed_end_minute
     if start_total >= end_total:
@@ -517,6 +520,7 @@ async def update_zone_guardrails(
         "allowed_start_time": f"{automation.allowed_start_hour:02d}:{automation.allowed_start_minute:02d}",
         "allowed_end_time":   f"{automation.allowed_end_hour:02d}:{automation.allowed_end_minute:02d}",
         "is_critical_zone": automation.is_critical_zone,
+        "allow_auto_power_off": automation.allow_auto_power_off,
     }
 
 

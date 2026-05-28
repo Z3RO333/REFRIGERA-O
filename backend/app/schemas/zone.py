@@ -28,6 +28,7 @@ class ZoneGuardrailsUpdate(BaseModel):
     allowed_start_time: str | None = None
     allowed_end_time: str | None = None
     is_critical_zone: bool | None = None
+    allow_auto_power_off: bool | None = None
 
 
 class CustomZoneCreate(BaseModel):

@@ -33,6 +33,11 @@ class ZoneAutomation(Base):
     zone_type: Mapped[str] = mapped_column(String(20), default="ABERTA")
     reading_confidence: Mapped[float] = mapped_column(Float, default=1.0)
 
+    # ── Controle de desligamento automático ───────────────────────────────────
+    # False em zonas comerciais/farma: AC nunca é desligado automaticamente
+    # pois há circulação contínua de pessoas e o conforto térmico é prioritário.
+    allow_auto_power_off: Mapped[bool] = mapped_column(Boolean, default=True)
+
     # ── Manutenção / bloqueio manual ─────────────────────────────────────────
     # mode == "maintenance" → automação completamente suspensa até liberação explícita
     blocked_reason: Mapped[str | None] = mapped_column(Text)

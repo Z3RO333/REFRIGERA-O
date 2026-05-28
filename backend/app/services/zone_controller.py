@@ -2217,6 +2217,16 @@ async def _try_power_off_cold_zone(
     - A tendência não estiver aquecendo (zona já está resolvendo sozinha)
     - Circuit breaker não estiver aberto
     """
+    # Zona com circulação de pessoas (farma/loja): nunca desligar AC automaticamente
+    if not automation.allow_auto_power_off:
+        reason = (
+            f"Zona {status} ({avg_temp:.1f}°C) com todos os ACs no setpoint máximo "
+            f"({automation.setpoint_max}°C). Desligamento automático desabilitado para "
+            f"esta zona (circulação de pessoas). Faixa: {automation.setpoint_min}–{automation.setpoint_max}°C. [{zone.key}]"
+        )
+        await _log_blocked(automation, zone, avg_temp, reason, session)
+        return
+
     # Se zona está aquecendo por conta própria, aguarda — não precisa desligar
     if trend is not None and trend > 0.5:
         logger.debug("Zone %s: fria mas aquecendo a %.1f°C/h — aguardando", zone.key, trend)
