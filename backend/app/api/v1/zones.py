@@ -523,11 +523,29 @@ async def _device_position(device_id: uuid.UUID, db: AsyncSession) -> tuple[floa
     return (row[0], row[1]) if row else (None, None)
 
 
+def _on_segment(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> bool:
+    """True se (px,py) está sobre o segmento (ax,ay)-(bx,by) — semântica ST_Covers."""
+    cross = (bx - ax) * (py - ay) - (by - ay) * (px - ax)
+    if abs(cross) > 1e-9:
+        return False
+    dot = (px - ax) * (bx - ax) + (py - ay) * (by - ay)
+    len_sq = (bx - ax) ** 2 + (by - ay) ** 2
+    return 0.0 <= dot <= len_sq
+
+
 def _point_in_geometry(px: float, py: float, geometry: dict, viewbox_w: float = 800, viewbox_h: float = 556) -> bool:
+    """PIP inclusivo (equivalente a ST_Covers): interior OU na fronteira."""
     pts = geometry.get("points", [])
     if len(pts) < 3:
         return False
     poly = [{"x": p["x"] / 100 * viewbox_w, "y": p["y"] / 100 * viewbox_h} for p in pts]
+    # 1. Fronteira — verifica cada aresta
+    j = len(poly) - 1
+    for i, pt in enumerate(poly):
+        if _on_segment(px, py, poly[j]["x"], poly[j]["y"], pt["x"], pt["y"]):
+            return True
+        j = i
+    # 2. Interior — ray casting
     inside = False
     j = len(poly) - 1
     for i, pt in enumerate(poly):
@@ -536,6 +554,18 @@ def _point_in_geometry(px: float, py: float, geometry: dict, viewbox_w: float = 
             inside = not inside
         j = i
     return inside
+
+
+async def _device_has_active_conflict(device_id: uuid.UUID, excluding_zone_id: uuid.UUID, db: AsyncSession) -> bool:
+    """True se o device já tem binding activo noutra zona — detecta conflict_overlap."""
+    count = await db.scalar(
+        select(func.count()).where(
+            CustomZoneDevice.device_id == device_id,
+            CustomZoneDevice.zone_id != excluding_zone_id,
+            CustomZoneDevice.active == True,
+        )
+    )
+    return (count or 0) > 0
 
 
 def _binding_mode_and_shape(
@@ -666,7 +696,10 @@ async def create_custom_zone(
     geo = data.geometry
     for dev_id in valid_ids:
         mode, out = _binding_mode_and_shape(dev_id, geo, await _device_position(dev_id, db))
-        db.add(CustomZoneDevice(zone_id=cz.id, device_id=dev_id, binding_mode=mode, out_of_shape=out))
+        if mode != "manual_pending" and await _device_has_active_conflict(dev_id, cz.id, db):
+            mode = "conflict_overlap"
+        active = mode != "conflict_overlap"
+        db.add(CustomZoneDevice(zone_id=cz.id, device_id=dev_id, binding_mode=mode, out_of_shape=out, active=active))
 
     automation = ZoneAutomation(
         store_id=store_id, zone_key=zone_key, mode=data.mode,
@@ -737,7 +770,10 @@ async def update_custom_zone(
         geo = cz.geometry  # geometry já actualizada acima
         for dev_id in new_ids:
             mode, out = _binding_mode_and_shape(dev_id, geo, await _device_position(dev_id, db))
-            db.add(CustomZoneDevice(zone_id=cz.id, device_id=dev_id, binding_mode=mode, out_of_shape=out))
+            if mode != "manual_pending" and await _device_has_active_conflict(dev_id, cz.id, db):
+                mode = "conflict_overlap"
+            active = mode != "conflict_overlap"
+            db.add(CustomZoneDevice(zone_id=cz.id, device_id=dev_id, binding_mode=mode, out_of_shape=out, active=active))
 
     # Sincroniza ideal_min/max na automação
     auto_res = await db.execute(

@@ -35,7 +35,42 @@ function toPercent(svgX: number, svgY: number, vb: { w: number; h: number }) {
 function fromPercent(px: number, py: number, vb: { w: number; h: number }) {
   return { x: px / 100 * vb.w, y: py / 100 * vb.h }
 }
-function pointInPolygon(px: number, py: number, pts: PercentPoint[]) {
+/** Canvas 100×100 reutilizável para Path2D + isPointInPath em coords percentuais */
+const _pipCtx: CanvasRenderingContext2D | null = (() => {
+  if (typeof document === 'undefined') return null
+  const c = document.createElement('canvas')
+  c.width = 100; c.height = 100
+  return c.getContext('2d')
+})()
+
+/** Cria Path2D em coordenadas percentuais (0-100) */
+function makePercentPath(pts: PercentPoint[]): Path2D {
+  const p = new Path2D()
+  if (!pts.length) return p
+  p.moveTo(pts[0].x, pts[0].y)
+  for (let i = 1; i < pts.length; i++) p.lineTo(pts[i].x, pts[i].y)
+  p.closePath()
+  return p
+}
+
+/** PIP inclusivo: usa Path2D (interior) + verificação de fronteira (ST_Covers) */
+function pointInPolygon(px: number, py: number, pts: PercentPoint[]): boolean {
+  if (!pts.length) return false
+  // 1. Fronteira
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const { x: ax, y: ay } = pts[j], { x: bx, y: by } = pts[i]
+    const cross = (bx - ax) * (py - ay) - (by - ay) * (px - ax)
+    if (Math.abs(cross) < 1e-9) {
+      const dot = (px - ax) * (bx - ax) + (py - ay) * (by - ay)
+      const lenSq = (bx - ax) ** 2 + (by - ay) ** 2
+      if (dot >= 0 && dot <= lenSq) return true
+    }
+  }
+  // 2. Interior via Path2D (evita ray-casting manual)
+  if (_pipCtx) {
+    return _pipCtx.isPointInPath(makePercentPath(pts), px, py)
+  }
+  // Fallback: ray casting
   let inside = false
   for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
     const { x: xi, y: yi } = pts[i], { x: xj, y: yj } = pts[j]
@@ -179,6 +214,22 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
       return pointInPolygon(p.x, p.y, geo.points)
     }).map((d: Device) => d.id)
   , [storeDevices, sectorFloorById, floor, viewbox])
+
+  /** IDs dos devices que cairiam dentro do polígono/rect que está a ser desenhado */
+  const previewDeviceIds = useMemo((): Set<string> => {
+    if (!editMode) return new Set()
+    let geo: ZoneGeometry | null = null
+    if (rectStart && rectCur) {
+      const x = Math.min(rectStart.x, rectCur.x), y = Math.min(rectStart.y, rectCur.y)
+      const w = Math.abs(rectCur.x - rectStart.x), h = Math.abs(rectCur.y - rectStart.y)
+      if (w > 1 && h > 1)
+        geo = { type: 'polygon', unit: 'percent', points: [{x,y},{x:x+w,y},{x:x+w,y:y+h},{x,y:y+h}] }
+    } else if (polyPoints.length >= 3) {
+      geo = { type: 'polygon', unit: 'percent', points: polyPoints }
+    }
+    if (!geo) return new Set()
+    return new Set(devicesInsideGeo(geo))
+  }, [editMode, rectStart, rectCur, polyPoints, devicesInsideGeo])
 
   const openForm = useCallback((zone?: CustomZone, geo?: ZoneGeometry) => {
     if (zone) {
@@ -455,6 +506,36 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
           </>
         )
       })()}
+
+      {/* Highlight de devices que entrarão na zona em desenho */}
+      {previewDeviceIds.size > 0 && (
+        <g style={{ pointerEvents: 'none' }}>
+          {acDevicesOnFloor
+            .filter((d: Device) => previewDeviceIds.has(d.id) && d.position_x != null && d.position_y != null)
+            .map((d: Device) => {
+              const s = fromPercent(
+                Number(d.position_x) / viewbox.w * 100,
+                Number(d.position_y) / viewbox.h * 100,
+                viewbox,
+              )
+              return (
+                <g key={d.id}>
+                  <circle cx={s.x} cy={s.y} r={14}
+                    fill="rgba(167,139,250,0.18)" stroke="#A78BFA" strokeWidth={1.5} strokeDasharray="4 2" />
+                  <circle cx={s.x} cy={s.y} r={3} fill="#A78BFA" />
+                </g>
+              )
+            })}
+          {previewDeviceIds.size > 0 && (
+            <g>
+              <rect x={4} y={4} width={130} height={18} rx={4} fill="rgba(124,58,237,0.75)" />
+              <text x={8} y={16} fontSize={8} fill="white" fontWeight="600" style={{ userSelect:'none' }}>
+                {previewDeviceIds.size} equipamento{previewDeviceIds.size !== 1 ? 's' : ''} na zona
+              </text>
+            </g>
+          )}
+        </g>
+      )}
 
       {/* Toolbar modo de desenho — só aparece quando não há polígono em andamento */}
       {editMode && !showForm && polyPoints.length === 0 && (

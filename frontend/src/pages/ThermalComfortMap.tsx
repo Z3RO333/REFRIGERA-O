@@ -349,8 +349,9 @@ export default function ThermalComfortMap() {
 
   const floorConfig = useMemo(() => getFloorConfig(selectedFloor), [selectedFloor])
 
-  // Polígonos SVG para cada zona — com banda ideal para heatmap divergente
+  // Polígonos SVG para cada zona — com banda ideal e freshness_ratio do twin
   const zonePolygons = useMemo<ZonePoly[]>(() => {
+    const twinByKey = new Map(twinData.map(t => [t.zone_key, t]))
     const polys: ZonePoly[] = []
     for (const cz of floorCustomZones) {
       const g = cz.geometry
@@ -359,6 +360,7 @@ export default function ThermalComfortMap() {
           poly: g.points.map(p => ({ x: p.x / 100 * VIEWBOX.w, y: p.y / 100 * VIEWBOX.h })),
           idealMin: cz.ideal_min,
           idealMax: cz.ideal_max,
+          freshnessRatio: twinByKey.get(cz.zone_key)?.freshness_ratio ?? 1.0,
         })
       }
     }
@@ -373,11 +375,12 @@ export default function ThermalComfortMap() {
           ],
           idealMin: z.idealMin,
           idealMax: z.idealMax,
+          freshnessRatio: twinByKey.get(z.key)?.freshness_ratio ?? 1.0,
         })
       }
     }
     return polys
-  }, [floorCustomZones, legacyRectZones])
+  }, [floorCustomZones, legacyRectZones, twinData])
 
   const thermalGrid = useMemo(
     () => buildThermalGrid(heatPoints, avgStoreTemp, zonePolygons),
@@ -625,18 +628,25 @@ export default function ThermalComfortMap() {
                 <rect x={floorConfig.imageX} y={floorConfig.imageY}
                   width={floorConfig.imageW} height={floorConfig.imageH} />
               </clipPath>
+              {/* IDW overlay: blur suaviza transições entre células; clipPath limita à zona da planta */}
+              <filter id="thermal-blur" x="-8%" y="-8%" width="116%" height="116%" colorInterpolationFilters="sRGB">
+                <feGaussianBlur stdDeviation="5" result="blurred" />
+                <feComponentTransfer in="blurred">
+                  <feFuncA type="linear" slope="1" />
+                </feComponentTransfer>
+              </filter>
             </defs>
 
             {/* 1. Fundo escuro */}
             <rect width={VIEWBOX.w} height={VIEWBOX.h} fill="#0F172A" />
 
-            {/* 2. Grade térmica IDW */}
+            {/* 2. Grade térmica IDW — opacidade por freshness_ratio; blur suaviza transições */}
             {layers.heatmap && (
-              <g clipPath="url(#floor-clip)" opacity={0.90}>
+              <g clipPath="url(#floor-clip)" filter="url(#thermal-blur)">
                 {thermalGrid.map((cell, i) => (
                   <rect key={i} x={cell.x} y={cell.y}
                     width={GRID_CELL + 1} height={GRID_CELL + 1}
-                    fill={cell.color} />
+                    fill={cell.color} opacity={cell.opacity * 0.90} />
                 ))}
               </g>
             )}
@@ -2138,18 +2148,29 @@ function getFloorConfig(_floor: number): FloorConfig {
   return { imageX: 0, imageY: 0, imageW: VIEWBOX.w, imageH: VIEWBOX.h }
 }
 
-// ── Point-in-polygon (ray casting) ────────────────────────────────────────────
+// ── Point-in-polygon inclusivo (ST_Covers: interior OU na fronteira) ──────────
 
 type Pt = { x: number; y: number }
 
+function onSegment(px: number, py: number, ax: number, ay: number, bx: number, by: number): boolean {
+  const cross = (bx - ax) * (py - ay) - (by - ay) * (px - ax)
+  if (Math.abs(cross) > 1e-9) return false
+  const dot = (px - ax) * (bx - ax) + (py - ay) * (by - ay)
+  const lenSq = (bx - ax) ** 2 + (by - ay) ** 2
+  return dot >= 0 && dot <= lenSq
+}
+
 function pointInPolygon(px: number, py: number, poly: Pt[]): boolean {
+  // 1. Fronteira
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    if (onSegment(px, py, poly[j].x, poly[j].y, poly[i].x, poly[i].y)) return true
+  }
+  // 2. Interior — ray casting
   let inside = false
   for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-    const xi = poly[i].x, yi = poly[i].y
-    const xj = poly[j].x, yj = poly[j].y
-    const intersect = (yi > py) !== (yj > py) &&
-      px < ((xj - xi) * (py - yi)) / (yj - yi) + xi
-    if (intersect) inside = !inside
+    const xi = poly[i].x, yi = poly[i].y, xj = poly[j].x, yj = poly[j].y
+    if ((yi > py) !== (yj > py) && px < ((xj - xi) * (py - yi)) / (yj - yi) + xi)
+      inside = !inside
   }
   return inside
 }
@@ -2176,13 +2197,15 @@ function interpolateTemp(x: number, y: number, points: HeatPoint[]): number | nu
   return weightedSum / weightTotal
 }
 
-interface ThermalCell { x: number; y: number; color: string }
+interface ThermalCell { x: number; y: number; color: string; opacity: number }
 
-/** Zona com polígono SVG e banda ideal — usada pelo IDW para colorir pelo delta */
+/** Zona com polígono SVG, banda ideal e confiança de dados — usada pelo IDW */
 interface ZonePoly {
   poly: Pt[]
   idealMin: number
   idealMax: number
+  /** freshness_ratio 0–1 vindo do digital twin; 1 = todos os pontos frescos */
+  freshnessRatio: number
 }
 
 function buildThermalGrid(
@@ -2201,23 +2224,20 @@ function buildThermalGrid(
       const cx = x + GRID_CELL / 2
       const cy = y + GRID_CELL / 2
 
-      // Encontra a zona à qual esta célula pertence (primeira que contém o ponto)
-      const zone = hasPolys
-        ? zonePolys.find(z => pointInPolygon(cx, cy, z.poly))
-        : null
-
-      // Células fora de qualquer zona mapeada → ignorar
+      const zone = hasPolys ? zonePolys.find(z => pointInPolygon(cx, cy, z.poly)) : null
       if (hasPolys && !zone) continue
 
       const temp = valid.length ? interpolateTemp(cx, cy, valid) : fallbackTemp
       if (temp == null) continue
 
-      // Delta face à banda ideal da zona; sem zona → usa temperatura absoluta
       const color = zone
         ? thermalColorByDelta(tempDelta(temp, zone.idealMin, zone.idealMax))
         : thermalColor(temp)
 
-      cells.push({ x, y, color })
+      // Opacidade dimina quando os dados são maioritariamente stale (freshness baixa)
+      const opacity = zone ? Math.max(0.25, zone.freshnessRatio) : 1.0
+
+      cells.push({ x, y, color, opacity })
     }
   }
   return cells
