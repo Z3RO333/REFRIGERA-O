@@ -403,6 +403,30 @@ def _step_size(status: str) -> int:
     return 1
 
 
+# Fan speed adaptativo por status da zona
+# 1=baixo  2=médio  3=alto  4=turbo
+_FAN_SPEED_BY_STATUS: dict[str, int] = {
+    "CRITICAL": 4,
+    "HOT":      3,
+    "WARM":     2,
+    "COMFORT":  2,
+    "COLD":     1,
+    "NO_READING": 2,
+}
+
+
+def _target_fan_speed(status: str, current_fan_speed: int | None = None) -> int:
+    """Retorna a velocidade de fan adequada para o status térmico da zona.
+
+    Nunca reduz abaixo do atual se a zona estiver aquecendo — evita piorar
+    uma situação crítica por fan speed insuficiente.
+    """
+    target = _FAN_SPEED_BY_STATUS.get(status, 2)
+    if current_fan_speed is not None and status in ("WARM", "HOT", "CRITICAL"):
+        return max(target, current_fan_speed)
+    return target
+
+
 async def _log_trending(
     automation: ZoneAutomation,
     zone: ZoneConfig,
@@ -658,7 +682,8 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                             return
                         else:
                             ok, _api_ms = await _execute_power_on(
-                                power_device.device, power_params, session, target_setpoint=power_setpoint
+                                power_device.device, power_params, session,
+                                target_setpoint=power_setpoint, zone_status=status,
                             )
                             if ok:
                                 action_status = "pending_verification"
@@ -790,7 +815,8 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                             return
                         else:
                             ok, _api_ms = await _execute_setpoint(
-                                best_device.device, best_params, "down", automation, session, step=1
+                                best_device.device, best_params, "down", automation, session,
+                                step=1, zone_status=status,
                             )
                             if ok:
                                 action_status = "pending_verification"
@@ -941,7 +967,8 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                     return
                 else:
                     ok, _api_ms = await _execute_power_on(
-                        power_device.device, power_params, session, target_setpoint=power_setpoint
+                        power_device.device, power_params, session,
+                        target_setpoint=power_setpoint, zone_status=status,
                     )
                     if ok:
                         action_status = "pending_verification"
@@ -1091,7 +1118,10 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
             # acquire_lock é atômico (SET NX EX) — evita race entre múltiplos workers
             if not await redis_client.acquire_lock(cooldown_key, ttl=ZONE_COOLDOWN_SECONDS):
                 return  # outro worker chegou primeiro entre o exists() e agora
-            ok, _api_ms = await _execute_setpoint(best_device.device, best_params, direction, automation, session, step=step)
+            ok, _api_ms = await _execute_setpoint(
+                best_device.device, best_params, direction, automation, session,
+                step=step, zone_status=status,
+            )
             if ok:
                 action_status = "pending_verification"
                 logger.info(
@@ -2040,6 +2070,7 @@ async def _execute_power_on(
     params: DeviceParameters,
     session: AsyncSession,
     target_setpoint: int | None = None,
+    zone_status: str = "WARM",
 ) -> tuple[bool, int]:
     from app.services.action_dispatcher import brise_dispatcher
 
@@ -2050,10 +2081,11 @@ async def _execute_power_on(
         return False, 0
 
     setpoint_cool = target_setpoint or params.setpoint_cool or 22
+    fan_speed = _target_fan_speed(zone_status, params.fan_speed)
     brise_params = {
         "modeDevice": 1,
         "modeAC": 0,
-        "fanSpeed": params.fan_speed or 1,
+        "fanSpeed": fan_speed,
         "setpointCool": setpoint_cool,
         "setpointHeat": params.setpoint_heat or 28,
         "ecoCool": params.eco_cool or False,
@@ -2068,6 +2100,7 @@ async def _execute_power_on(
         params.mode_device = 1
         params.mode_ac = 0
         params.setpoint_cool = setpoint_cool
+        params.fan_speed = fan_speed
         params.synced_at = datetime.utcnow()
         # Persiste o params se for novo (sem pk — device sem histórico de configuração)
         if params.id is None:
@@ -2088,6 +2121,7 @@ async def _execute_setpoint(
     automation: ZoneAutomation,
     session: AsyncSession,
     step: int = 1,
+    zone_status: str = "WARM",
 ) -> tuple[bool, int]:
     from app.services.action_dispatcher import brise_dispatcher
 
@@ -2111,10 +2145,11 @@ async def _execute_setpoint(
         )
         return False, 0
 
+    fan_speed = _target_fan_speed(zone_status, params.fan_speed)
     brise_params = {
         "modeDevice": 1,
         "modeAC": 0,
-        "fanSpeed": params.fan_speed,
+        "fanSpeed": fan_speed,
         "setpointCool": new_setpoint,
         "setpointHeat": params.setpoint_heat,
         "ecoCool": params.eco_cool,
@@ -2127,6 +2162,7 @@ async def _execute_setpoint(
     if success:
         await brise_dispatcher.on_success()
         params.setpoint_cool = new_setpoint
+        params.fan_speed = fan_speed
         params.synced_at = datetime.utcnow()
         await session.commit()
     else:
