@@ -13,7 +13,6 @@ jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write
       contents: read
 
     steps:
@@ -41,17 +40,3 @@ jobs:
             hvacbemolregistry.azurecr.io/hvac-backend:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      - name: Login to Azure
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_755BA6542B26421D940266679D0CDA12 }}
-          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_8D83E8643FEF4962B3E764D1EEE6D979 }}
-          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_299C3C7E00FD4BE88D7F3C4B9D8326B6 }}
-
-      - name: Deploy to Azure Web App
-        uses: azure/webapps-deploy@v2
-        with:
-          app-name: hvac-bemol-monitor
-          slot-name: Production
-          images: hvacbemolregistry.azurecr.io/hvac-backend:${{ github.sha }}
