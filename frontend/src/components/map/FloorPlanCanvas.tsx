@@ -97,23 +97,39 @@ export default function FloorPlanCanvas({
     return pt.matrixTransform(m.inverse())
   }
 
-  // ── Mouse handlers ─────────────────────────────────────────────────────────
-  const handleDeviceMouseDown = useCallback((e: React.MouseEvent, deviceId: string) => {
+  // ── Pointer handlers (mouse + touch + stylus unificados) ──────────────────
+  const activePointers = useRef<Map<number, { x: number; y: number }>>(new Map())
+
+  const handleDevicePointerDown = useCallback((e: React.PointerEvent, deviceId: string) => {
     if (!editMode) return
     e.stopPropagation()
+    ;(e.currentTarget as Element).setPointerCapture(e.pointerId)
     setDragging(deviceId)
     setDidDrag(false)
   }, [editMode])
 
-  const handleSvgMouseDown = useCallback((e: React.MouseEvent<SVGSVGElement>) => {
-    if (e.button !== 0 || dragging) return
-    isPanning.current = true
-    hasPanned.current = false
-    const t = transformRef.current
-    panStart.current  = { x: e.clientX - t.x, y: e.clientY - t.y }
+  const handleSvgPointerDown = useCallback((e: React.PointerEvent<SVGSVGElement>) => {
+    if (dragging) return
+    activePointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
+    if (activePointers.current.size === 1) {
+      // single pointer → pan
+      isPanning.current = true
+      hasPanned.current = false
+      const t = transformRef.current
+      panStart.current = { x: e.clientX - t.x, y: e.clientY - t.y }
+    } else {
+      // second pointer → pinch — cancel pan
+      isPanning.current = false
+      const pts = [...activePointers.current.values()]
+      const dx = pts[0].x - pts[1].x
+      const dy = pts[0].y - pts[1].y
+      pinchDist.current = Math.sqrt(dx * dx + dy * dy)
+    }
   }, [dragging])
 
-  const handleMouseMove = useCallback((e: React.MouseEvent) => {
+  const handleSvgPointerMove = useCallback((e: React.PointerEvent<SVGSVGElement>) => {
+    activePointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
+
     if (dragging && editMode) {
       const pt = clientToSvg(e.clientX, e.clientY)
       if (!pt) return
@@ -121,6 +137,25 @@ export default function FloorPlanCanvas({
       const y = Math.max(0, Math.min(VIEWBOX_H, pt.y))
       setDidDrag(true)
       onDeviceMove?.(dragging, Math.round(x), Math.round(y))
+    } else if (activePointers.current.size === 2) {
+      // pinch zoom
+      const pts = [...activePointers.current.values()]
+      const dx = pts[0].x - pts[1].x
+      const dy = pts[0].y - pts[1].y
+      const dist = Math.sqrt(dx * dx + dy * dy)
+      if (pinchDist.current > 0) {
+        const el = containerRef.current
+        if (el) {
+          const r = el.getBoundingClientRect()
+          const mid = {
+            x: (pts[0].x + pts[1].x) / 2 - r.left,
+            y: (pts[0].y + pts[1].y) / 2 - r.top,
+          }
+          zoomAt(dist / pinchDist.current, mid.x, mid.y)
+        }
+      }
+      pinchDist.current = dist
+      hasPanned.current = true
     } else if (isPanning.current) {
       const nx = e.clientX - panStart.current.x
       const ny = e.clientY - panStart.current.y
@@ -128,12 +163,16 @@ export default function FloorPlanCanvas({
         hasPanned.current = true
       setTransform(t => ({ ...t, x: nx, y: ny }))
     }
-  }, [dragging, editMode, onDeviceMove, setTransform])
+  }, [dragging, editMode, onDeviceMove, setTransform, zoomAt])
 
-  const handleMouseUp = useCallback(() => {
-    setDragging(null)
-    isPanning.current = false
-    setTimeout(() => setDidDrag(false), 0)
+  const handleSvgPointerUp = useCallback((e: React.PointerEvent<SVGSVGElement>) => {
+    activePointers.current.delete(e.pointerId)
+    if (activePointers.current.size === 0) {
+      setDragging(null)
+      isPanning.current = false
+      pinchDist.current = 0
+      setTimeout(() => setDidDrag(false), 0)
+    }
   }, [])
 
   const handleCanvasClick = useCallback((e: React.MouseEvent) => {
@@ -153,58 +192,8 @@ export default function FloorPlanCanvas({
     zoomAt(2, e.clientX - r.left, e.clientY - r.top)
   }, [zoomAt])
 
-  // ── Touch handlers ─────────────────────────────────────────────────────────
-  const handleTouchStart = useCallback((e: React.TouchEvent) => {
-    if (e.touches.length === 2) {
-      const dx = e.touches[0].clientX - e.touches[1].clientX
-      const dy = e.touches[0].clientY - e.touches[1].clientY
-      pinchDist.current = Math.sqrt(dx * dx + dy * dy)
-      isPanning.current = false
-    } else if (e.touches.length === 1) {
-      isPanning.current = true
-      hasPanned.current = false
-      const t = transformRef.current
-      panStart.current = {
-        x: e.touches[0].clientX - t.x,
-        y: e.touches[0].clientY - t.y,
-      }
-    }
-  }, [])
-
-  const handleTouchMove = useCallback((e: React.TouchEvent) => {
-    if (e.touches.length === 2) {
-      const dx   = e.touches[0].clientX - e.touches[1].clientX
-      const dy   = e.touches[0].clientY - e.touches[1].clientY
-      const dist = Math.sqrt(dx * dx + dy * dy)
-      const el   = containerRef.current
-      if (!el || pinchDist.current === 0) return
-      const r   = el.getBoundingClientRect()
-      const mid = {
-        x: (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left,
-        y: (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top,
-      }
-      zoomAt(dist / pinchDist.current, mid.x, mid.y)
-      pinchDist.current = dist
-      hasPanned.current = true
-    } else if (e.touches.length === 1 && isPanning.current) {
-      const nx = e.touches[0].clientX - panStart.current.x
-      const ny = e.touches[0].clientY - panStart.current.y
-      hasPanned.current = true
-      setTransform(t => ({ ...t, x: nx, y: ny }))
-    }
-  }, [zoomAt, setTransform])
-
-  const handleTouchEnd = useCallback(() => {
-    isPanning.current = false
-    pinchDist.current = 0
-  }, [])
-
   const isDraggingDevice = !!dragging
-  const cursorStyle = editMode && placingDeviceName
-    ? 'crosshair'
-    : isPanning.current
-      ? 'grabbing'
-      : 'grab'
+  const cursorStyle = editMode && placingDeviceName ? 'crosshair' : dragging ? 'grabbing' : 'grab'
 
   return (
     <div
@@ -263,15 +252,12 @@ export default function FloorPlanCanvas({
           cursor: cursorStyle,
           willChange: isDraggingDevice ? 'auto' : 'transform',
         }}
-        onMouseDown={handleSvgMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseUp}
+        onPointerDown={handleSvgPointerDown}
+        onPointerMove={handleSvgPointerMove}
+        onPointerUp={handleSvgPointerUp}
+        onPointerCancel={handleSvgPointerUp}
         onClick={handleCanvasClick}
         onDoubleClick={handleDoubleClick}
-        onTouchStart={handleTouchStart}
-        onTouchMove={handleTouchMove}
-        onTouchEnd={handleTouchEnd}
       >
         <defs>
           <filter id="plan-shadow" x="-8%" y="-8%" width="116%" height="116%">
@@ -300,7 +286,7 @@ export default function FloorPlanCanvas({
         {devices
           .filter(d => d.position_x != null && d.position_y != null)
           .map(device => (
-            <g key={device.id} onMouseDown={e => handleDeviceMouseDown(e, device.id)}>
+            <g key={device.id} onPointerDown={e => handleDevicePointerDown(e, device.id)}>
               <DeviceMarker
                 device={device}
                 onClick={onDeviceClick}

@@ -349,23 +349,31 @@ export default function ThermalComfortMap() {
 
   const floorConfig = useMemo(() => getFloorConfig(selectedFloor), [selectedFloor])
 
-  // Polígonos SVG para cada zona — usados para restringir o IDW a áreas mapeadas
-  const zonePolygons = useMemo<Pt[][]>(() => {
-    const polys: Pt[][] = []
+  // Polígonos SVG para cada zona — com banda ideal para heatmap divergente
+  const zonePolygons = useMemo<ZonePoly[]>(() => {
+    const polys: ZonePoly[] = []
     for (const cz of floorCustomZones) {
       const g = cz.geometry
       if (g?.unit === 'percent' && g.points?.length >= 3) {
-        polys.push(g.points.map(p => ({ x: p.x / 100 * VIEWBOX.w, y: p.y / 100 * VIEWBOX.h })))
+        polys.push({
+          poly: g.points.map(p => ({ x: p.x / 100 * VIEWBOX.w, y: p.y / 100 * VIEWBOX.h })),
+          idealMin: cz.ideal_min,
+          idealMax: cz.ideal_max,
+        })
       }
     }
     for (const z of legacyRectZones) {
       if (z.w > 0 && z.h > 0) {
-        polys.push([
-          { x: z.x,       y: z.y       },
-          { x: z.x + z.w, y: z.y       },
-          { x: z.x + z.w, y: z.y + z.h },
-          { x: z.x,       y: z.y + z.h },
-        ])
+        polys.push({
+          poly: [
+            { x: z.x,       y: z.y       },
+            { x: z.x + z.w, y: z.y       },
+            { x: z.x + z.w, y: z.y + z.h },
+            { x: z.x,       y: z.y + z.h },
+          ],
+          idealMin: z.idealMin,
+          idealMax: z.idealMax,
+        })
       }
     }
     return polys
@@ -815,16 +823,16 @@ export default function ThermalComfortMap() {
         </aside>
       </div>
 
-      {/* Legenda */}
+      {/* Legenda — escala divergente por zona */}
       <div className="flex flex-wrap items-center gap-3 text-xs text-gray-500">
-        <span className="font-medium text-gray-400">Escala:</span>
-        <div className="flex items-center gap-1.5"><div className="h-2.5 w-6 rounded" style={{ background: '#1D4ED8' }} />&lt;19° Frio</div>
-        <div className="flex items-center gap-1.5"><div className="h-2.5 w-6 rounded" style={{ background: '#00A6D6' }} />21° Fresco</div>
-        <div className="flex items-center gap-1.5"><div className="h-2.5 w-6 rounded" style={{ background: '#16A34A' }} />23° Ideal</div>
-        <div className="flex items-center gap-1.5"><div className="h-2.5 w-6 rounded" style={{ background: '#FACC15' }} />25° Atenção</div>
-        <div className="flex items-center gap-1.5"><div className="h-2.5 w-6 rounded" style={{ background: '#FB923C' }} />27° Quente</div>
-        <div className="flex items-center gap-1.5"><div className="h-2.5 w-6 rounded" style={{ background: '#DC2626' }} />&gt;27° Crítico</div>
-        <span className="ml-auto text-gray-400">IDW {GRID_CELL}px/célula</span>
+        <span className="font-medium text-gray-400">Desvio da faixa ideal:</span>
+        <div className="flex items-center gap-1.5"><div className="h-2.5 w-6 rounded" style={{ background: '#1D4ED8' }} />≤ −3° Muito frio</div>
+        <div className="flex items-center gap-1.5"><div className="h-2.5 w-6 rounded" style={{ background: '#93C5FD' }} />−1° Levem. frio</div>
+        <div className="flex items-center gap-1.5"><div className="h-2.5 w-6 rounded" style={{ background: '#16A34A' }} />0° Confortável</div>
+        <div className="flex items-center gap-1.5"><div className="h-2.5 w-6 rounded" style={{ background: '#FACC15' }} />+1° Aquecendo</div>
+        <div className="flex items-center gap-1.5"><div className="h-2.5 w-6 rounded" style={{ background: '#FB923C' }} />+2° Quente</div>
+        <div className="flex items-center gap-1.5"><div className="h-2.5 w-6 rounded" style={{ background: '#DC2626' }} />≥ +3° Crítico</div>
+        <span className="ml-auto text-gray-400">IDW {GRID_CELL}px/célula · desvio relativo à zona</span>
       </div>
     </div>
   )
@@ -1883,7 +1891,16 @@ function DigitalTwinPanel({ twin }: { twin: DigitalTwinZone | undefined }) {
       <div className="flex items-center gap-2 bg-violet-50 px-3 py-2 dark:bg-violet-950/30">
         <Activity className="h-3.5 w-3.5 text-violet-500 flex-shrink-0" />
         <span className="text-xs font-semibold text-violet-700 dark:text-violet-400">Digital Twin</span>
-        <span className="ml-auto text-[10px] text-violet-400">conf. {confPct}%</span>
+        <div className="ml-auto flex items-center gap-2 text-[10px]">
+          {twin.stale_device_count > 0 && (
+            <span className="text-amber-500" title={`${twin.stale_device_count} leitura(s) obsoleta(s)`}>
+              {twin.stale_device_count} stale
+            </span>
+          )}
+          <span className={twin.freshness_ratio < 0.5 ? 'text-amber-400' : 'text-violet-400'}>
+            {Math.round(twin.freshness_ratio * 100)}% frescos · conf. {confPct}%
+          </span>
+        </div>
       </div>
 
       <div className="p-3 space-y-3">
@@ -1989,10 +2006,10 @@ function useMapTransform(editModeRef?: React.RefObject<boolean>) {
   const cur = useRef(transform)
   cur.current = transform
 
-  const isDragging = useRef(false)
-  const startPos   = useRef({ x: 0, y: 0 })
-  const hasMoved   = useRef(false)
-  const pinchDist  = useRef(0)
+  const startPos      = useRef({ x: 0, y: 0 })
+  const hasMoved      = useRef(false)
+  const pinchDist     = useRef(0)
+  const activePointers = useRef<Map<number, { x: number; y: number }>>(new Map())
 
   const MIN = 0.3
   const MAX = 8
@@ -2029,26 +2046,56 @@ function useMapTransform(editModeRef?: React.RefObject<boolean>) {
     return () => el.removeEventListener('wheel', handler)
   }, [zoomAt])
 
-  const onMouseDown = useCallback((e: React.MouseEvent) => {
-    if (e.button !== 0) return
-    isDragging.current = true
-    hasMoved.current   = false
-    startPos.current   = { x: e.clientX - cur.current.x, y: e.clientY - cur.current.y }
-    setTransform(t => ({ ...t, dragging: true }))
-  }, [])
+  const onPointerDown = useCallback((e: React.PointerEvent) => {
+    // Em modo edição, o ZoneEditor captura os eventos — não interferir
+    if (editModeRef?.current && activePointers.current.size === 0) return
+    activePointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
+    if (activePointers.current.size === 1) {
+      hasMoved.current = false
+      startPos.current = { x: e.clientX - cur.current.x, y: e.clientY - cur.current.y }
+      setTransform(t => ({ ...t, dragging: true }))
+    } else {
+      const pts = [...activePointers.current.values()]
+      const dx = pts[0].x - pts[1].x
+      const dy = pts[0].y - pts[1].y
+      pinchDist.current = Math.sqrt(dx * dx + dy * dy)
+    }
+  }, [editModeRef])
 
-  const onMouseMove = useCallback((e: React.MouseEvent) => {
-    if (!isDragging.current) return
-    const nx = e.clientX - startPos.current.x
-    const ny = e.clientY - startPos.current.y
-    if (Math.abs(nx - cur.current.x) + Math.abs(ny - cur.current.y) > 3)
+  const onPointerMove = useCallback((e: React.PointerEvent) => {
+    if (!activePointers.current.has(e.pointerId)) return
+    activePointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
+    if (activePointers.current.size === 2) {
+      const pts = [...activePointers.current.values()]
+      const dx = pts[0].x - pts[1].x
+      const dy = pts[0].y - pts[1].y
+      const dist = Math.sqrt(dx * dx + dy * dy)
+      const el = containerRef.current
+      if (el && pinchDist.current > 0) {
+        const r = el.getBoundingClientRect()
+        const mid = {
+          x: (pts[0].x + pts[1].x) / 2 - r.left,
+          y: (pts[0].y + pts[1].y) / 2 - r.top,
+        }
+        zoomAt(dist / pinchDist.current, mid.x, mid.y)
+      }
+      pinchDist.current = dist
       hasMoved.current = true
-    setTransform(t => ({ ...t, x: nx, y: ny }))
-  }, [])
+    } else if (activePointers.current.size === 1) {
+      const nx = e.clientX - startPos.current.x
+      const ny = e.clientY - startPos.current.y
+      if (Math.abs(nx - cur.current.x) + Math.abs(ny - cur.current.y) > 3)
+        hasMoved.current = true
+      setTransform(t => ({ ...t, x: nx, y: ny }))
+    }
+  }, [zoomAt])
 
-  const onMouseUp = useCallback(() => {
-    isDragging.current = false
-    setTransform(t => ({ ...t, dragging: false }))
+  const onPointerUp = useCallback((e: React.PointerEvent) => {
+    activePointers.current.delete(e.pointerId)
+    if (activePointers.current.size === 0) {
+      pinchDist.current = 0
+      setTransform(t => ({ ...t, dragging: false }))
+    }
   }, [])
 
   const onDoubleClick = useCallback((e: React.MouseEvent) => {
@@ -2058,48 +2105,6 @@ function useMapTransform(editModeRef?: React.RefObject<boolean>) {
     zoomAt(2, e.clientX - r.left, e.clientY - r.top)
   }, [zoomAt])
 
-  const onTouchStart = useCallback((e: React.TouchEvent) => {
-    if (e.touches.length === 2) {
-      const dx = e.touches[0].clientX - e.touches[1].clientX
-      const dy = e.touches[0].clientY - e.touches[1].clientY
-      pinchDist.current = Math.sqrt(dx * dx + dy * dy)
-    } else if (e.touches.length === 1 && !editModeRef?.current) {
-      // Em modo edição, pan de 1 dedo é do editor de zonas, não do mapa
-      isDragging.current = true
-      hasMoved.current   = false
-      startPos.current   = { x: e.touches[0].clientX - cur.current.x, y: e.touches[0].clientY - cur.current.y }
-    }
-  }, [])
-
-  const onTouchMove = useCallback((e: React.TouchEvent) => {
-    if (e.touches.length === 2) {
-      const dx   = e.touches[0].clientX - e.touches[1].clientX
-      const dy   = e.touches[0].clientY - e.touches[1].clientY
-      const dist = Math.sqrt(dx * dx + dy * dy)
-      const el   = containerRef.current
-      if (!el || pinchDist.current === 0) return
-      const r   = el.getBoundingClientRect()
-      const mid = {
-        x: (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left,
-        y: (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top,
-      }
-      zoomAt(dist / pinchDist.current, mid.x, mid.y)
-      pinchDist.current  = dist
-      hasMoved.current   = true
-    } else if (e.touches.length === 1 && isDragging.current) {
-      const nx = e.touches[0].clientX - startPos.current.x
-      const ny = e.touches[0].clientY - startPos.current.y
-      hasMoved.current = true
-      setTransform(t => ({ ...t, x: nx, y: ny }))
-    }
-  }, [zoomAt])
-
-  const onTouchEnd = useCallback(() => {
-    isDragging.current = false
-    pinchDist.current  = 0
-    setTransform(t => ({ ...t, dragging: false }))
-  }, [])
-
   return {
     containerRef,
     transform,
@@ -2107,14 +2112,11 @@ function useMapTransform(editModeRef?: React.RefObject<boolean>) {
     zoom,
     resetView,
     containerHandlers: {
-      onMouseDown,
-      onMouseMove,
-      onMouseUp,
-      onMouseLeave: onMouseUp,
+      onPointerDown,
+      onPointerMove,
+      onPointerUp,
+      onPointerCancel: onPointerUp,
       onDoubleClick,
-      onTouchStart,
-      onTouchMove,
-      onTouchEnd,
     },
   }
 }
@@ -2176,28 +2178,67 @@ function interpolateTemp(x: number, y: number, points: HeatPoint[]): number | nu
 
 interface ThermalCell { x: number; y: number; color: string }
 
+/** Zona com polígono SVG e banda ideal — usada pelo IDW para colorir pelo delta */
+interface ZonePoly {
+  poly: Pt[]
+  idealMin: number
+  idealMax: number
+}
+
 function buildThermalGrid(
   points: HeatPoint[],
   fallbackTemp: number | null,
-  zonePolygons: Pt[][],
+  zonePolys: ZonePoly[],
 ): ThermalCell[] {
   const valid = points.filter(p => p.temp != null)
   if (!valid.length && fallbackTemp == null) return []
 
-  const hasPolygons = zonePolygons.length > 0
+  const hasPolys = zonePolys.length > 0
   const cells: ThermalCell[] = []
+
   for (let y = 0; y < VIEWBOX.h; y += GRID_CELL) {
     for (let x = 0; x < VIEWBOX.w; x += GRID_CELL) {
       const cx = x + GRID_CELL / 2
       const cy = y + GRID_CELL / 2
-      // Só renderiza dentro de alguma zona definida — evita "calor fantasma" em corredores
-      if (hasPolygons && !zonePolygons.some(poly => pointInPolygon(cx, cy, poly))) continue
+
+      // Encontra a zona à qual esta célula pertence (primeira que contém o ponto)
+      const zone = hasPolys
+        ? zonePolys.find(z => pointInPolygon(cx, cy, z.poly))
+        : null
+
+      // Células fora de qualquer zona mapeada → ignorar
+      if (hasPolys && !zone) continue
+
       const temp = valid.length ? interpolateTemp(cx, cy, valid) : fallbackTemp
       if (temp == null) continue
-      cells.push({ x, y, color: thermalColor(temp) })
+
+      // Delta face à banda ideal da zona; sem zona → usa temperatura absoluta
+      const color = zone
+        ? thermalColorByDelta(tempDelta(temp, zone.idealMin, zone.idealMax))
+        : thermalColor(temp)
+
+      cells.push({ x, y, color })
     }
   }
   return cells
+}
+
+/** Desvio de temp face à banda [min, max]: negativo=frio, 0=conforto, positivo=quente */
+function tempDelta(temp: number, idealMin: number, idealMax: number): number {
+  if (temp < idealMin) return temp - idealMin   // negativo
+  if (temp > idealMax) return temp - idealMax   // positivo
+  return 0
+}
+
+/** Escala divergente centrada na banda ideal da zona */
+function thermalColorByDelta(delta: number): string {
+  if (delta <= -3)   return '#1D4ED8'  // muito frio
+  if (delta <= -1.5) return '#3B82F6'  // frio
+  if (delta <= -0.5) return '#93C5FD'  // levemente frio
+  if (delta <=  0.5) return '#16A34A'  // confortável
+  if (delta <=  1.5) return '#FACC15'  // levemente quente
+  if (delta <=  3)   return '#FB923C'  // quente
+  return '#DC2626'                      // muito quente / crítico
 }
 
 function classifyZone(temp: number | null, min: number, max: number): ThermalStatus {

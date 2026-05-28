@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import String, DateTime, Float, Integer, ForeignKey
+from sqlalchemy import Boolean, String, DateTime, Float, Integer, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from app.db.session import Base
@@ -37,3 +37,9 @@ class CustomZoneDevice(Base):
     device_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("devices.id", ondelete="CASCADE"), primary_key=True
     )
+    # Unicidade de binding activo — índice parcial WHERE active = true
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Ciclo de vida do binding
+    binding_mode: Mapped[str] = mapped_column(String(30), default="spatial_auto", nullable=False)
+    # True quando o device está posicionado fora do polígono da zona
+    out_of_shape: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

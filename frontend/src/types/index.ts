@@ -252,6 +252,9 @@ export interface DigitalTwinZone {
   predicted_temp_60m: number | null
   risk_level: RiskLevel
   confidence: number
+  freshness_ratio: number
+  fresh_device_count: number
+  stale_device_count: number
   early_warning: boolean
   contributing_devices: DigitalTwinDevice[]
   recommended_action: string

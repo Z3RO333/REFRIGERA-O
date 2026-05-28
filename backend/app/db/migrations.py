@@ -186,6 +186,15 @@ _STATEMENTS = [
         value TEXT NOT NULL,
         expires_at TIMESTAMP
     )""",
+    # unicidade de binding activo: cada device só pode estar numa zona activa de cada vez
+    "ALTER TABLE custom_zone_devices ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT true",
+    """CREATE UNIQUE INDEX IF NOT EXISTS uq_custom_zone_device_active
+       ON custom_zone_devices (device_id)
+       WHERE active = true""",
+    # ciclo de vida do binding (spatial_auto | manual_pending | manual_override)
+    "ALTER TABLE custom_zone_devices ADD COLUMN IF NOT EXISTS binding_mode VARCHAR(30) NOT NULL DEFAULT 'spatial_auto'",
+    # flag para binding fora do polígono — avisar o operador
+    "ALTER TABLE custom_zone_devices ADD COLUMN IF NOT EXISTS out_of_shape BOOLEAN NOT NULL DEFAULT false",
 ]
 
 

@@ -254,10 +254,10 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [editMode, showForm, closeForm, cancelDrawing, drawMode, polyPoints, openForm])
 
-  // Listeners globais
+  // Listeners globais — pointer events (mouse + touch + stylus)
   useEffect(() => {
     if (!editMode) return
-    const onMove = (e: MouseEvent) => {
+    const onMove = (e: PointerEvent) => {
       const pct = screenToPct(e.clientX, e.clientY)
       if (rectStart) setRectCur(pct)
       if (polyPoints.length > 0) setPolyCur(pct)
@@ -269,10 +269,10 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
         setLivePos(lp => ({ ...lp, [dr.zoneKey]: movePointsWithinBounds(dr.startPts, dx, dy) }))
       }
     }
-    const onUp = (e: MouseEvent) => {
+    const onUp = (e: PointerEvent) => {
       const dr = draggingRef.current
       if (dr) {
-        const live = livePosRef.current[dr.zoneKey]  // usa ref para evitar stale closure
+        const live = livePosRef.current[dr.zoneKey]
         if (live && hasMoved.current)
           updateMutation.mutate({ key: dr.zoneKey, data: { geometry: { type:'polygon', unit:'percent', points: live } } })
         setDragging(null); hasMoved.current = false
@@ -288,15 +288,16 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
         }
       }
     }
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup', onUp)
-    return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    return () => { window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', onUp) }
   }, [editMode, rectStart, polyPoints, screenToPct, updateMutation, openForm])
 
-  const onBgMouseDown = useCallback((e: React.MouseEvent<SVGRectElement>) => {
+  const onBgPointerDown = useCallback((e: React.PointerEvent<SVGRectElement>) => {
     if (!editMode || showForm || dragging || drawMode !== 'rect') return
-    if (e.button !== 0) return
+    if (e.button !== 0 && e.pointerType === 'mouse') return
     e.stopPropagation()
+    ;(e.currentTarget as Element).setPointerCapture(e.pointerId)
     const pct = screenToPct(e.clientX, e.clientY)
     setRectStart(pct); setRectCur(pct); hasMoved.current = false
   }, [editMode, showForm, dragging, drawMode, screenToPct])
@@ -315,10 +316,11 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
     setPolyPoints([]); setPolyCur(null); setPendingGeo(geo); openForm(undefined, geo)
   }, [editMode, drawMode, polyPoints, openForm])
 
-  const onZoneMouseDown = useCallback((e: React.MouseEvent, zone: CustomZone) => {
+  const onZonePointerDown = useCallback((e: React.PointerEvent, zone: CustomZone) => {
     if (!editMode || !zone.geometry) return
-    if (e.button !== 0) return
+    if (e.button !== 0 && e.pointerType === 'mouse') return
     e.stopPropagation()
+    ;(e.currentTarget as Element).setPointerCapture(e.pointerId)
     hasMoved.current = false
     const pct = screenToPct(e.clientX, e.clientY)
     setLivePos(lp => ({ ...lp, [zone.zone_key]: zone.geometry!.points }))
@@ -347,7 +349,7 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
       {editMode && (
         <rect x={0} y={0} width={viewbox.w} height={viewbox.h}
           fill="transparent" style={{ cursor: 'crosshair' }}
-          onMouseDown={onBgMouseDown} onClick={onBgClick} />
+          onPointerDown={onBgPointerDown} onClick={onBgClick} />
       )}
 
       {/* Zonas salvas */}
@@ -368,7 +370,7 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
               strokeWidth={isSelected ? 2.5 : 1.5}
               strokeDasharray={zone.zone_type === 'SALA_FECHADA' ? '5 3' : undefined}
               style={{ cursor: editMode ? 'move' : 'pointer', touchAction:'none' }}
-              onMouseDown={e => onZoneMouseDown(e, zone)}
+              onPointerDown={e => onZonePointerDown(e, zone)}
               onClick={e => handleZoneClick(e, zone)} />
             <text x={cx.x} y={cx.y-6} textAnchor="middle" fontSize={9} fontWeight="600"
               fill={statusColor} style={{ pointerEvents:'none', userSelect:'none' }}>

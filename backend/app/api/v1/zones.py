@@ -517,6 +517,41 @@ async def update_zone_guardrails(
 
 # ── Zonas personalizadas (CRUD) ───────────────────────────────────────────────
 
+async def _device_position(device_id: uuid.UUID, db: AsyncSession) -> tuple[float | None, float | None]:
+    res = await db.execute(select(Device.position_x, Device.position_y).where(Device.id == device_id))
+    row = res.one_or_none()
+    return (row[0], row[1]) if row else (None, None)
+
+
+def _point_in_geometry(px: float, py: float, geometry: dict, viewbox_w: float = 800, viewbox_h: float = 556) -> bool:
+    pts = geometry.get("points", [])
+    if len(pts) < 3:
+        return False
+    poly = [{"x": p["x"] / 100 * viewbox_w, "y": p["y"] / 100 * viewbox_h} for p in pts]
+    inside = False
+    j = len(poly) - 1
+    for i, pt in enumerate(poly):
+        xi, yi, xj, yj = pt["x"], pt["y"], poly[j]["x"], poly[j]["y"]
+        if ((yi > py) != (yj > py)) and (px < (xj - xi) * (py - yi) / (yj - yi) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
+def _binding_mode_and_shape(
+    device_id: uuid.UUID,
+    geometry: dict | None,
+    position: tuple[float | None, float | None],
+) -> tuple[str, bool]:
+    px, py = position
+    if px is None or py is None:
+        return "manual_pending", False
+    if geometry and geometry.get("unit") == "percent":
+        inside = _point_in_geometry(px, py, geometry)
+        return "spatial_auto", not inside
+    return "spatial_auto", False
+
+
 def _zone_key_from_name(name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower().strip()).strip("-")[:30]
     return f"cz-{slug}-{uuid.uuid4().hex[:6]}"
@@ -628,8 +663,10 @@ async def create_custom_zone(
     db.add(cz)
     await db.flush()
 
+    geo = data.geometry
     for dev_id in valid_ids:
-        db.add(CustomZoneDevice(zone_id=cz.id, device_id=dev_id))
+        mode, out = _binding_mode_and_shape(dev_id, geo, await _device_position(dev_id, db))
+        db.add(CustomZoneDevice(zone_id=cz.id, device_id=dev_id, binding_mode=mode, out_of_shape=out))
 
     automation = ZoneAutomation(
         store_id=store_id, zone_key=zone_key, mode=data.mode,
@@ -697,8 +734,10 @@ async def update_custom_zone(
         await db.execute(
             CustomZoneDevice.__table__.delete().where(CustomZoneDevice.zone_id == cz.id)
         )
+        geo = cz.geometry  # geometry já actualizada acima
         for dev_id in new_ids:
-            db.add(CustomZoneDevice(zone_id=cz.id, device_id=dev_id))
+            mode, out = _binding_mode_and_shape(dev_id, geo, await _device_position(dev_id, db))
+            db.add(CustomZoneDevice(zone_id=cz.id, device_id=dev_id, binding_mode=mode, out_of_shape=out))
 
     # Sincroniza ideal_min/max na automação
     auto_res = await db.execute(
@@ -746,6 +785,13 @@ async def delete_custom_zone(
     cz.updated_at = datetime.utcnow()
     cz.updated_by_name = current_user.name
 
+    # Libera os bindings para que os devices possam ser vinculados a outras zonas
+    await db.execute(
+        CustomZoneDevice.__table__.update()
+        .where(CustomZoneDevice.zone_id == cz.id)
+        .values(active=False)
+    )
+
     # Inativa a automação (não apaga)
     auto_res = await db.execute(
         select(ZoneAutomation).where(ZoneAutomation.zone_key == zone_key, ZoneAutomation.store_id == store_id)
@@ -781,6 +827,25 @@ async def restore_custom_zone(
         raise HTTPException(404, "Zona não encontrada")
     cz.active = True
     cz.updated_at = datetime.utcnow()
+
+    # Reactiva apenas os bindings cujo device não está já activo noutras zonas
+    binding_res = await db.execute(
+        select(CustomZoneDevice.device_id).where(CustomZoneDevice.zone_id == cz.id)
+    )
+    bound_ids = [r[0] for r in binding_res.all()]
+    for dev_id in bound_ids:
+        # Verifica se o device tem binding activo noutras zonas
+        conflict = await db.execute(
+            select(CustomZoneDevice.zone_id)
+            .where(CustomZoneDevice.device_id == dev_id, CustomZoneDevice.active == True)
+        )
+        if not conflict.scalar_one_or_none():
+            await db.execute(
+                CustomZoneDevice.__table__.update()
+                .where(CustomZoneDevice.zone_id == cz.id, CustomZoneDevice.device_id == dev_id)
+                .values(active=True)
+            )
+
     await log_action(db,
         action_type="custom_zone_restored",
         description=f"Zona '{cz.name}' restaurada",

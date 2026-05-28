@@ -279,6 +279,8 @@ async def compute_zone_twin(
     active_ac = 0
     has_internal = False
     readings_fresh = True
+    fresh_count = 0
+    stale_count = 0
 
     for device, status in rows:
         is_ext = device.source_url is not None
@@ -295,7 +297,10 @@ async def compute_zone_twin(
         is_stale = bool(status.updated_at and status.updated_at < stale_cut)
         if is_stale:
             readings_fresh = False
+            if status.temperature is not None:
+                stale_count += 1
         elif status.temperature is not None:
+            fresh_count += 1
             temps_now.append(float(status.temperature))
         controllable = not is_ext and not device.dnd
         communication_ok = status.status_classification not in {"SEM_LEITURA", "LEITURA_STALE"} and not is_stale
@@ -321,6 +326,8 @@ async def compute_zone_twin(
 
     current_avg: float | None = round(mean(temps_now), 2) if temps_now else None
     current_status = _classify(current_avg, zone.ideal_min, zone.ideal_max) if current_avg is not None else "NO_READING"
+    total_with_temp = fresh_count + stale_count
+    freshness_ratio = round(fresh_count / total_with_temp, 2) if total_with_temp > 0 else 0.0
 
     variance: float | None = None
     if len(temps_now) >= 2:
@@ -367,7 +374,7 @@ async def compute_zone_twin(
 
     # ── 4. Risco, confiança e alerta preemptivo ───────────────────────────────
     risk = _risk_level(current_status, trend_per_hour)
-    confidence = _confidence_score(len(temps_now), hist_count, readings_fresh, variance, zone.zone_type)
+    confidence = _confidence_score(fresh_count, hist_count, readings_fresh, variance, zone.zone_type)
     # early_warning: zona OK agora mas em rota de colisão com o limite
     early_warning = (
         current_status == "COMFORT"
@@ -408,6 +415,9 @@ async def compute_zone_twin(
         "predicted_temp_60m": p60,
         "risk_level": risk,
         "confidence": confidence,
+        "freshness_ratio": freshness_ratio,
+        "fresh_device_count": fresh_count,
+        "stale_device_count": stale_count,
         "early_warning": early_warning,
         "contributing_devices": contributing,
         "recommended_action": rec_action,
