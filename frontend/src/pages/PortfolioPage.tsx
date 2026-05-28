@@ -221,13 +221,13 @@ export default function PortfolioPage() {
 
   const { data: openAlerts = [] } = useQuery<any[]>({
     queryKey: ['portfolio-alerts'],
-    queryFn: () => alertsApi.list({ status: 'OPEN', severity: 'P1,P2', limit: 10, sort: 'severity' }),
+    queryFn: () => alertsApi.list({ status: 'OPEN', limit: 10 }).then((r: any) => r?.alerts ?? r ?? []),
     refetchInterval: 30_000,
   })
 
   const { data: recentLogs = [] } = useQuery<any[]>({
     queryKey: ['portfolio-logs'],
-    queryFn: () => logsApi.list({ origin: 'automation', limit: 12 }),
+    queryFn: () => logsApi.list({ origin: 'automation', limit: 12 }).then((r: any) => r?.items ?? r ?? []),
     refetchInterval: 60_000,
   })
 

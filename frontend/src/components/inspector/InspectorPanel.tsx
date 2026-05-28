@@ -167,9 +167,9 @@ function DeviceInspector({ deviceId, deviceName }: { deviceId: string; deviceNam
     queryFn: () => devicesApi.get(deviceId),
     refetchInterval: 30_000,
   })
-  const { data: alerts } = useQuery({
+  const { data: alerts = [] } = useQuery<any[]>({
     queryKey: ['inspector-device-alerts', deviceId],
-    queryFn: () => alertsApi.list({ device_id: deviceId, status: 'OPEN', limit: 3 }),
+    queryFn: () => alertsApi.list({ device_id: deviceId, status: 'OPEN', limit: 3 }).then((r: any) => r?.alerts ?? r ?? []),
     refetchInterval: 30_000,
   })
 
@@ -277,9 +277,9 @@ function StoreInspector({ storeId, storeName }: { storeId: string; storeName: st
     queryFn: () => kpiApi.store(storeId),
     refetchInterval: 30_000,
   })
-  const { data: alerts } = useQuery({
+  const { data: alerts = [] } = useQuery<any[]>({
     queryKey: ['inspector-store-alerts', storeId],
-    queryFn: () => alertsApi.list({ store_id: storeId, status: 'OPEN', limit: 5 }),
+    queryFn: () => alertsApi.list({ store_id: storeId, status: 'OPEN', limit: 5 }).then((r: any) => r?.alerts ?? r ?? []),
     refetchInterval: 30_000,
   })
 
