@@ -385,6 +385,11 @@ async def set_zone_mode(
     )
     await db.commit()
 
+    # Fencing token (P0.4): incrementa epoch da loja para invalidar planos em curso
+    # nos workers do zone_controller que usaram o snapshot anterior.
+    from app.services.store_epochs import bump_epoch
+    await bump_epoch(store_id, db)
+
     # Broadcast em tempo real para todos os usuários conectados
     event_payload = {
         "store_id": str(store_id),

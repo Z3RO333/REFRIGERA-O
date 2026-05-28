@@ -195,6 +195,13 @@ _STATEMENTS = [
     "ALTER TABLE custom_zone_devices ADD COLUMN IF NOT EXISTS binding_mode VARCHAR(30) NOT NULL DEFAULT 'spatial_auto'",
     # flag para binding fora do polígono — avisar o operador
     "ALTER TABLE custom_zone_devices ADD COLUMN IF NOT EXISTS out_of_shape BOOLEAN NOT NULL DEFAULT false",
+    # store_epochs: fencing tokens monotónicos por loja para rejeitar planos antigos (P0.4)
+    """CREATE TABLE IF NOT EXISTS store_epochs (
+        store_id UUID PRIMARY KEY REFERENCES stores(id) ON DELETE CASCADE,
+        epoch    BIGINT NOT NULL DEFAULT 0,
+        updated_at TIMESTAMP NOT NULL DEFAULT now()
+    )""",
+    "CREATE INDEX IF NOT EXISTS ix_store_epochs_store ON store_epochs (store_id)",
 ]
 
 

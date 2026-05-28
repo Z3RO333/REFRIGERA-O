@@ -67,6 +67,10 @@ KILL_SWITCH_KEY = "automation:kill_switch"
 # Janela anti-spam para sugestões iguais de IA/automação.
 SUGGESTION_DEDUPE_SECONDS = 1800
 
+# Gate de frescura: proporção mínima de leituras frescas para execução autônoma.
+# Zonas com menos de 60 % de devices frescos não recebem comandos automáticos.
+FRESHNESS_MIN_RATIO = 0.60
+
 
 @dataclass
 class ZoneConfig:
@@ -102,28 +106,85 @@ ZONES: dict[str, ZoneConfig] = {}
 # ── Entrypoints do scheduler ──────────────────────────────────────────────────
 
 async def run_zone_controller() -> None:
-    """Avalia todas as zonas com automação ativa. Chamado pelo scheduler."""
+    """Avalia todas as zonas com automação ativa. Chamado pelo scheduler.
+
+    Usa StoreSnapshot para carregar todos os dados em batch (4 queries por loja)
+    em vez de N queries por zona. O snapshot já exclui devices com
+    binding_mode='conflict_overlap', garantindo isolamento de conflito (P0.5).
+    """
+    from app.services.store_snapshot import build_snapshots_for_all_stores
+    from app.services.store_epochs import get_all_epochs
+
     async with AsyncSessionLocal() as session:
+        epoch_map = await get_all_epochs(session)
+        snapshots = await build_snapshots_for_all_stores(session, epoch_map=epoch_map)
         result = await session.execute(
             select(ZoneAutomation).where(
                 ZoneAutomation.mode.not_in(["manual", "maintenance"])
             )
         )
         automations = result.scalars().all()
-        # Pré-carrega zonas customizadas para evitar N+1
-        custom_zones = await _load_all_custom_zones(session)
+        # Relê epochs após o snapshot para detectar bump_epoch disparado durante a construção
+        current_epochs = await get_all_epochs(session)
 
     if not automations:
         return
 
-    all_zones: dict[str, ZoneConfig] = custom_zones
+    logger.info(
+        "Zone controller: %d lojas, %d zonas ativas",
+        len(snapshots), len(automations),
+    )
 
-    logger.info("Zone controller: avaliando %d zonas ativas", len(automations))
     for automation in automations:
-        zone = all_zones.get(automation.zone_key)
-        if not zone:
-            logger.warning("Zona '%s' sem configuração — ignorando", automation.zone_key)
+        snap = snapshots.get(automation.store_id)
+        if snap is None:
+            logger.warning(
+                "Loja %s sem snapshot — ignorando zona %s",
+                automation.store_id, automation.zone_key,
+            )
             continue
+
+        # Fencing token (P0.4): rejeita o plano se houve intervenção manual
+        # entre o início do snapshot e agora (ex.: operador mudou modo noutro worker)
+        if snap.epoch != current_epochs.get(automation.store_id, 0):
+            logger.info(
+                "Zone %s: epoch mudou (%d → %d) — plano descartado",
+                automation.zone_key,
+                snap.epoch,
+                current_epochs.get(automation.store_id, 0),
+            )
+            continue
+
+        zone_snap = snap.zones.get(automation.zone_key)
+        if zone_snap is None:
+            logger.warning("Zona '%s' sem configuração no snapshot — ignorando", automation.zone_key)
+            continue
+
+        # Gate de frescura (P0.2): bloqueia execução autônoma quando dados obsoletos demais.
+        # Somente aplica quando há devices com temperatura — zona sem leitura nenhuma
+        # é tratada normalmente pelo diagnóstico interno de _evaluate_zone.
+        if (automation.mode in ("auto", "semi")
+                and zone_snap.total_with_temp > 0
+                and zone_snap.freshness_ratio < FRESHNESS_MIN_RATIO):
+            logger.info(
+                "Zone %s: freshness %.0f%% < %.0f%% — execução autônoma bloqueada (dados obsoletos)",
+                automation.zone_key,
+                zone_snap.freshness_ratio * 100,
+                FRESHNESS_MIN_RATIO * 100,
+            )
+            continue
+
+        # ZoneConfig a partir do snapshot — device_ids já excluem conflict_overlap (P0.5)
+        zone = ZoneConfig(
+            key=zone_snap.zone_key,
+            label=zone_snap.name,
+            sector_names=[],
+            ideal_min=zone_snap.ideal_min,
+            ideal_max=zone_snap.ideal_max,
+            zone_type=zone_snap.zone_type,
+            device_ids=list(zone_snap.device_ids),
+        )
+
         try:
             await _evaluate_zone(automation, zone_override=zone)
         except Exception as exc:
@@ -1980,6 +2041,14 @@ async def _execute_power_on(
     session: AsyncSession,
     target_setpoint: int | None = None,
 ) -> tuple[bool, int]:
+    from app.services.action_dispatcher import brise_dispatcher
+
+    if not await brise_dispatcher.can_execute():
+        logger.warning(
+            "_execute_power_on: circuit breaker OPEN — %s bloqueado", device.name
+        )
+        return False, 0
+
     setpoint_cool = target_setpoint or params.setpoint_cool or 22
     brise_params = {
         "modeDevice": 1,
@@ -1995,6 +2064,7 @@ async def _execute_power_on(
     success = await brise_client.put_parameters(device.brise_device_id, brise_params)
     _api_ms = int((time.monotonic() - _t_api) * 1000)
     if success:
+        await brise_dispatcher.on_success()
         params.mode_device = 1
         params.mode_ac = 0
         params.setpoint_cool = setpoint_cool
@@ -2006,6 +2076,8 @@ async def _execute_power_on(
             device.status_latest.state = True
             device.status_latest.updated_at = datetime.utcnow()
         await session.commit()
+    else:
+        await brise_dispatcher.on_failure()
     return success, _api_ms
 
 
@@ -2017,6 +2089,14 @@ async def _execute_setpoint(
     session: AsyncSession,
     step: int = 1,
 ) -> tuple[bool, int]:
+    from app.services.action_dispatcher import brise_dispatcher
+
+    if not await brise_dispatcher.can_execute():
+        logger.warning(
+            "_execute_setpoint: circuit breaker OPEN — %s bloqueado", device.name
+        )
+        return False, 0
+
     delta = step if direction == "up" else -step
     new_setpoint = max(
         automation.setpoint_min,
@@ -2045,9 +2125,12 @@ async def _execute_setpoint(
     success = await brise_client.put_parameters(device.brise_device_id, brise_params)
     _api_ms = int((time.monotonic() - _t_api) * 1000)
     if success:
+        await brise_dispatcher.on_success()
         params.setpoint_cool = new_setpoint
         params.synced_at = datetime.utcnow()
         await session.commit()
+    else:
+        await brise_dispatcher.on_failure()
     return success, _api_ms
 
 
