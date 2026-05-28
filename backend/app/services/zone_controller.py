@@ -1083,6 +1083,14 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
             if scored_setpoint_candidates else None
         )
         if best is None:
+            # Zona fria com todos os ACs no setpoint_max → tentar desligar o AC
+            # em vez de apenas bloquear: AC no máximo mas zona ainda fria = ineficaz.
+            if direction == "up":
+                await _try_power_off_cold_zone(
+                    automation, zone, devices, params_map, avg_temp, trend, status,
+                    energy_strategy, hotspot, _t0, session,
+                )
+                return
             reason = _build_no_adjustable_reason(
                 readable, devices, params_map, direction,
                 automation.setpoint_min, automation.setpoint_max, zone,
@@ -2182,6 +2190,159 @@ async def _execute_power_on(
             session.add(params)
         if device.status_latest:
             device.status_latest.state = True
+            device.status_latest.updated_at = datetime.utcnow()
+        await session.commit()
+    else:
+        await brise_dispatcher.on_failure()
+    return success, _api_ms
+
+
+async def _try_power_off_cold_zone(
+    automation: ZoneAutomation,
+    zone: ZoneConfig,
+    devices: list,
+    params_map: dict,
+    avg_temp: float,
+    trend: float | None,
+    status: str,
+    energy_strategy: str,
+    hotspot,
+    _t0: float,
+    session: AsyncSession,
+) -> None:
+    """Desliga o AC menos impactante quando a zona está fria e todos estão no setpoint_max.
+
+    Só executa se:
+    - O AC estiver ligado há pelo menos MIN_ON_BEFORE_ECONOMY_OFF_MINUTES
+    - A tendência não estiver aquecendo (zona já está resolvendo sozinha)
+    - Circuit breaker não estiver aberto
+    """
+    # Se zona está aquecendo por conta própria, aguarda — não precisa desligar
+    if trend is not None and trend > 0.5:
+        logger.debug("Zone %s: fria mas aquecendo a %.1f°C/h — aguardando", zone.key, trend)
+        return
+
+    # Candidatos a desligar: ACs ligados com tempo mínimo de operação
+    candidates_off = []
+    for row in devices:
+        params = params_map.get(row.device.id)
+        if not _device_is_on(row, params):
+            continue
+        if row.device.dnd or row.device.source_url:
+            continue
+        if not _device_command_communication_ok(row):
+            continue
+        on_minutes = _minutes_since_state_change(row, on_state=True)
+        if on_minutes is not None and on_minutes < MIN_ON_BEFORE_ECONOMY_OFF_MINUTES:
+            continue  # ligado há pouco tempo — não desligar ainda
+        candidates_off.append((row, params, on_minutes or 0))
+
+    if not candidates_off:
+        # Nenhum AC elegível para desligar — loga bloqueio normal
+        reason = (
+            f"Zona {status} com setpoint no máximo ({automation.setpoint_max}°C). "
+            f"Nenhum AC elegível para desligar (todos ligados há menos de "
+            f"{MIN_ON_BEFORE_ECONOMY_OFF_MINUTES} min ou sem comunicação). "
+            f"Faixa: {automation.setpoint_min}–{automation.setpoint_max}°C. [{zone.key}]"
+        )
+        await _log_blocked(automation, zone, avg_temp, reason, session)
+        return
+
+    # Prioriza desligar o AC com maior BTU (mais impactante para aquecer) entre os que
+    # estão ligados há mais tempo — equilibra conforto e energia
+    candidates_off.sort(key=lambda x: (-x[2], -(x[0].device.btu or 0)))
+    target_row, target_params, on_min = candidates_off[0]
+
+    reason = (
+        f"Zona {status} ({avg_temp:.1f}°C) com todos os ACs no setpoint máximo "
+        f"({automation.setpoint_max}°C) e temperatura não respondendo"
+        + (f" (tendência {trend:+.1f}°C/h)" if trend is not None else "")
+        + f". Desligando {target_row.device.name} (ligado há {on_min} min) "
+        f"para permitir aquecimento natural. [{zone.key}]"
+    )
+
+    action_status = "suggestion"
+    _api_ms: int | None = None
+
+    if automation.mode in ("auto", "semi"):
+        cooldown_key = f"zone:cooldown:{automation.store_id}:{zone.key}"
+        if not await redis_client.acquire_lock(cooldown_key, ttl=ZONE_COOLDOWN_SECONDS):
+            return
+        ok, _api_ms = await _execute_power_off(target_row.device, target_params, session)
+        if ok:
+            action_status = "pending_verification"
+            logger.info(
+                "Zone %s [%s]: desligando %s — zona fria no setpoint_max (%.1f°C, tendência %s)",
+                zone.key, automation.mode, target_row.device.name, avg_temp,
+                f"{trend:+.1f}°C/h" if trend is not None else "desconhecida",
+            )
+        else:
+            action_status = "blocked"
+            await redis_client.release_lock(cooldown_key)
+
+    action = ZoneAction(
+        store_id=automation.store_id,
+        zone_key=zone.key,
+        zone_label=zone.label,
+        device_id=target_row.device.id,
+        device_name=target_row.device.name,
+        direction="up",
+        temp_before=round(avg_temp, 2),
+        ideal_min=zone.ideal_min,
+        ideal_max=zone.ideal_max,
+        setpoint_before=target_params.setpoint_cool,
+        setpoint_after=target_params.setpoint_cool,
+        reason=reason,
+        confidence=_confidence(avg_temp, zone, status, 1),
+        mode=automation.mode,
+        status=action_status,
+        decision_ms=int((time.monotonic() - _t0) * 1000),
+        api_ms=_api_ms,
+    )
+    session.add(action)
+    await session.commit()
+
+    await redis_client.publish("zone.action.created", {
+        "store_id": str(automation.store_id),
+        "zone_key": zone.key,
+        "zone_label": zone.label,
+        "device_name": target_row.device.name,
+        "direction": "up",
+        "status": action_status,
+        "action": "power_off",
+        "reason": reason,
+    })
+
+
+async def _execute_power_off(
+    device: Device,
+    params: DeviceParameters,
+    session: AsyncSession,
+) -> tuple[bool, int]:
+    from app.services.action_dispatcher import brise_dispatcher
+
+    if not await brise_dispatcher.can_execute():
+        logger.warning("_execute_power_off: circuit breaker OPEN — %s bloqueado", device.name)
+        return False, 0
+
+    brise_params = {
+        "modeDevice": 0,
+        "modeAC": params.mode_ac or 0,
+        "fanSpeed": params.fan_speed or 1,
+        "setpointCool": params.setpoint_cool or 26,
+        "setpointHeat": params.setpoint_heat or 28,
+        "ecoCool": params.eco_cool or False,
+        "ecoHeat": params.eco_heat or False,
+    }
+    _t_api = time.monotonic()
+    success = await brise_client.put_parameters(device.brise_device_id, brise_params)
+    _api_ms = int((time.monotonic() - _t_api) * 1000)
+    if success:
+        await brise_dispatcher.on_success()
+        params.mode_device = 0
+        params.synced_at = datetime.utcnow()
+        if device.status_latest:
+            device.status_latest.state = False
             device.status_latest.updated_at = datetime.utcnow()
         await session.commit()
     else:
