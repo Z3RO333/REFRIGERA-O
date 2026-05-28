@@ -1447,14 +1447,14 @@ def _minutes_since_state_change(row: _DeviceRow, on_state: bool) -> int | None:
 
 
 def _normal_cooling_floor(zone: ZoneConfig, automation: ZoneAutomation, status: str) -> int:
-    """Menor setpoint desejado para o ciclo atual.
+    """Menor setpoint permitido no ciclo de resfriamento.
 
-    WARM/HOT/hotspot trabalha perto do limite superior da faixa. CRITICAL pode
-    buscar a parte baixa da faixa, mas ainda em passos de 1°C e sem usar mínimo
-    do aparelho como alvo normal.
+    O piso é sempre setpoint_min (limite definido pelo operador).
+    Usar ideal_max como piso bloqueava zonas onde o setpoint já estava abaixo de
+    ideal_max (ex.: AC em 24°C, ideal_max=26°C → floor=26, current<=floor → sem ajuste),
+    mesmo com a sala ainda acima da faixa confortável.
     """
-    target = zone.ideal_min if status == "CRITICAL" else zone.ideal_max
-    return max(automation.setpoint_min, int(math.ceil(target)))
+    return automation.setpoint_min
 
 
 def _power_on_setpoint(params: DeviceParameters, zone: ZoneConfig, automation: ZoneAutomation, status: str) -> int:
