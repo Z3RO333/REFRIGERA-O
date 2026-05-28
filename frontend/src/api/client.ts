@@ -180,6 +180,11 @@ export const diagnosticsApi = {
   device: (deviceId: string) => api.get(`/diagnostics/devices/${deviceId}`).then(r => r.data),
 }
 
+export const portfolioApi = {
+  stores: () => api.get('/portfolio/stores').then(r => r.data),
+  kpis: () => api.get('/portfolio/kpis').then(r => r.data),
+}
+
 export const aiApi = {
   status: () => api.get('/ai/status').then(r => r.data),
   analyses: () => api.get('/ai/analyses').then(r => r.data),

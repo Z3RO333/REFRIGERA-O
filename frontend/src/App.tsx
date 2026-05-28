@@ -24,6 +24,7 @@ import AIAnalysisPage from './pages/AIAnalysisPage'
 import LogsPage from './pages/LogsPage'
 import DigitalTwinPage from './pages/DigitalTwinPage'
 import ZoneControlPanel from './pages/ZoneControlPanel'
+import PortfolioPage from './pages/PortfolioPage'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { status, setSession, logout } = useAuthStore()
@@ -46,7 +47,8 @@ export default function App() {
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
-          <Route index element={<Navigate to="/cockpit" replace />} />
+          <Route index element={<Navigate to="/portfolio" replace />} />
+          <Route path="portfolio" element={<PortfolioPage />} />
           <Route path="cockpit" element={<Dashboard />} />
           <Route path="dashboard" element={<Navigate to="/cockpit" replace />} />
           <Route path="lojas" element={<StoresOverview />} />

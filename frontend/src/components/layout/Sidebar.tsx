@@ -7,6 +7,7 @@ import {
   Building2,
   ClipboardList,
   Cpu,
+  Globe2,
   LayoutDashboard,
   Map,
   Monitor,
@@ -30,6 +31,7 @@ type NavItem = {
 }
 
 const navItems: NavItem[] = [
+  { to: '/portfolio', icon: Globe2, label: 'Portfolio' },
   { to: '/cockpit', icon: LayoutDashboard, label: 'Cockpit' },
   { to: '/lojas', icon: Building2, label: 'Lojas' },
   { to: '/mapa-termico', icon: Map, label: 'Mapa Térmico' },
