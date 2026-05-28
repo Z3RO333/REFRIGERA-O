@@ -7,7 +7,7 @@ import {
 } from 'lucide-react'
 import { useInspectorStore } from '../../store/useInspectorStore'
 import { digitalTwinApi, kpiApi, devicesApi, alertsApi, zonesApi } from '../../api/client'
-import { cn } from '../../lib/utils'
+import { cn, formatTime } from '../../lib/utils'
 
 const RISK_STYLE: Record<string, string> = {
   CRITICAL: 'text-red-400 bg-red-900/30 border-red-800',
@@ -229,7 +229,7 @@ function DeviceInspector({ deviceId, deviceName }: { deviceId: string; deviceNam
           <Row label="Eficiência" value={`${(s.efficiency_score * 100).toFixed(0)}%`} />
         )}
         {s?.updated_at && (
-          <Row label="Última leitura" value={new Date(s.updated_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })} />
+          <Row label="Última leitura" value={formatTime(s.updated_at)} />
         )}
         {device?.btu && (
           <Row label="BTU" value={device.btu.toLocaleString()} />

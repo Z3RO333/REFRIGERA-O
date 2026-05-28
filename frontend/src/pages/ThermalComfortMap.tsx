@@ -11,7 +11,7 @@ import { automationApi, customZonesApi, devicesApi, digitalTwinApi, storesApi, z
 import StatusBadge from '../components/StatusBadge'
 import DeviceMarker from '../components/map/DeviceMarker'
 import ZoneEditor from '../components/map/ZoneEditor'
-import { cn, formatRelativeTime, formatTemp } from '../lib/utils'
+import { cn, formatDateTime, formatRelativeTime, formatTemp, formatTime } from '../lib/utils'
 import { useAuthStore } from '../store/useAuthStore'
 import type { AutomationStatus, Device, DigitalTwinZone, Sector, ZoneAutomationState, ZoneMode, ZonePriority, ZoneType } from '../types'
 
@@ -1380,7 +1380,7 @@ function ZonePanel({
                   )}
                   {automation.blocked_until && (
                     <p className="text-xs text-orange-500 dark:text-orange-500">
-                      Até: {new Date(automation.blocked_until).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                      Até: {formatDateTime(automation.blocked_until)}
                     </p>
                   )}
                 </div>
@@ -2000,7 +2000,7 @@ function DigitalTwinPanel({ twin }: { twin: DigitalTwinZone | undefined }) {
         )}
 
         <div className="text-[10px] text-gray-400">
-          Calculado às {new Date(twin.computed_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+          Calculado às {formatTime(twin.computed_at)}
           {' · '}confiança {confPct}% · heurístico, não executa comandos
         </div>
       </div>

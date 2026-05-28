@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Shield, User, UserCheck, UserX, ChevronDown } from 'lucide-react'
 import { usersApi } from '../api/client'
 import { useAuthStore } from '../store/useAuthStore'
-import { cn, formatRelativeTime } from '../lib/utils'
+import { cn, formatDate, formatRelativeTime } from '../lib/utils'
 
 interface UserRecord {
   id: string
@@ -145,7 +145,7 @@ export default function UsersPage() {
                     </td>
 
                     <td className="hidden px-4 py-3 text-gray-500 lg:table-cell">
-                      {new Date(user.created_at).toLocaleDateString('pt-BR')}
+                      {formatDate(user.created_at)}
                     </td>
 
                     <td className="px-4 py-3">

@@ -6,7 +6,7 @@ import {
 } from 'lucide-react'
 import { logsApi, storesApi } from '../api/client'
 import type { LogEntry, LogKPIs } from '../types'
-import { cn, formatRelativeTime } from '../lib/utils'
+import { cn, formatDateTime, formatRelativeTime } from '../lib/utils'
 
 // ── Metadados de evento ───────────────────────────────────────────────────────
 
@@ -142,7 +142,7 @@ function DetailModal({ entry, onClose }: { entry: LogEntry; onClose: () => void 
           )}
 
           <p className="text-xs text-gray-400">
-            {new Date(entry.created_at).toLocaleString('pt-BR')}
+            {formatDateTime(entry.created_at)}
           </p>
         </div>
       </div>

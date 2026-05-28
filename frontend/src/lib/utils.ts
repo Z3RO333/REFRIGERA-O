@@ -37,9 +37,44 @@ export function formatDelta(d: number | null | undefined): string {
   return d > 0 ? `+${d.toFixed(1)}°C` : `${d.toFixed(1)}°C`
 }
 
+// ── Utilitários de data/hora em horário de Manaus (UTC-4) ────────────────────
+// O backend salva timestamps em UTC sem sufixo Z — garantimos que o browser
+// interprete como UTC antes de converter para America/Manaus.
+const TZ_MANAUS = 'America/Manaus'
+
+function toUTC(iso: string): Date {
+  // Se não tem indicador de timezone, trata como UTC
+  return new Date(/Z|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : iso + 'Z')
+}
+
+export function formatDateTime(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  return toUTC(iso).toLocaleString('pt-BR', {
+    timeZone: TZ_MANAUS,
+    day: '2-digit', month: '2-digit', year: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+  })
+}
+
+export function formatTime(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  return toUTC(iso).toLocaleTimeString('pt-BR', {
+    timeZone: TZ_MANAUS,
+    hour: '2-digit', minute: '2-digit',
+  })
+}
+
+export function formatDate(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  return toUTC(iso).toLocaleDateString('pt-BR', {
+    timeZone: TZ_MANAUS,
+    day: '2-digit', month: '2-digit', year: 'numeric',
+  })
+}
+
 export function formatRelativeTime(iso: string | null | undefined): string {
   if (!iso) return 'Nunca'
-  const diff = Date.now() - new Date(iso).getTime()
+  const diff = Date.now() - toUTC(iso).getTime()
   const mins = Math.floor(diff / 60000)
   if (mins < 1) return 'Agora'
   if (mins < 60) return `há ${mins} min`

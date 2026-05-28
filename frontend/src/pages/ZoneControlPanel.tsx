@@ -7,7 +7,7 @@ import {
   TrendingUp, Wind, Zap, Wifi,
 } from 'lucide-react'
 import { automationApi, customZonesApi, digitalTwinApi, storesApi, zonesApi } from '../api/client'
-import { cn, formatRelativeTime } from '../lib/utils'
+import { cn, formatDateTime, formatRelativeTime } from '../lib/utils'
 import { useAuthStore } from '../store/useAuthStore'
 import type { CustomZone, DigitalTwinZone, Store, ZoneAutomationState, ZonePriority } from '../types'
 
@@ -234,7 +234,7 @@ function ZoneCard({
           <AlertTriangle className="h-3 w-3 text-orange-600 shrink-0 mt-0.5" />
           <span className="text-xs text-orange-700 dark:text-orange-300 line-clamp-2">
             {automation.blocked_reason}
-            {automation.blocked_until && ` até ${new Date(automation.blocked_until).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}`}
+            {automation.blocked_until && ` até ${formatDateTime(automation.blocked_until)}`}
           </span>
         </div>
       )}

@@ -7,7 +7,7 @@ import {
 } from 'lucide-react'
 import { portfolioApi, alertsApi, logsApi } from '../api/client'
 import { useInspectorStore } from '../store/useInspectorStore'
-import { cn } from '../lib/utils'
+import { cn, formatTime } from '../lib/utils'
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 interface StoreRow {
@@ -393,7 +393,7 @@ export default function PortfolioPage() {
               )}
               {recentLogs.map((log: any) => {
                 const time = log.created_at
-                  ? new Date(log.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+                  ? formatTime(log.created_at)
                   : ''
                 const statusColor = LOG_STATUS_STYLE[log.status ?? ''] ?? 'text-gray-400'
                 return (
