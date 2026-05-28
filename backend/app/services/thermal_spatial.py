@@ -43,6 +43,7 @@ class Hotspot:
     avg_hotspot_temp: float
     contributing_names: list[str] = field(default_factory=list)
     has_coordinates: bool = True
+    peak_device_name: str = ""  # device com a maior temperatura no cluster
 
 
 def detect_hotspot(devices: list[DevicePoint]) -> Hotspot | None:
@@ -70,7 +71,8 @@ def detect_hotspot(devices: list[DevicePoint]) -> Hotspot | None:
 
     selected_hot_devices = _select_hotspot_cluster(hot_devices)
 
-    peak_temp = max(d.temperature for d in selected_hot_devices)
+    peak_device = max(selected_hot_devices, key=lambda d: d.temperature)
+    peak_temp = peak_device.temperature
     avg_hotspot = sum(d.temperature for d in selected_hot_devices) / len(selected_hot_devices)
     names = [d.device_name for d in selected_hot_devices]
 
@@ -82,6 +84,7 @@ def detect_hotspot(devices: list[DevicePoint]) -> Hotspot | None:
             avg_hotspot_temp=round(avg_hotspot, 2),
             contributing_names=names,
             has_coordinates=False,
+            peak_device_name=peak_device.device_name,
         )
 
     total_weight = sum(d.temperature for d in with_pos)
@@ -95,6 +98,7 @@ def detect_hotspot(devices: list[DevicePoint]) -> Hotspot | None:
         avg_hotspot_temp=round(avg_hotspot, 2),
         contributing_names=names,
         has_coordinates=True,
+        peak_device_name=peak_device.device_name,
     )
 
 

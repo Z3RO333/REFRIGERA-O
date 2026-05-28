@@ -1596,6 +1596,9 @@ def _score_setpoint_candidate(
     thermal = 30.0 + prox * 38.0 + min(delta_abs * 6.0, 18.0)
     if _device_is_on(row, params):
         thermal += 8.0
+    # Device no pico do hotspot: bônus direto para garantir prioridade sobre vizinhos
+    if hotspot is not None and hotspot.peak_device_name and row.device.name == hotspot.peak_device_name:
+        thermal += 20.0
 
     low_setpoint_penalty = 0.0
     if direction == "down" and zone is not None:
