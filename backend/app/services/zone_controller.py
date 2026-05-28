@@ -38,6 +38,7 @@ from app.models.reading import DeviceReading
 from app.models.store import StoreSector
 from app.models.zone import ZoneAction, ZoneAutomation
 from app.services.thermal_spatial import DevicePoint, Hotspot, detect_hotspot, proximity_score
+from app.services.learning_service import record_decision as _learning_record
 
 logger = logging.getLogger(__name__)
 
@@ -1004,6 +1005,41 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
             )
             session.add(action)
             await session.commit()
+            try:
+                _pc = power_candidates[0]
+                await _learning_record(
+                    session=session,
+                    zone_action_id=action.id,
+                    store_id=automation.store_id,
+                    zone_key=zone.key,
+                    zone_label=zone.label,
+                    decision_type="auto" if action_status == "pending_verification" else "suggestion",
+                    thermal_status=status,
+                    avg_temp=round(avg_temp, 2),
+                    ideal_min=zone.ideal_min,
+                    ideal_max=zone.ideal_max,
+                    trend_c_per_hour=trend,
+                    freshness_ratio=None,
+                    devices_on=sum(1 for r in devices if _device_is_on(r, params_map.get(r.device.id))),
+                    devices_off=sum(1 for r in devices if _device_is_off(r, params_map.get(r.device.id))),
+                    had_hotspot=hotspot is not None,
+                    hotspot_peak_temp=hotspot.peak_temp if hotspot else None,
+                    action_type="power_on",
+                    device_id=power_device.device.id,
+                    device_name=power_device.device.name,
+                    setpoint_from=setpoint_before,
+                    setpoint_to=power_setpoint,
+                    fan_speed_from=power_params.fan_speed,
+                    fan_speed_to=None,
+                    confidence=confidence,
+                    energy_strategy=energy_strategy,
+                    thermal_impact_score=_pc.thermal_impact_score,
+                    energy_cost_score=_pc.energy_cost_score,
+                    final_score=_pc.final_score,
+                )
+                await session.commit()
+            except Exception as _le:
+                logger.warning("learning record falhou (power_on): %s", _le)
 
             if action_status == "pending_verification" and _power_api_ms is not None:
                 logger.info(
@@ -1157,6 +1193,42 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
         )
         session.add(action)
         await session.commit()
+        try:
+            _sc = scored_setpoint_candidates[0]
+            _dec_type = "auto" if action_status == "pending_verification" else "suggestion"
+            await _learning_record(
+                session=session,
+                zone_action_id=action.id,
+                store_id=automation.store_id,
+                zone_key=zone.key,
+                zone_label=zone.label,
+                decision_type=_dec_type,
+                thermal_status=status,
+                avg_temp=round(avg_temp, 2),
+                ideal_min=zone.ideal_min,
+                ideal_max=zone.ideal_max,
+                trend_c_per_hour=trend,
+                freshness_ratio=None,
+                devices_on=sum(1 for r in devices if _device_is_on(r, params_map.get(r.device.id))),
+                devices_off=sum(1 for r in devices if _device_is_off(r, params_map.get(r.device.id))),
+                had_hotspot=hotspot is not None,
+                hotspot_peak_temp=hotspot.peak_temp if hotspot else None,
+                action_type="setpoint_down" if direction == "down" else "setpoint_up",
+                device_id=best_device.device.id,
+                device_name=best_device.device.name,
+                setpoint_from=setpoint_before,
+                setpoint_to=new_setpoint,
+                fan_speed_from=best_params.fan_speed,
+                fan_speed_to=None,
+                confidence=confidence,
+                energy_strategy=energy_strategy,
+                thermal_impact_score=_sc.thermal_impact_score,
+                energy_cost_score=_sc.energy_cost_score,
+                final_score=_sc.final_score,
+            )
+            await session.commit()
+        except Exception as _le:
+            logger.warning("learning record falhou (setpoint): %s", _le)
 
         if action_status == "pending_verification" and _setpoint_api_ms is not None:
             logger.info(

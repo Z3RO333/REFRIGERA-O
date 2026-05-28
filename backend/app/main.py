@@ -3,13 +3,14 @@ import logging
 from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.v1 import devices, alerts, history, kpis, stores, maintenance, auth, ai, zones, automation, digital_twin, users, audit, logs, diagnostics, portfolio
+from app.api.v1 import devices, alerts, history, kpis, stores, maintenance, auth, ai, zones, automation, digital_twin, users, audit, logs, diagnostics, portfolio, learning
 from app.api.v1.auth import get_current_user
 from app.db.session import AsyncSessionLocal
 from sqlalchemy import text
 from app.models import zone as _zone_models  # noqa: F401 — ensure tables are created
 from app.models import audit as _audit_models  # noqa: F401
 from app.models import custom_zone as _custom_zone_models  # noqa: F401
+from app.models import learning as _learning_models  # noqa: F401
 from app.api import websocket as ws_router
 from app.api.websocket import start_redis_listener
 from app.db.session import engine, Base
@@ -89,6 +90,7 @@ app.include_router(audit.router, prefix="/api/v1/audit", tags=["audit"], depende
 app.include_router(logs.router, prefix="/api/v1/logs", tags=["logs"], dependencies=auth_required)
 app.include_router(diagnostics.router, prefix="/api/v1/diagnostics", tags=["diagnostics"], dependencies=auth_required)
 app.include_router(portfolio.router, prefix="/api/v1/portfolio", tags=["portfolio"], dependencies=auth_required)
+app.include_router(learning.router, prefix="/api/v1/learning", tags=["learning"], dependencies=auth_required)
 app.include_router(ws_router.router, tags=["websocket"])
 
 @app.get("/health")
