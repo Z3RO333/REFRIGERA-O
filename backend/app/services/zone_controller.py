@@ -325,10 +325,17 @@ async def _check_guardrails(automation: ZoneAutomation) -> str | None:
     current_min = now_manaus.hour * 60 + now_manaus.minute
     start_min = automation.allowed_start_hour * 60 + automation.allowed_start_minute
     end_min   = automation.allowed_end_hour   * 60 + automation.allowed_end_minute
-    if not (start_min <= current_min < end_min):
+    crosses_midnight = getattr(automation, "allowed_end_next_day", False)
+    if crosses_midnight:
+        # Ex: abre 07:00, fecha 01:00 → permitido se >= 420 OU < 60
+        in_window = current_min >= start_min or current_min < end_min
+    else:
+        in_window = start_min <= current_min < end_min
+    if not in_window:
         sh, sm = automation.allowed_start_hour, automation.allowed_start_minute
         eh, em = automation.allowed_end_hour,   automation.allowed_end_minute
-        return f"Fora do horário permitido ({sh:02d}:{sm:02d}–{eh:02d}:{em:02d}) — horário Manaus"
+        suffix = "(+1d)" if crosses_midnight else ""
+        return f"Fora do horário permitido ({sh:02d}:{sm:02d}–{eh:02d}:{em:02d}{suffix}) — horário Manaus"
 
     return None
 

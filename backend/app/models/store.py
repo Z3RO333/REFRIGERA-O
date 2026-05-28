@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import String, Boolean, DateTime, Float, Text, ForeignKey
+from sqlalchemy import String, Boolean, DateTime, Float, Integer, Text, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID
 from app.db.session import Base
@@ -17,6 +17,13 @@ class Store(Base):
     latitude: Mapped[float | None] = mapped_column(Float)
     longitude: Mapped[float | None] = mapped_column(Float)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # ── Horário de funcionamento (horário local Manaus, UTC-4) ────────────────
+    # close_next_day=True quando a loja fecha após a meia-noite (ex: Flores 01h, Boulevard 00h)
+    open_hour: Mapped[int] = mapped_column(Integer, default=7)
+    open_minute: Mapped[int] = mapped_column(Integer, default=0)
+    close_hour: Mapped[int] = mapped_column(Integer, default=18)
+    close_minute: Mapped[int] = mapped_column(Integer, default=0)
+    close_next_day: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     sectors: Mapped[list["StoreSector"]] = relationship("StoreSector", back_populates="store")

@@ -23,6 +23,7 @@ class ZoneAutomation(Base):
     allowed_start_minute: Mapped[int] = mapped_column(Integer, default=0)   # 07:00
     allowed_end_hour: Mapped[int] = mapped_column(Integer, default=18)
     allowed_end_minute: Mapped[int] = mapped_column(Integer, default=0)     # 18:00
+    allowed_end_next_day: Mapped[bool] = mapped_column(Boolean, default=False)  # fecha após meia-noite
     is_critical_zone: Mapped[bool] = mapped_column(Boolean, default=False)  # bloqueia auto/semi
 
     # ── Prioridade operacional ────────────────────────────────────────────────

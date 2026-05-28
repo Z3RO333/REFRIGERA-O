@@ -204,6 +204,27 @@ _STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS ix_store_epochs_store ON store_epochs (store_id)",
     # allow_auto_power_off: False em zonas comerciais (farma/loja) — AC nunca desliga automaticamente
     "ALTER TABLE zone_automations ADD COLUMN IF NOT EXISTS allow_auto_power_off BOOLEAN NOT NULL DEFAULT true",
+    # allowed_end_next_day: True quando a zona opera até depois da meia-noite (Farma Flores, Boulevard)
+    "ALTER TABLE zone_automations ADD COLUMN IF NOT EXISTS allowed_end_next_day BOOLEAN NOT NULL DEFAULT false",
+    # horário de funcionamento por loja (usado para herdar nas zonas e exibir no dashboard)
+    "ALTER TABLE stores ADD COLUMN IF NOT EXISTS open_hour INTEGER NOT NULL DEFAULT 7",
+    "ALTER TABLE stores ADD COLUMN IF NOT EXISTS open_minute INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE stores ADD COLUMN IF NOT EXISTS close_hour INTEGER NOT NULL DEFAULT 18",
+    "ALTER TABLE stores ADD COLUMN IF NOT EXISTS close_minute INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE stores ADD COLUMN IF NOT EXISTS close_next_day BOOLEAN NOT NULL DEFAULT false",
+    # atualiza horários reais das Farmas e garante allow_auto_power_off=false nas zonas delas
+    """UPDATE stores SET open_hour=7, open_minute=0, close_hour=0,  close_minute=0, close_next_day=true  WHERE code='FARMA_BOULEVARD'""",
+    """UPDATE stores SET open_hour=7, open_minute=0, close_hour=23, close_minute=0, close_next_day=false WHERE code='FARMA_DOM_PEDRO'""",
+    """UPDATE stores SET open_hour=7, open_minute=0, close_hour=1,  close_minute=0, close_next_day=true  WHERE code='FARMA_FLORES'""",
+    """UPDATE stores SET open_hour=8, open_minute=0, close_hour=18, close_minute=0, close_next_day=false WHERE code='FARMA_MATRIZ'""",
+    # propaga horários das Farmas para suas zone_automations
+    """UPDATE zone_automations za
+       SET allowed_start_hour=s.open_hour, allowed_start_minute=s.open_minute,
+           allowed_end_hour=s.close_hour,  allowed_end_minute=s.close_minute,
+           allowed_end_next_day=s.close_next_day,
+           allow_auto_power_off=false
+       FROM stores s
+       WHERE za.store_id=s.id AND s.code IN ('FARMA_BOULEVARD','FARMA_DOM_PEDRO','FARMA_FLORES','FARMA_MATRIZ')""",
     # ── Aprendizado adaptativo (Fase 1) ──────────────────────────────────────
     """CREATE TABLE IF NOT EXISTS ai_decisions (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
