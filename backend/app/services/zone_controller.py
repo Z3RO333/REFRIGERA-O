@@ -1085,6 +1085,21 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
             })
             return
 
+        # T2: zona COLD com capacidade redundante (≥2 ACs ligados) → preferir
+        # desligar 1 AC antes de subir setpoint. Mais econômico e mais efetivo
+        # do que apenas pedir menos resfriamento aos ACs já ligados.
+        if status == "COLD" and direction == "up" and automation.allow_auto_power_off:
+            devices_on_count = sum(
+                1 for r in devices if _device_is_on(r, params_map.get(r.device.id))
+            )
+            if devices_on_count >= 2:
+                acted = await _try_power_off_cold_zone(
+                    automation, zone, devices, params_map, avg_temp, trend, status,
+                    energy_strategy, hotspot, _t0, session,
+                )
+                if acted:
+                    return
+
         # Seleciona melhor device (com verificação de headroom de setpoint)
         scored_setpoint_candidates = _build_setpoint_candidates(
             readable,
@@ -1106,10 +1121,17 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
             # Zona fria com todos os ACs no setpoint_max → tentar desligar o AC
             # em vez de apenas bloquear: AC no máximo mas zona ainda fria = ineficaz.
             if direction == "up":
-                await _try_power_off_cold_zone(
+                acted = await _try_power_off_cold_zone(
                     automation, zone, devices, params_map, avg_temp, trend, status,
                     energy_strategy, hotspot, _t0, session,
                 )
+                if not acted:
+                    reason = (
+                        f"Zona {status} ({avg_temp:.1f}°C) com setpoint no máximo "
+                        f"({automation.setpoint_max}°C). Nenhum AC elegível para desligar. "
+                        f"Faixa: {automation.setpoint_min}–{automation.setpoint_max}°C. [{zone.key}]"
+                    )
+                    await _log_blocked(automation, zone, avg_temp, reason, session)
                 return
             reason = _build_no_adjustable_reason(
                 readable, devices, params_map, direction,
@@ -1336,6 +1358,14 @@ async def _verify_action(action: ZoneAction, session: AsyncSession) -> None:
     action.status = "verified_success" if improved else "verified_failure"
 
     if not improved:
+        # T2: ação falhou — libera o cooldown da zona para permitir nova tentativa
+        # no próximo ciclo do scheduler (em vez de esperar 15min de TTL).
+        cooldown_key = f"zone:cooldown:{action.store_id}:{action.zone_key}"
+        try:
+            await redis_client.release_lock(cooldown_key)
+        except Exception:
+            pass
+
         failures = await _consecutive_failures(action.store_id, action.zone_key, session)
         if failures >= 3:
             await _raise_zone_alert(
@@ -2245,28 +2275,31 @@ async def _try_power_off_cold_zone(
     hotspot,
     _t0: float,
     session: AsyncSession,
-) -> None:
-    """Desliga o AC menos impactante quando a zona está fria e todos estão no setpoint_max.
+) -> bool:
+    """Desliga o AC com maior BTU quando a zona está fria e há capacidade redundante.
 
-    Só executa se:
-    - O AC estiver ligado há pelo menos MIN_ON_BEFORE_ECONOMY_OFF_MINUTES
-    - A tendência não estiver aquecendo (zona já está resolvendo sozinha)
-    - Circuit breaker não estiver aberto
+    Chamada em dois momentos:
+    1. Zona COLD com ≥2 ACs ligados (preferir desligar do que subir setpoint)
+    2. Zona COLD/COMFORT-low com todos os ACs no setpoint_max (best is None)
+
+    Retorna True se executou ação ou registrou bloqueio fundamentado (com ZoneAction
+    persistido); False se não havia candidato elegível para que o caller possa
+    seguir o fluxo de setpoint_up.
     """
     # Zona com circulação de pessoas (farma/loja): nunca desligar AC automaticamente
     if not automation.allow_auto_power_off:
         reason = (
-            f"Zona {status} ({avg_temp:.1f}°C) com todos os ACs no setpoint máximo "
-            f"({automation.setpoint_max}°C). Desligamento automático desabilitado para "
-            f"esta zona (circulação de pessoas). Faixa: {automation.setpoint_min}–{automation.setpoint_max}°C. [{zone.key}]"
+            f"Zona {status} ({avg_temp:.1f}°C). Desligamento automático desabilitado "
+            f"para esta zona (circulação de pessoas). Faixa: "
+            f"{automation.setpoint_min}–{automation.setpoint_max}°C. [{zone.key}]"
         )
         await _log_blocked(automation, zone, avg_temp, reason, session)
-        return
+        return True
 
     # Se zona está aquecendo por conta própria, aguarda — não precisa desligar
     if trend is not None and trend > 0.5:
         logger.debug("Zone %s: fria mas aquecendo a %.1f°C/h — aguardando", zone.key, trend)
-        return
+        return False
 
     # Candidatos a desligar: ACs ligados com tempo mínimo de operação
     candidates_off = []
@@ -2284,15 +2317,12 @@ async def _try_power_off_cold_zone(
         candidates_off.append((row, params, on_minutes or 0))
 
     if not candidates_off:
-        # Nenhum AC elegível para desligar — loga bloqueio normal
-        reason = (
-            f"Zona {status} com setpoint no máximo ({automation.setpoint_max}°C). "
-            f"Nenhum AC elegível para desligar (todos ligados há menos de "
-            f"{MIN_ON_BEFORE_ECONOMY_OFF_MINUTES} min ou sem comunicação). "
-            f"Faixa: {automation.setpoint_min}–{automation.setpoint_max}°C. [{zone.key}]"
+        # Nenhum AC elegível para desligar — caller decide se segue para setpoint_up
+        logger.debug(
+            "Zone %s: power_off não disponível (todos ligados há <%d min ou sem comunicação)",
+            zone.key, MIN_ON_BEFORE_ECONOMY_OFF_MINUTES,
         )
-        await _log_blocked(automation, zone, avg_temp, reason, session)
-        return
+        return False
 
     # Prioriza desligar o AC com maior BTU (mais impactante para aquecer) entre os que
     # estão ligados há mais tempo — equilibra conforto e energia
@@ -2358,6 +2388,7 @@ async def _try_power_off_cold_zone(
         "action": "power_off",
         "reason": reason,
     })
+    return True
 
 
 async def _execute_power_off(
