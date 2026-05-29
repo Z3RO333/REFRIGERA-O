@@ -131,7 +131,12 @@ async def _custom_zone_config(
             CustomZone.zone_type,
             CustomZoneDevice.device_id,
         )
-        .outerjoin(CustomZoneDevice, CustomZone.id == CustomZoneDevice.zone_id)
+        .outerjoin(
+            CustomZoneDevice,
+            (CustomZone.id == CustomZoneDevice.zone_id)
+            & (CustomZoneDevice.active == True)
+            & (CustomZoneDevice.binding_mode != "conflict_overlap"),
+        )
         .where(CustomZone.store_id == store_id, CustomZone.zone_key == zone_key, CustomZone.active == True)
     )
     rows = result.all()
@@ -611,7 +616,11 @@ def _zone_key_from_name(name: str) -> str:
 async def _cz_current_temp(cz: CustomZone, db: AsyncSession) -> tuple[float | None, str]:
     """Retorna (temperatura_média, status_térmico) atual dos devices da zona."""
     dev_ids_res = await db.execute(
-        select(CustomZoneDevice.device_id).where(CustomZoneDevice.zone_id == cz.id)
+        select(CustomZoneDevice.device_id).where(
+            CustomZoneDevice.zone_id == cz.id,
+            CustomZoneDevice.active == True,
+            CustomZoneDevice.binding_mode != "conflict_overlap",
+        )
     )
     dev_ids = [r[0] for r in dev_ids_res.all()]
     if not dev_ids:
@@ -657,7 +666,11 @@ async def list_custom_zones(store_id: uuid.UUID, db: AsyncSession = Depends(get_
     out = []
     for cz in czs:
         dev_res = await db.execute(
-            select(CustomZoneDevice.device_id).where(CustomZoneDevice.zone_id == cz.id)
+            select(CustomZoneDevice.device_id).where(
+                CustomZoneDevice.zone_id == cz.id,
+                CustomZoneDevice.active == True,
+                CustomZoneDevice.binding_mode != "conflict_overlap",
+            )
         )
         dev_ids = [r[0] for r in dev_res.all()]
         current_temp, temp_status = await _cz_current_temp(cz, db)

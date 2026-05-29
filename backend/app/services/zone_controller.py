@@ -217,14 +217,23 @@ async def release_expired_maintenance_zones() -> None:
 
 
 async def _load_all_custom_zones(session: AsyncSession) -> dict[str, ZoneConfig]:
-    """Carrega todas as zonas personalizadas do banco em uma única query."""
+    """Carrega todas as zonas personalizadas do banco em uma única query.
+
+    Filtra bindings com active=True e binding_mode != 'conflict_overlap'
+    para alinhar com o que o snapshot do scheduler enxerga (única fonte de verdade).
+    """
     from app.models.custom_zone import CustomZone, CustomZoneDevice
     result = await session.execute(
         select(
             CustomZone.zone_key, CustomZone.name,
             CustomZone.ideal_min, CustomZone.ideal_max, CustomZone.zone_type,
             CustomZoneDevice.device_id,
-        ).outerjoin(CustomZoneDevice, CustomZone.id == CustomZoneDevice.zone_id)
+        ).outerjoin(
+            CustomZoneDevice,
+            (CustomZone.id == CustomZoneDevice.zone_id)
+            & (CustomZoneDevice.active == True)
+            & (CustomZoneDevice.binding_mode != "conflict_overlap"),
+        )
         .where(CustomZone.active == True)
     )
     zones: dict[str, ZoneConfig] = {}
@@ -1289,7 +1298,11 @@ async def _verify_action(action: ZoneAction, session: AsyncSession) -> None:
         cz = cz_res.scalar_one_or_none()
         if cz:
             dev_res = await session.execute(
-                select(CustomZoneDevice.device_id).where(CustomZoneDevice.zone_id == cz.id)
+                select(CustomZoneDevice.device_id).where(
+                    CustomZoneDevice.zone_id == cz.id,
+                    CustomZoneDevice.active == True,
+                    CustomZoneDevice.binding_mode != "conflict_overlap",
+                )
             )
             device_ids = [r[0] for r in dev_res.all()]
             zone = ZoneConfig(
@@ -1476,27 +1489,35 @@ def _local_hotspot_status(hotspot: Hotspot | None, zone: ZoneConfig) -> str | No
     return status if status in ("WARM", "HOT", "CRITICAL") else None
 
 
-def _device_command_communication_ok(row: _DeviceRow) -> bool:
-    """Valida se o aparelho tem telemetria recente o bastante para receber comando.
+def _device_command_communication_check(row: _DeviceRow) -> tuple[bool, str | None]:
+    """Valida telemetria do aparelho para comandos. Retorna (ok, motivo_se_excluido).
 
     Aparelhos DESLIGADO não emitem leitura de temperatura entre polls; usam janela
     4× maior para não serem descartados indevidamente do pool de power_on.
-    SEM_LEITURA / LEITURA_STALE / AGUARDANDO_LEITURA / COMPRESSOR_CYCLING → inelegíveis em qualquer caso.
     """
     status = row.status.status_classification
     if status in {"SEM_LEITURA", "LEITURA_STALE", "AGUARDANDO_LEITURA", "COMPRESSOR_CYCLING"}:
-        return False
+        return False, f"telemetria inelegível ({status})"
 
     updated_at = getattr(row.status, "updated_at", None)
     if not isinstance(updated_at, datetime):
-        return False
+        return False, "sem timestamp de última leitura"
 
     is_confirmed_off = status == "DESLIGADO" or row.status.state is False
     threshold_minutes = (
         settings.offline_threshold_minutes * 4 if is_confirmed_off
         else settings.offline_threshold_minutes
     )
-    return updated_at >= datetime.utcnow() - timedelta(minutes=threshold_minutes)
+    if updated_at < datetime.utcnow() - timedelta(minutes=threshold_minutes):
+        age_min = round((datetime.utcnow() - updated_at).total_seconds() / 60, 1)
+        return False, f"última leitura há {age_min}min (limite {threshold_minutes}min)"
+    return True, None
+
+
+def _device_command_communication_ok(row: _DeviceRow) -> bool:
+    """Wrapper bool — mantém a assinatura existente para call sites legados."""
+    ok, _reason = _device_command_communication_check(row)
+    return ok
 
 
 def _safe_float(value, default: float | None = None) -> float | None:
@@ -1730,14 +1751,14 @@ def _build_power_on_candidates(
     for row in devices:
         if row.device.dnd or row.device.source_url:
             continue
-        if not _device_command_communication_ok(row):
-            logger.debug(
-                "power_on_candidate: %s excluído — communication_ok=False "
-                "(status=%s, updated_at=%s, state=%s)",
-                row.device.name,
-                row.status.status_classification,
-                getattr(row.status, "updated_at", None),
-                row.status.state,
+        ok, reason_excl = _device_command_communication_check(row)
+        if not ok:
+            # WARN visível: AC desligado que devia ser candidato a power_on mas
+            # foi descartado por telemetria. Operador precisa saber pra investigar.
+            logger.warning(
+                "power_on_candidate: %s descartado — %s (status=%s, state=%s)",
+                row.device.name, reason_excl,
+                row.status.status_classification, row.status.state,
             )
             continue
         params = params_map.get(row.device.id)
