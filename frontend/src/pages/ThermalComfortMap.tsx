@@ -1609,18 +1609,33 @@ function ZonePanel({
                   <span className="font-mono text-gray-400">{bestDevice.brise_id}</span>
                 </div>
                 <p className="text-xs text-gray-600 dark:text-gray-400">
-                  {allAlreadyOk
-                    ? `Todos os ${acDevices.length} ACs já estão dentro da faixa (${zone.idealMin}–${zone.idealMax}°C). Nenhum ajuste necessário.`
-                    : atLimit
-                    ? `Setpoint real já no limite operacional (${currentSp}°C = ${ctrlAction === 'temperature_down' ? 'mín' : 'máx'}. ${ctrlAction === 'temperature_down' ? minAllowedSp : maxAllowedSp}°C).`
-                    : currentSp == null
-                    ? ctrlAction === 'temperature_down'
-                      ? `Zona aquecida — será enviado comando de redução. Setpoint real indisponível ou desatualizado; backend revalidará na Brise. Faixa ideal: ${zone.idealMin}–${zone.idealMax}°C.`
-                      : `Zona fria — será enviado comando de aumento. Setpoint real indisponível ou desatualizado; backend revalidará na Brise. Faixa ideal: ${zone.idealMin}–${zone.idealMax}°C.`
-                    : ctrlAction === 'temperature_down'
-                    ? `Zona aquecida — setpoint real ${currentSp}°C, reduzir para ${targetSp}°C. Faixa ideal da zona: ${zone.idealMin}–${zone.idealMax}°C.`
-                    : `Zona fria — setpoint real ${currentSp}°C, aumentar para ${targetSp}°C. Faixa ideal da zona: ${zone.idealMin}–${zone.idealMax}°C.`
-                  }
+                  {(() => {
+                    if (allAlreadyOk) {
+                      return `Todos os ${acDevices.length} ACs já estão dentro da faixa (${zone.idealMin}–${zone.idealMax}°C). Nenhum ajuste necessário.`
+                    }
+                    if (atLimit) {
+                      return `Setpoint real já no limite operacional (${currentSp}°C = ${ctrlAction === 'temperature_down' ? 'mín' : 'máx'}. ${ctrlAction === 'temperature_down' ? minAllowedSp : maxAllowedSp}°C).`
+                    }
+                    // Cada AC desce/sobe 1°C a partir do seu próprio setpoint.
+                    // Quando os SPs divergem, não dá pra mostrar 1 target só.
+                    const sps = adjustTargets.map(d => d.current_setpoint ?? d.setpoint_cool).filter((v): v is number => v != null)
+                    const uniqueSps = [...new Set(sps)]
+                    const isDown = ctrlAction === 'temperature_down'
+                    const verb = isDown ? 'Reduzir' : 'Aumentar'
+                    const limit = isDown ? minAllowedSp : maxAllowedSp
+                    const arrow = isDown ? '→' : '→'
+                    if (currentSp == null) {
+                      return isDown
+                        ? `Zona aquecida — será enviado comando de redução. Setpoint real indisponível; backend revalidará na Brise. Faixa ideal: ${zone.idealMin}–${zone.idealMax}°C.`
+                        : `Zona fria — será enviado comando de aumento. Setpoint real indisponível; backend revalidará na Brise. Faixa ideal: ${zone.idealMin}–${zone.idealMax}°C.`
+                    }
+                    if (uniqueSps.length <= 1) {
+                      const zoneState = isDown ? 'aquecida' : 'fria'
+                      return `Zona ${zoneState} — setpoint real ${currentSp}°C, ${verb.toLowerCase()} para ${targetSp}°C. Faixa ideal da zona: ${zone.idealMin}–${zone.idealMax}°C.`
+                    }
+                    // SPs diferentes: descreve a operação corretamente (1°C em cada um)
+                    return `Zona ${isDown ? 'aquecida' : 'fria'} — ${verb.toLowerCase()} 1°C no setpoint de cada AC (faixa ideal ${zone.idealMin}–${zone.idealMax}°C, limite ${isDown ? 'mín.' : 'máx.'} ${limit}°C).`
+                  })()}
                   {!allAlreadyOk && adjustTargets.length > 0 && adjustTargets.length < acDevices.length && (
                     <> <span className="font-medium text-orange-600 dark:text-orange-400">
                       Somente {adjustTargets.length} de {acDevices.length} ACs fora da faixa serão ajustados.
@@ -1628,6 +1643,26 @@ function ZonePanel({
                   )}
                   {!allAlreadyOk && adjustTargets.length > 1 && adjustTargets.length === acDevices.length && ` Aplicar em ${adjustTargets.length} aparelhos.`}
                 </p>
+                {!allAlreadyOk && adjustTargets.length > 1 && (() => {
+                  // Lista clara: qual SP cada AC tem agora e qual vai ficar
+                  const isDown = ctrlAction === 'temperature_down'
+                  const limit = isDown ? minAllowedSp : maxAllowedSp
+                  return (
+                    <ul className="mt-1 space-y-0.5 text-[11px] text-gray-500 dark:text-gray-400">
+                      {adjustTargets.map(d => {
+                        const sp = d.current_setpoint ?? d.setpoint_cool
+                        const next = sp == null
+                          ? null
+                          : isDown ? Math.max(limit, sp - 1) : Math.min(limit, sp + 1)
+                        return (
+                          <li key={d.id} className="font-mono">
+                            • {d.name}: {sp != null ? `${sp}°C` : '—'}{next != null && sp !== next ? ` → ${next}°C` : sp != null ? ' (já no limite)' : ''}
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  )
+                })()}
               </div>
               <button
                 type="button"
@@ -1636,16 +1671,19 @@ function ZonePanel({
                 className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-400 dark:disabled:bg-gray-800 dark:disabled:text-gray-600"
               >
                 <Zap className="h-4 w-4" />
-                {allAlreadyOk
-                  ? 'Todos já confortáveis'
-                  : atLimit
-                  ? `Setpoint no limite operacional (${currentSp}°C)`
-                  : targetSp != null
-                  ? `Ajustar para ${targetSp}°C${adjustTargets.length > 1 ? ` (${adjustTargets.length} ACs)` : ''}`
-                  : ctrlAction === 'temperature_down'
-                  ? `Reduzir setpoint${adjustTargets.length > 1 ? ` (${adjustTargets.length} ACs)` : ''}`
-                  : `Aumentar setpoint${adjustTargets.length > 1 ? ` (${adjustTargets.length} ACs)` : ''}`
-                }
+                {(() => {
+                  if (allAlreadyOk) return 'Todos já confortáveis'
+                  if (atLimit) return `Setpoint no limite operacional (${currentSp}°C)`
+                  const isDown = ctrlAction === 'temperature_down'
+                  const verb = isDown ? 'Reduzir' : 'Aumentar'
+                  const sps = adjustTargets.map(d => d.current_setpoint ?? d.setpoint_cool).filter((v): v is number => v != null)
+                  const uniqueSps = [...new Set(sps)]
+                  // SPs iguais (ou só 1 AC) → mostra target absoluto. SPs diferentes → mostra a operação relativa.
+                  if (targetSp != null && uniqueSps.length <= 1) {
+                    return `Ajustar para ${targetSp}°C${adjustTargets.length > 1 ? ` (${adjustTargets.length} ACs)` : ''}`
+                  }
+                  return `${verb} 1°C${adjustTargets.length > 1 ? ` em ${adjustTargets.length} ACs` : ''}`
+                })()}
               </button>
             </div>
           )}
