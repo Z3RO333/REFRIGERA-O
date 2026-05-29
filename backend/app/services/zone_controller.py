@@ -1163,7 +1163,8 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                     reason = (
                         f"Zona {status} ({avg_temp:.1f}°C) com setpoint no máximo "
                         f"({automation.setpoint_max}°C). Nenhum AC elegível para desligar. "
-                        f"Faixa: {automation.setpoint_min}–{automation.setpoint_max}°C. [{zone.key}]"
+                        f"Faixa ideal da zona: {zone.ideal_min:g}–{zone.ideal_max:g}°C "
+                        f"(limite operacional do setpoint: {automation.setpoint_min}–{automation.setpoint_max}°C). [{zone.key}]"
                     )
                     await _log_blocked(automation, zone, avg_temp, reason, session)
                 return
@@ -2335,8 +2336,9 @@ async def _try_power_off_cold_zone(
     if not automation.allow_auto_power_off:
         reason = (
             f"Zona {status} ({avg_temp:.1f}°C). Desligamento automático desabilitado "
-            f"para esta zona (circulação de pessoas). Faixa: "
-            f"{automation.setpoint_min}–{automation.setpoint_max}°C. [{zone.key}]"
+            f"para esta zona (circulação de pessoas). "
+            f"Faixa ideal: {zone.ideal_min:g}–{zone.ideal_max:g}°C "
+            f"(limite operacional: {automation.setpoint_min}–{automation.setpoint_max}°C). [{zone.key}]"
         )
         await _log_blocked(automation, zone, avg_temp, reason, session)
         return True
@@ -2729,7 +2731,9 @@ def _build_no_adjustable_reason(
 
     return (
         f"Zona {zone.label}: {len(readable)} AC(s) com leitura, nenhum ajustável. "
-        + "; ".join(parts) + f". Faixa: {setpoint_min}–{setpoint_max}°C."
+        + "; ".join(parts)
+        + f". Faixa ideal da zona: {zone.ideal_min:g}–{zone.ideal_max:g}°C "
+        f"(limite operacional do setpoint: {setpoint_min}–{setpoint_max}°C)."
     )
 
 
