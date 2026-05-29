@@ -1,5 +1,6 @@
 """Testes para _device_window_ok — proteção por janela de 15 min por device."""
 import uuid
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -7,11 +8,16 @@ import pytest
 from app.services.zone_controller import (
     DEVICE_WINDOW_MAX_CMDS,
     ZoneConfig,
+    _DeviceRow,
     _device_window_ok,
+    _hotspot_at_setpoint_floor,
     _planned_setpoint_after,
+    _should_enter_recovery,
+    _should_enter_recovery_for_hotspot,
 )
-from app.models.device import DeviceParameters
+from app.models.device import Device, DeviceParameters, DeviceStatusLatest
 from app.models.zone import ZoneAutomation
+from app.services.thermal_spatial import Hotspot
 
 
 def make_mock_redis(count: int):
@@ -147,3 +153,78 @@ def test_migration_tem_campos_de_recuperacao_termica():
     assert "recovery_target_setpoint" in source
     assert "recovery_max_duration_minutes" in source
     assert "was_in_recovery" in source
+
+
+def test_recovery_entra_em_warm_com_margem_acima_da_faixa():
+    zone = ZoneConfig(
+        key="farma",
+        label="Farma",
+        sector_names=[],
+        ideal_min=22,
+        ideal_max=24,
+    )
+
+    assert _should_enter_recovery("WARM", 24.4, zone) is True
+    assert _should_enter_recovery("WARM", 24.1, zone) is False
+    assert _should_enter_recovery("HOT", 25.1, zone) is True
+
+
+def test_recovery_entra_por_hotspot_quente_mesmo_com_media_confortavel():
+    zone = ZoneConfig(
+        key="farma",
+        label="Farma",
+        sector_names=[],
+        ideal_min=22,
+        ideal_max=24,
+    )
+    hotspot = Hotspot(
+        x=10,
+        y=20,
+        peak_temp=26.5,
+        avg_hotspot_temp=26.5,
+        contributing_names=["Brise 9"],
+        peak_device_name="Brise 9",
+    )
+
+    assert _should_enter_recovery_for_hotspot("HOT", hotspot, zone) is True
+
+
+def test_hotspot_no_piso_normal_libera_recuperacao_local():
+    device_id = uuid.uuid4()
+    automation = ZoneAutomation(
+        store_id=uuid.uuid4(),
+        zone_key="farma",
+        setpoint_min=20,
+        setpoint_max=26,
+    )
+    row = _DeviceRow(
+        Device(
+            id=device_id,
+            brise_device_id="123",
+            name="Brise 9",
+            dnd=False,
+            source_url=None,
+        ),
+        DeviceStatusLatest(
+            device_id=device_id,
+            state=True,
+            temperature=26.5,
+            status_classification="NORMAL",
+            updated_at=datetime.utcnow(),
+        ),
+    )
+    params = DeviceParameters(
+        device_id=device_id,
+        mode_device=1,
+        setpoint_cool=20,
+    )
+    hotspot = Hotspot(
+        x=10,
+        y=20,
+        peak_temp=26.5,
+        avg_hotspot_temp=26.5,
+        contributing_names=["Brise 9"],
+        peak_device_name="Brise 9",
+    )
+
+    assert _hotspot_at_setpoint_floor([row], {device_id: params}, automation, hotspot) is True

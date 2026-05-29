@@ -78,6 +78,7 @@ RECOVERY_KEY_PREFIX = "zone:recovery"
 RECOVERY_MARKER = "[recovery_active=true]"
 RECOVERY_COMFORT_STREAK_TO_RAMP = 2
 RECOVERY_RAMP_EVERY_STREAK = 2
+RECOVERY_WARM_MARGIN_C = 0.3
 
 
 @dataclass
@@ -458,6 +459,53 @@ def _zone_at_setpoint_floor(
             continue
         eligible.append(params)
     return bool(eligible) and all(p.setpoint_cool <= automation.setpoint_min for p in eligible)
+
+
+def _hotspot_at_setpoint_floor(
+    readable: list["_DeviceRow"],
+    params_map: dict[uuid.UUID, DeviceParameters],
+    automation: ZoneAutomation,
+    hotspot: Hotspot | None,
+) -> bool:
+    if hotspot is None:
+        return False
+    hot_names = set(hotspot.contributing_names or [])
+    if hotspot.peak_device_name:
+        hot_names.add(hotspot.peak_device_name)
+    if not hot_names:
+        return False
+
+    hotspot_params: list[DeviceParameters] = []
+    for row in readable:
+        if row.device.name not in hot_names:
+            continue
+        if row.device.dnd or row.device.source_url or not _device_command_communication_ok(row):
+            continue
+        params = params_map.get(row.device.id)
+        if params is None or params.setpoint_cool is None or not _device_is_on(row, params):
+            continue
+        hotspot_params.append(params)
+    return bool(hotspot_params) and all(p.setpoint_cool <= automation.setpoint_min for p in hotspot_params)
+
+
+def _should_enter_recovery(status: str, avg_temp: float, zone: ZoneConfig) -> bool:
+    if status in ("HOT", "CRITICAL"):
+        return True
+    return status == "WARM" and avg_temp >= zone.ideal_max + RECOVERY_WARM_MARGIN_C
+
+
+def _should_enter_recovery_for_hotspot(
+    local_status: str | None,
+    hotspot: Hotspot | None,
+    zone: ZoneConfig,
+) -> bool:
+    if local_status in ("HOT", "CRITICAL"):
+        return True
+    return (
+        local_status == "WARM"
+        and hotspot is not None
+        and hotspot.peak_temp >= zone.ideal_max + RECOVERY_WARM_MARGIN_C
+    )
 
 
 async def _enter_recovery(
@@ -1016,6 +1064,7 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
         trend = await _quick_trend(automation.store_id, zone, session)
         energy_strategy = _energy_strategy(automation)
         freshness_ratio = _zone_freshness_ratio(devices)
+        local_hotspot_status = _local_hotspot_status(hotspot, zone)
         recovery_state = await _recovery_state(automation.store_id, zone.key)
         recovery_min_override: int | None = None
 
@@ -1073,22 +1122,43 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
         if (
             recovery_state is None
             and getattr(automation, "recovery_enabled", True)
-            and status in ("HOT", "CRITICAL")
+            and (
+                (
+                    _should_enter_recovery(status, avg_temp, zone)
+                    and _zone_at_setpoint_floor(readable, params_map, automation)
+                )
+                or (
+                    _should_enter_recovery_for_hotspot(local_hotspot_status, hotspot, zone)
+                    and _hotspot_at_setpoint_floor(readable, params_map, automation, hotspot)
+                )
+            )
             and freshness_ratio >= FRESHNESS_MIN_RATIO
-            and _zone_at_setpoint_floor(readable, params_map, automation)
             and not await redis_client.exists(f"zone:recovery_unsuccessful_logged:{automation.store_id}:{zone.key}")
         ):
-            trigger_reason = (
-                f"Zona {status} ({avg_temp:.1f}°C) com ACs elegíveis no piso "
-                f"normal ({automation.setpoint_min}°C); usando piso temporário "
-                f"{automation.recovery_min_setpoint}°C por até "
-                f"{automation.recovery_max_duration_minutes}min."
-            )
+            if _should_enter_recovery_for_hotspot(local_hotspot_status, hotspot, zone):
+                near = "hotspot"
+                if hotspot is not None:
+                    near = hotspot.peak_device_name or (
+                        hotspot.contributing_names[0] if hotspot.contributing_names else "hotspot"
+                    )
+                trigger_reason = (
+                    f"Hotspot {local_hotspot_status} em {near} ({hotspot.peak_temp:.1f}°C), "
+                    f"com aparelho do bolsão no piso normal ({automation.setpoint_min}°C); "
+                    f"usando piso temporário {automation.recovery_min_setpoint}°C por até "
+                    f"{automation.recovery_max_duration_minutes}min."
+                )
+            else:
+                trigger_reason = (
+                    f"Zona {status} ({avg_temp:.1f}°C) com ACs elegíveis no piso "
+                    f"normal ({automation.setpoint_min}°C); usando piso temporário "
+                    f"{automation.recovery_min_setpoint}°C por até "
+                    f"{automation.recovery_max_duration_minutes}min."
+                )
             recovery_state = await _enter_recovery(automation, zone, trigger_reason, session)
             recovery_min_override = automation.recovery_min_setpoint
 
         if status == "COMFORT":
-            local_status = _local_hotspot_status(hotspot, zone)
+            local_status = local_hotspot_status
             if local_status is not None:
                 # Média confortável, mas existe uma subárea acima da faixa ideal.
                 # Ação permitida: ligar capacidade disponível perto do hotspot.
@@ -1232,6 +1302,7 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                     automation=automation,
                     status=local_status,
                     strategy=energy_strategy,
+                    min_setpoint_override=recovery_min_override,
                 )
                 setpoint_candidates = [
                     (candidate.row, candidate.params) for candidate in scored_setpoint_candidates
@@ -1270,6 +1341,11 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                         [row.device.name for row, _ in setpoint_candidates[:3]],
                     )
                     reason = _append_energy_decision(reason, energy_payload)
+                    if recovery_min_override is not None:
+                        reason += (
+                            f" Recuperação térmica por hotspot: piso temporário "
+                            f"{recovery_min_override}°C. {RECOVERY_MARKER}"
+                        )
                     action_status = "suggestion"
                     block_reason = None
                     _api_ms: int | None = None
@@ -1289,7 +1365,8 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                         else:
                             ok, _api_ms, fan_before, fan_after = await _execute_setpoint(
                                 best_device.device, best_params, "down", automation, session,
-                                step=1, zone_status=status,
+                                step=1, zone_status=local_status,
+                                min_setpoint_override=recovery_min_override,
                             )
                             if ok:
                                 action_status = "pending_verification"
