@@ -262,6 +262,21 @@ _STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS ix_ai_decisions_zone ON ai_decisions (zone_key)",
     "CREATE INDEX IF NOT EXISTS ix_ai_decisions_created ON ai_decisions (created_at)",
     "CREATE INDEX IF NOT EXISTS ix_ai_decisions_type ON ai_decisions (decision_type)",
+    # Idempotência: tabela ai_decisions criada antes via SQL manual pode estar sem colunas
+    "ALTER TABLE ai_decisions ADD COLUMN IF NOT EXISTS zone_label VARCHAR(100)",
+    "ALTER TABLE ai_decisions ADD COLUMN IF NOT EXISTS trend_c_per_hour FLOAT",
+    "ALTER TABLE ai_decisions ADD COLUMN IF NOT EXISTS thermal_impact_score FLOAT",
+    "ALTER TABLE ai_decisions ADD COLUMN IF NOT EXISTS energy_cost_score FLOAT",
+    "ALTER TABLE ai_decisions ADD COLUMN IF NOT EXISTS final_score FLOAT",
+    # migra dados da coluna antiga 'trend' (versão pré-rename) para 'trend_c_per_hour'
+    """DO $$ BEGIN
+         IF EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_name='ai_decisions' AND column_name='trend')
+         THEN
+           UPDATE ai_decisions SET trend_c_per_hour = trend
+             WHERE trend_c_per_hour IS NULL AND trend IS NOT NULL;
+         END IF;
+       END $$""",
     """CREATE TABLE IF NOT EXISTS ai_decision_feedback (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         decision_id UUID NOT NULL REFERENCES ai_decisions(id) ON DELETE CASCADE UNIQUE,
