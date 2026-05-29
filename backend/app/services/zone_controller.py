@@ -2523,12 +2523,20 @@ async def _device_window_ok(device_id: uuid.UUID) -> bool:
 
 
 async def _consecutive_failures(store_id: uuid.UUID, zone_key: str, session: AsyncSession) -> int:
+    """Conta falhas consecutivas recentes (últimas 4h) para gate de alerta.
+
+    Falhas antigas (>4h) não devem paralisar a zona indefinidamente — condições
+    térmicas mudam ao longo do dia, e o operador pode ter resolvido o problema
+    sem o sistema saber. A janela curta evita "desistência" permanente.
+    """
+    cutoff = datetime.utcnow() - timedelta(hours=4)
     result = await session.execute(
         select(ZoneAction)
         .where(
             ZoneAction.store_id == store_id,
             ZoneAction.zone_key == zone_key,
             ZoneAction.status.in_(["verified_success", "verified_failure"]),
+            ZoneAction.created_at >= cutoff,
         )
         .order_by(ZoneAction.created_at.desc())
         .limit(5)
