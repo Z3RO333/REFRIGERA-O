@@ -81,10 +81,14 @@ export const zonesApi = {
     api.get(`/zones/${storeId}/${zoneKey}/history`, { params: { limit } }).then(r => r.data),
   trigger: (storeId: string, zoneKey: string) =>
     api.post(`/zones/${storeId}/${zoneKey}/trigger`).then(r => r.data),
+  aiView: (storeId: string, zoneKey: string) =>
+    api.get(`/zones/${storeId}/${zoneKey}/ai-view`).then(r => r.data),
   updateGuardrails: (storeId: string, zoneKey: string, data: {
     allowed_start_time?: string
     allowed_end_time?: string
+    allowed_end_next_day?: boolean
     is_critical_zone?: boolean
+    allow_auto_power_off?: boolean
   }) => api.put(`/zones/${storeId}/${zoneKey}/guardrails`, data).then(r => r.data),
 }
 

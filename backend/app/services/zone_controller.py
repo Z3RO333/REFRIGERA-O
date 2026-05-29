@@ -2853,3 +2853,179 @@ async def get_zone_last_action(
         .limit(1)
     )
     return result.scalar_one_or_none()
+
+
+# ── Visão da IA sobre a zona (read-only, sem efeitos colaterais) ─────────────
+
+async def build_ai_view(
+    store_id: uuid.UUID,
+    zone_key: str,
+    zone: ZoneConfig,
+    automation: ZoneAutomation,
+    session: AsyncSession,
+) -> dict:
+    """Reproduz o snapshot que a IA usa para decidir, sem executar nenhuma ação.
+
+    Devolve estrutura completa: zona, status térmico, hotspot, classificação
+    de cada aparelho (vinculado/ligado/desligado/ignorado com motivo), tendência,
+    bloqueios ativos e ação recomendada. Usado pelo painel "Visão da IA" no
+    frontend para diagnóstico.
+    """
+    snapshot_at = datetime.utcnow()
+    guardrail_reason = await _check_guardrails(automation)
+    devices, params_map = await _get_zone_devices(store_id, zone, session)
+
+    devices_view: list[dict] = []
+    eligible_for_power_on = 0
+    eligible_for_setpoint = 0
+    on_count = 0
+    off_count = 0
+
+    for row in devices:
+        params = params_map.get(row.device.id)
+        is_on = _device_is_on(row, params)
+        is_off = _device_is_off(row, params)
+        on_count += int(is_on)
+        off_count += int(is_off)
+
+        comm_ok, comm_reason = _device_command_communication_check(row)
+        excluded_reasons: list[str] = []
+        if row.device.dnd:
+            excluded_reasons.append("DND ativo")
+        if row.device.source_url:
+            excluded_reasons.append("sensor externo (não controlável)")
+        if not comm_ok and comm_reason:
+            excluded_reasons.append(comm_reason)
+
+        eligible_power_on = is_off and not excluded_reasons
+        eligible_setpoint = is_on and not excluded_reasons
+        if eligible_power_on:
+            eligible_for_power_on += 1
+        if eligible_setpoint:
+            eligible_for_setpoint += 1
+
+        devices_view.append({
+            "device_id": str(row.device.id),
+            "name": row.device.name,
+            "btu": row.device.btu,
+            "status_classification": row.status.status_classification,
+            "is_on": is_on,
+            "is_off": is_off,
+            "temperature": (
+                float(row.status.temperature) if row.status.temperature is not None else None
+            ),
+            "setpoint_cool": params.setpoint_cool if params else None,
+            "fan_speed": params.fan_speed if params else None,
+            "last_reading_at": (
+                row.status.updated_at.isoformat() if isinstance(row.status.updated_at, datetime) else None
+            ),
+            "eligible_power_on": eligible_power_on,
+            "eligible_setpoint_change": eligible_setpoint,
+            "excluded_reasons": excluded_reasons,
+        })
+
+    # Fontes térmicas e estado da zona
+    temp_sources = [d for d in devices if _is_thermal_observation_source(d)]
+    if temp_sources:
+        temps = [float(d.status.temperature) for d in temp_sources]
+        avg_temp = round(mean(temps), 2)
+        thermal_status = _classify(avg_temp, zone.ideal_min, zone.ideal_max)
+    else:
+        avg_temp = None
+        thermal_status = "NO_READING"
+
+    # Hotspot espacial
+    _spatial = [
+        DevicePoint(
+            device_id=str(d.device.id),
+            device_name=d.device.name or "",
+            pos_x=d.device.position_x,
+            pos_y=d.device.position_y,
+            influence_radius_m=float(d.device.influence_radius_m or 8),
+            temperature=float(d.status.temperature),
+            is_on=d.status.state is True,
+            is_off=d.status.state is False,
+            is_available=True,
+            btu=d.device.btu or 0,
+        )
+        for d in temp_sources
+    ]
+    hotspot = detect_hotspot(_spatial)
+    trend = await _quick_trend(store_id, zone, session)
+
+    # Ação recomendada (sintética — não dispara nada)
+    recommended: dict = {"action": "none", "rationale": "Zona estável dentro da faixa ideal."}
+    blockers: list[str] = []
+    if guardrail_reason:
+        blockers.append(guardrail_reason)
+        recommended = {"action": "blocked", "rationale": guardrail_reason}
+    elif avg_temp is None:
+        recommended = {"action": "wait", "rationale": "Sem leitura térmica disponível."}
+    elif thermal_status in ("WARM", "HOT", "CRITICAL"):
+        if eligible_for_power_on > 0:
+            recommended = {
+                "action": "power_on",
+                "rationale": f"Zona {thermal_status} com {eligible_for_power_on} AC desligado(s) elegível(is) para ligar.",
+            }
+        elif eligible_for_setpoint > 0:
+            recommended = {
+                "action": "setpoint_down",
+                "rationale": f"Zona {thermal_status}; reduzir setpoint nos ACs já ligados.",
+            }
+        else:
+            recommended = {"action": "blocked", "rationale": "Sem AC elegível para ação."}
+    elif thermal_status == "COLD":
+        if on_count >= 2 and automation.allow_auto_power_off:
+            recommended = {
+                "action": "power_off",
+                "rationale": f"Zona COLD com {on_count} ACs ligados — desligar 1 para economia.",
+            }
+        elif on_count >= 1:
+            recommended = {
+                "action": "setpoint_up",
+                "rationale": "Zona COLD; subir setpoint para reduzir resfriamento.",
+            }
+
+    # Cooldown ativo?
+    cooldown_key = f"zone:cooldown:{store_id}:{zone_key}"
+    cooldown_active = bool(await redis_client.exists(cooldown_key))
+    if cooldown_active:
+        blockers.append("Cooldown da zona ativo (15 min entre ações).")
+
+    return {
+        "zone_key": zone_key,
+        "zone_label": zone.label,
+        "snapshot_at": snapshot_at.isoformat(),
+        "temperature": {
+            "avg": avg_temp,
+            "ideal_min": zone.ideal_min,
+            "ideal_max": zone.ideal_max,
+            "thermal_status": thermal_status,
+            "trend_c_per_hour": round(trend, 2) if trend is not None else None,
+        },
+        "hotspot": (
+            {
+                "peak_temp": round(hotspot.peak_temp, 2),
+                "peak_device_name": hotspot.peak_device_name or None,
+            }
+            if hotspot else None
+        ),
+        "automation": {
+            "mode": automation.mode,
+            "setpoint_min": automation.setpoint_min,
+            "setpoint_max": automation.setpoint_max,
+            "allow_auto_power_off": automation.allow_auto_power_off,
+            "is_critical_zone": automation.is_critical_zone,
+        },
+        "devices_summary": {
+            "total": len(devices),
+            "on": on_count,
+            "off": off_count,
+            "eligible_power_on": eligible_for_power_on,
+            "eligible_setpoint_change": eligible_for_setpoint,
+        },
+        "devices": devices_view,
+        "recommended_action": recommended,
+        "blockers": blockers,
+        "source": "snapshot_live (mesma fonte usada pelo scheduler)",
+    }

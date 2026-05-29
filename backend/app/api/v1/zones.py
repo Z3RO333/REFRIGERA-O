@@ -27,6 +27,7 @@ from app.services.zone_controller import (
     _check_guardrails,
     _classify,
     _evaluate_zone,
+    build_ai_view,
     get_or_create_automation,
     get_zone_last_action,
 )
@@ -413,6 +414,19 @@ async def set_zone_mode(
     await redis_client.publish("zone.automation.mode.changed", event_payload)
 
     return {"zone_key": zone_key, "mode": mode, "priority": automation.priority}
+
+
+@router.get("/{store_id}/{zone_key}/ai-view")
+async def zone_ai_view(
+    store_id: uuid.UUID,
+    zone_key: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Devolve a 'Visão da IA' sobre a zona: aparelhos considerados, descartados
+    com motivo, status térmico, ação recomendada e bloqueios — read-only."""
+    zone = await _resolve_zone_config(store_id, zone_key, db)
+    automation = await get_or_create_automation(store_id, zone_key, db)
+    return await build_ai_view(store_id, zone_key, zone, automation, db)
 
 
 @router.get("/{store_id}/{zone_key}/history")

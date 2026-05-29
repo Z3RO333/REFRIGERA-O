@@ -12,6 +12,7 @@ import StatusBadge from '../components/StatusBadge'
 import DeviceMarker from '../components/map/DeviceMarker'
 import ZoneEditor from '../components/map/ZoneEditor'
 import { cn, formatDateTime, formatRelativeTime, formatTemp, formatTime } from '../lib/utils'
+import AIZoneView from '../components/zone/AIZoneView'
 import { useAuthStore } from '../store/useAuthStore'
 import type { AutomationStatus, Device, DigitalTwinZone, Sector, ZoneAutomationState, ZoneMode, ZonePriority, ZoneType } from '../types'
 
@@ -1531,6 +1532,9 @@ function ZonePanel({
           )}
         </div>
       </div>
+
+      {/* Visão da IA sobre a zona — diagnóstico read-only */}
+      <AIZoneView storeId={storeId} zoneKey={zone.key} />
 
       {/* Ajuste manual rápido */}
       <div className="rounded-lg border border-gray-200 dark:border-gray-800 overflow-hidden">
