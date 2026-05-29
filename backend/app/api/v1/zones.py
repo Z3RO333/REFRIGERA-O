@@ -102,6 +102,8 @@ def _automation_dict(
         "allowed_start_minute": automation.allowed_start_minute if automation else 30,
         "allowed_end_hour": automation.allowed_end_hour if automation else 18,
         "allowed_end_minute": automation.allowed_end_minute if automation else 30,
+        "allowed_end_next_day": automation.allowed_end_next_day if automation else False,
+        "allow_auto_power_off": automation.allow_auto_power_off if automation else True,
         "is_critical_zone": automation.is_critical_zone if automation else False,
         "guardrail_active": guardrail_reason is not None,
         "guardrail_reason": guardrail_reason,
@@ -501,10 +503,19 @@ async def update_zone_guardrails(
     if data.allow_auto_power_off is not None:
         automation.allow_auto_power_off = data.allow_auto_power_off
 
+    if data.allowed_end_next_day is not None:
+        automation.allowed_end_next_day = data.allowed_end_next_day
+
     start_total = automation.allowed_start_hour * 60 + automation.allowed_start_minute
     end_total   = automation.allowed_end_hour   * 60 + automation.allowed_end_minute
-    if start_total >= end_total:
-        raise HTTPException(400, "Horário de início deve ser anterior ao de fim")
+    # Para janelas que cruzam a meia-noite (ex: Farma Flores 07:00–01:00) é
+    # esperado que end_total < start_total. A validação só vale para janelas
+    # do mesmo dia. Não permitir janela vazia (start == end).
+    if not automation.allowed_end_next_day:
+        if start_total >= end_total:
+            raise HTTPException(400, "Horário de início deve ser anterior ao de fim")
+    elif start_total == end_total:
+        raise HTTPException(400, "Horário de início e fim não podem ser iguais")
 
     await log_action(
         db, "zone_guardrails_change",
@@ -519,6 +530,7 @@ async def update_zone_guardrails(
         "zone_key": zone_key,
         "allowed_start_time": f"{automation.allowed_start_hour:02d}:{automation.allowed_start_minute:02d}",
         "allowed_end_time":   f"{automation.allowed_end_hour:02d}:{automation.allowed_end_minute:02d}",
+        "allowed_end_next_day": automation.allowed_end_next_day,
         "is_critical_zone": automation.is_critical_zone,
         "allow_auto_power_off": automation.allow_auto_power_off,
     }

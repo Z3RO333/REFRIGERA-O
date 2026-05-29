@@ -2,13 +2,15 @@
 Controle global da automação de zonas.
 Expõe kill switch e status agregado.
 """
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.cache.redis_client import redis_client
+from app.config import settings
 from app.db.session import get_db, AsyncSessionLocal
 from app.models.zone import ZoneAction, ZoneAutomation
 from app.models.audit import AuditLog
@@ -16,6 +18,8 @@ from app.models.user import User
 from app.api.v1.auth import require_role
 from app.services.zone_controller import KILL_SWITCH_KEY
 from app.schemas.automation import KillSwitchUpdate
+
+_LOCAL_TZ = ZoneInfo(settings.app_timezone)
 
 router = APIRouter()
 
@@ -37,8 +41,10 @@ async def automation_status(db: AsyncSession = Depends(get_db)) -> dict:
     )
     mode_counts: dict[str, int] = {row.mode: row.n for row in result.all()}
 
-    # Ações executadas hoje
-    today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    # Ações executadas hoje (meia-noite em horário de Manaus, convertida para UTC)
+    now_local = datetime.now(tz=_LOCAL_TZ)
+    midnight_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    today = midnight_local.astimezone(timezone.utc).replace(tzinfo=None)
     executed_today = await db.execute(
         select(func.count(ZoneAction.id)).where(
             ZoneAction.status.in_(["pending_verification", "verified_success", "verified_failure"]),

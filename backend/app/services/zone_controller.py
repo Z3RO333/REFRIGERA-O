@@ -1047,6 +1047,10 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                 await session.commit()
             except Exception as _le:
                 logger.warning("learning record falhou (power_on): %s", _le)
+                try:
+                    await session.rollback()
+                except Exception:
+                    pass
 
             if action_status == "pending_verification" and _power_api_ms is not None:
                 logger.info(
@@ -1244,6 +1248,10 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
             await session.commit()
         except Exception as _le:
             logger.warning("learning record falhou (setpoint): %s", _le)
+            try:
+                await session.rollback()
+            except Exception:
+                pass
 
         if action_status == "pending_verification" and _setpoint_api_ms is not None:
             logger.info(

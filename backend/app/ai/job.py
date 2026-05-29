@@ -239,7 +239,10 @@ async def _fetch_anomalous_devices() -> tuple[list[dict], dict[str, dict]]:
 
         reading_age_minutes = None
         if row.updated_at:
-            reading_age_minutes = round((datetime.utcnow() - row.updated_at).total_seconds() / 60, 1)
+            # row.updated_at pode vir naive (assumido UTC) ou aware do driver;
+            # normaliza ambos os lados para naive UTC para subtração segura.
+            updated_at = row.updated_at.replace(tzinfo=None) if row.updated_at.tzinfo else row.updated_at
+            reading_age_minutes = round((datetime.utcnow() - updated_at).total_seconds() / 60, 1)
         is_external_sensor = row.source_url is not None
         communication_ok = bool(row.updated_at) and row.status_classification not in {"SEM_LEITURA", "LEITURA_STALE"}
         if reading_age_minutes is not None and reading_age_minutes > 30:

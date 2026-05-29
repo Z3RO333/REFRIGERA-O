@@ -1,7 +1,6 @@
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
-import { format, parseISO } from 'date-fns'
-import { ptBR } from 'date-fns/locale'
 import type { HistoryPoint } from '../../types'
+import { formatTime } from '../../lib/utils'
 
 interface Props {
   data: HistoryPoint[]
@@ -11,7 +10,7 @@ export default function ConsumptionChart({ data }: Props) {
   const chartData = data.map(d => ({
     time: d.time,
     kw: d.consumption_estimated_kw ?? d.consumption_estimated,
-    label: format(parseISO(d.time), 'HH:mm', { locale: ptBR }),
+    label: formatTime(d.time),
   }))
 
   return (

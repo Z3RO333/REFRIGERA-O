@@ -83,8 +83,10 @@ class AutomationSnap:
     allowed_start_minute: int
     allowed_end_hour: int
     allowed_end_minute: int
-    blocked_reason: str | None
-    blocked_until: datetime | None
+    allowed_end_next_day: bool = False
+    allow_auto_power_off: bool = True
+    blocked_reason: str | None = None
+    blocked_until: datetime | None = None
 
 
 @dataclass
@@ -218,6 +220,8 @@ async def build_store_snapshot(
             allowed_start_minute=auto.allowed_start_minute,
             allowed_end_hour=auto.allowed_end_hour,
             allowed_end_minute=auto.allowed_end_minute,
+            allowed_end_next_day=auto.allowed_end_next_day,
+            allow_auto_power_off=auto.allow_auto_power_off,
             blocked_reason=auto.blocked_reason,
             blocked_until=auto.blocked_until,
         )

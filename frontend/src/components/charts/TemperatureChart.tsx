@@ -1,7 +1,6 @@
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine, ResponsiveContainer } from 'recharts'
-import { format, parseISO } from 'date-fns'
-import { ptBR } from 'date-fns/locale'
 import type { HistoryPoint } from '../../types'
+import { formatTime } from '../../lib/utils'
 
 interface Props {
   data: HistoryPoint[]
@@ -12,7 +11,7 @@ export default function TemperatureChart({ data, setpoint }: Props) {
   const chartData = data.map(d => ({
     time: d.time,
     temp: d.temperature,
-    label: format(parseISO(d.time), 'HH:mm', { locale: ptBR }),
+    label: formatTime(d.time),
   }))
 
   return (
