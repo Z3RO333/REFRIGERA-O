@@ -1184,6 +1184,10 @@ function ZonePanel({
   const currentPriority: ZonePriority = automation?.priority ?? 'conforto'
   const lastAction = automation?.last_action ?? null
   const cooldownS = automation?.cooldown_remaining_s ?? null
+  const recovery = automation?.recovery ?? null
+  const recoveryMinutes = recovery?.remaining_seconds != null
+    ? Math.max(0, Math.ceil(recovery.remaining_seconds / 60))
+    : null
   const consecFail = automation?.consecutive_failures ?? 0
   const isInMaintenance = currentMode === 'maintenance'
 
@@ -1248,6 +1252,12 @@ function ZonePanel({
         <div className={cn('text-xs font-semibold uppercase', meta.text)}>{meta.label}</div>
         <h2 className="mt-1 text-lg font-semibold text-gray-900 dark:text-white">{zone.label}</h2>
         <p className="text-xs text-gray-500">Faixa ideal: {zone.idealMin}°C a {zone.idealMax}°C</p>
+        {recovery && (
+          <div className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-cyan-300 bg-cyan-50 px-2 py-1 text-xs font-semibold text-cyan-700 dark:border-cyan-800 dark:bg-cyan-950/40 dark:text-cyan-300">
+            <RefreshCw className="h-3 w-3" />
+            Recuperação · {recoveryMinutes != null ? `${recoveryMinutes}min` : 'ativo'}
+          </div>
+        )}
       </div>
 
       {/* Métricas */}

@@ -37,6 +37,7 @@ from app.models.device import Device, DeviceParameters, DeviceStatusLatest
 from app.models.reading import DeviceReading
 from app.models.store import StoreSector
 from app.models.zone import ZoneAction, ZoneAutomation
+from app.services.audit_service import log_action
 from app.services.thermal_spatial import DevicePoint, Hotspot, detect_hotspot, proximity_score
 from app.services.learning_service import record_decision as _learning_record
 
@@ -71,6 +72,12 @@ SUGGESTION_DEDUPE_SECONDS = 1800
 # Gate de frescura: proporção mínima de leituras frescas para execução autônoma.
 # Zonas com menos de 60 % de devices frescos não recebem comandos automáticos.
 FRESHNESS_MIN_RATIO = 0.60
+
+# Estado temporário de recuperação térmica.
+RECOVERY_KEY_PREFIX = "zone:recovery"
+RECOVERY_MARKER = "[recovery_active=true]"
+RECOVERY_COMFORT_STREAK_TO_RAMP = 2
+RECOVERY_RAMP_EVERY_STREAK = 2
 
 
 @dataclass
@@ -351,6 +358,358 @@ async def _check_guardrails(automation: ZoneAutomation) -> str | None:
 
 async def is_kill_switch_active() -> bool:
     return await redis_client.exists(KILL_SWITCH_KEY)
+
+
+# ── Recuperação térmica temporária ────────────────────────────────────────────
+
+def _recovery_key(store_id: uuid.UUID, zone_key: str) -> str:
+    return f"{RECOVERY_KEY_PREFIX}:{store_id}:{zone_key}"
+
+
+async def _recovery_state(store_id: uuid.UUID, zone_key: str) -> dict | None:
+    raw = await redis_client.get(_recovery_key(store_id, zone_key))
+    return raw if isinstance(raw, dict) else None
+
+
+async def _recovery_ttl(store_id: uuid.UUID, zone_key: str) -> int | None:
+    ttl = await redis_client.ttl(_recovery_key(store_id, zone_key))
+    return ttl if ttl and ttl > 0 else None
+
+
+async def _recovery_public_state(store_id: uuid.UUID, zone_key: str) -> dict | None:
+    state = await _recovery_state(store_id, zone_key)
+    if state is None:
+        return None
+    return {**state, "remaining_seconds": await _recovery_ttl(store_id, zone_key)}
+
+
+async def _save_recovery_state(
+    store_id: uuid.UUID,
+    zone_key: str,
+    state: dict,
+    *,
+    ttl_seconds: int | None = None,
+) -> None:
+    if ttl_seconds is None:
+        ttl_seconds = await _recovery_ttl(store_id, zone_key)
+    if ttl_seconds is None or ttl_seconds <= 0:
+        ttl_seconds = 60
+    await redis_client.set(_recovery_key(store_id, zone_key), state, ttl=ttl_seconds)
+
+
+async def _audit_recovery(
+    session: AsyncSession,
+    action_type: str,
+    description: str,
+    *,
+    store_id: uuid.UUID,
+    zone_key: str,
+    zone_label: str | None,
+    severity: str = "LOW",
+    extra_data: dict | None = None,
+) -> None:
+    await log_action(
+        session,
+        action_type,
+        description,
+        store_id=store_id,
+        zone_key=zone_key,
+        origin="automation",
+        severity=severity,
+        sector_name=zone_label,
+        extra_data=extra_data,
+    )
+
+
+def _recovery_duration_seconds(automation: ZoneAutomation) -> int:
+    minutes = max(5, min(240, _safe_int(getattr(automation, "recovery_max_duration_minutes", 60), 60) or 60))
+    return minutes * 60
+
+
+def _zone_freshness_ratio(devices: list["_DeviceRow"]) -> float:
+    relevant = [d for d in devices if not d.device.dnd]
+    if not relevant:
+        return 0.0
+    threshold = datetime.utcnow() - timedelta(minutes=settings.offline_threshold_minutes)
+    fresh = 0
+    for row in relevant:
+        updated_at = getattr(row.status, "updated_at", None)
+        if (
+            isinstance(updated_at, datetime)
+            and updated_at >= threshold
+            and row.status.temperature is not None
+            and row.status.status_classification not in THERMAL_OBSERVATION_BLOCKED_STATUSES
+        ):
+            fresh += 1
+    return fresh / len(relevant)
+
+
+def _zone_at_setpoint_floor(
+    readable: list["_DeviceRow"],
+    params_map: dict[uuid.UUID, DeviceParameters],
+    automation: ZoneAutomation,
+) -> bool:
+    eligible: list[DeviceParameters] = []
+    for row in readable:
+        if row.device.dnd or row.device.source_url or not _device_command_communication_ok(row):
+            continue
+        params = params_map.get(row.device.id)
+        if params is None or params.setpoint_cool is None or not _device_is_on(row, params):
+            continue
+        eligible.append(params)
+    return bool(eligible) and all(p.setpoint_cool <= automation.setpoint_min for p in eligible)
+
+
+async def _enter_recovery(
+    automation: ZoneAutomation,
+    zone: ZoneConfig,
+    reason: str,
+    session: AsyncSession,
+) -> dict:
+    now = datetime.utcnow()
+    state = {
+        "started_at": now.isoformat(),
+        "reason": reason,
+        "current_min_setpoint": automation.recovery_min_setpoint,
+        "ramp_state": "active",
+        "ramp_step_target": automation.recovery_min_setpoint + 1,
+        "comfort_streak": 0,
+        "last_evaluated_at": now.isoformat(),
+    }
+    await redis_client.set(
+        _recovery_key(automation.store_id, zone.key),
+        state,
+        ttl=_recovery_duration_seconds(automation),
+    )
+    await _audit_recovery(
+        session,
+        "zone_recovery_entered",
+        f"Recuperação térmica iniciada na zona '{zone.label}': {reason}",
+        store_id=automation.store_id,
+        zone_key=zone.key,
+        zone_label=zone.label,
+        extra_data=state,
+    )
+    await session.commit()
+    return state
+
+
+async def _exit_recovery(
+    store_id: uuid.UUID,
+    zone_key: str,
+    reason: str,
+    session: AsyncSession,
+    *,
+    zone_label: str | None = None,
+) -> None:
+    state = await _recovery_state(store_id, zone_key)
+    await redis_client.delete(_recovery_key(store_id, zone_key))
+    if state is None:
+        return
+    await _audit_recovery(
+        session,
+        "zone_recovery_exited",
+        f"Recuperação térmica encerrada na zona '{zone_label or zone_key}': {reason}",
+        store_id=store_id,
+        zone_key=zone_key,
+        zone_label=zone_label,
+        extra_data={"reason": reason, "state": state},
+    )
+
+
+async def _reset_recovery_for_reheat(
+    automation: ZoneAutomation,
+    zone: ZoneConfig,
+    state: dict,
+    session: AsyncSession,
+) -> dict:
+    next_state = {
+        **state,
+        "current_min_setpoint": automation.recovery_min_setpoint,
+        "ramp_state": "active",
+        "ramp_step_target": automation.recovery_min_setpoint + 1,
+        "comfort_streak": 0,
+        "last_evaluated_at": datetime.utcnow().isoformat(),
+    }
+    await _save_recovery_state(automation.store_id, zone.key, next_state)
+    await _audit_recovery(
+        session,
+        "zone_recovery_reset",
+        f"Recuperação térmica da zona '{zone.label}' voltou ao piso {automation.recovery_min_setpoint}°C por reaquecimento.",
+        store_id=automation.store_id,
+        zone_key=zone.key,
+        zone_label=zone.label,
+        extra_data=next_state,
+    )
+    await session.commit()
+    return next_state
+
+
+async def _maybe_log_recovery_unsuccessful(
+    automation: ZoneAutomation,
+    zone: ZoneConfig,
+    avg_temp: float,
+    status: str,
+    session: AsyncSession,
+) -> None:
+    if status not in ("WARM", "HOT", "CRITICAL"):
+        return
+    last = await get_zone_last_action(automation.store_id, zone.key, session)
+    marker_source = (last.reason or "") + " " + (last.block_reason or "") if last else ""
+    if RECOVERY_MARKER not in marker_source:
+        return
+    dedupe_key = f"zone:recovery_unsuccessful_logged:{automation.store_id}:{zone.key}"
+    if await redis_client.exists(dedupe_key):
+        return
+    await redis_client.set(dedupe_key, "1", ttl=3600)
+    await _audit_recovery(
+        session,
+        "zone_recovery_unsuccessful",
+        (
+            f"Recuperação térmica da zona '{zone.label}' expirou sem estabilizar "
+            f"({status}, {avg_temp:.1f}°C). Verificar carga térmica ou equipamento."
+        ),
+        store_id=automation.store_id,
+        zone_key=zone.key,
+        zone_label=zone.label,
+        severity="MEDIUM",
+        extra_data={"status": status, "avg_temp": round(avg_temp, 2)},
+    )
+    await session.commit()
+
+
+async def _apply_recovery_ramp_step(
+    automation: ZoneAutomation,
+    zone: ZoneConfig,
+    readable: list["_DeviceRow"],
+    params_map: dict[uuid.UUID, DeviceParameters],
+    target_setpoint: int,
+    avg_temp: float,
+    session: AsyncSession,
+) -> bool:
+    candidates = _build_setpoint_candidates(
+        readable,
+        params_map,
+        direction="up",
+        setpoint_min=automation.recovery_min_setpoint,
+        setpoint_max=automation.recovery_target_setpoint,
+        hotspot=None,
+        zone=zone,
+        automation=automation,
+        status="COMFORT",
+        strategy=_energy_strategy(automation),
+    )
+    candidates = [
+        c for c in candidates
+        if c.params.setpoint_cool is not None and c.params.setpoint_cool < target_setpoint
+    ]
+    if not candidates:
+        return False
+    executed = 0
+    for candidate in candidates[:8]:
+        device = candidate.row.device
+        params = candidate.params
+        if not await _device_window_ok(device.id):
+            continue
+        setpoint_before = params.setpoint_cool
+        ok, api_ms, fan_before, fan_after = await _execute_setpoint(
+            device,
+            params,
+            "up",
+            automation,
+            session,
+            step=1,
+            zone_status="COMFORT",
+            min_setpoint_override=automation.recovery_min_setpoint,
+            target_setpoint=target_setpoint,
+        )
+        if not ok:
+            continue
+        executed += 1
+        session.add(ZoneAction(
+            store_id=automation.store_id,
+            zone_key=zone.key,
+            zone_label=zone.label,
+            device_id=device.id,
+            device_name=device.name,
+            direction="up",
+            temp_before=round(avg_temp, 2),
+            ideal_min=zone.ideal_min,
+            ideal_max=zone.ideal_max,
+            setpoint_before=setpoint_before,
+            setpoint_after=target_setpoint,
+            fan_speed_before=fan_before,
+            fan_speed_after=fan_after,
+            reason=f"Ramp-up de recuperação térmica: subindo piso temporário para {target_setpoint}°C. {RECOVERY_MARKER}",
+            confidence=0.85,
+            mode=automation.mode,
+            status="pending_verification",
+            decision_ms=None,
+            api_ms=api_ms,
+        ))
+    if executed == 0:
+        return False
+    await _audit_recovery(
+        session,
+        "zone_recovery_ramp_up",
+        f"Ramp-up da recuperação térmica na zona '{zone.label}' para {target_setpoint}°C em {executed} AC(s).",
+        store_id=automation.store_id,
+        zone_key=zone.key,
+        zone_label=zone.label,
+        extra_data={"target_setpoint": target_setpoint, "devices_adjusted": executed},
+    )
+    await session.commit()
+    return True
+
+
+async def _advance_recovery_ramp(
+    automation: ZoneAutomation,
+    zone: ZoneConfig,
+    state: dict,
+    status: str,
+    avg_temp: float,
+    readable: list["_DeviceRow"],
+    params_map: dict[uuid.UUID, DeviceParameters],
+    session: AsyncSession,
+) -> bool:
+    if status != "COMFORT":
+        return False
+
+    now = datetime.utcnow()
+    comfort_streak = int(state.get("comfort_streak") or 0) + 1
+    ramp_state = state.get("ramp_state") or "active"
+    current_min = _safe_int(state.get("current_min_setpoint"), automation.recovery_min_setpoint) or automation.recovery_min_setpoint
+
+    next_state = {
+        **state,
+        "comfort_streak": comfort_streak,
+        "last_evaluated_at": now.isoformat(),
+    }
+
+    if comfort_streak < RECOVERY_COMFORT_STREAK_TO_RAMP:
+        await _save_recovery_state(automation.store_id, zone.key, next_state)
+        return True
+
+    should_step = ramp_state == "active" or (
+        ramp_state == "ramping" and comfort_streak % RECOVERY_RAMP_EVERY_STREAK == 0
+    )
+    if not should_step:
+        await _save_recovery_state(automation.store_id, zone.key, next_state)
+        return True
+
+    target = min(automation.recovery_target_setpoint, current_min + 1)
+    next_state["ramp_state"] = "ramping"
+    next_state["current_min_setpoint"] = target
+    next_state["ramp_step_target"] = min(automation.recovery_target_setpoint, target + 1)
+    await _save_recovery_state(automation.store_id, zone.key, next_state)
+    await _apply_recovery_ramp_step(
+        automation, zone, readable, params_map, target, avg_temp, session
+    )
+
+    if target >= automation.recovery_target_setpoint:
+        await _exit_recovery(automation.store_id, zone.key, "success", session, zone_label=zone.label)
+        await session.commit()
+    return True
 
 
 # ── Tendência térmica rápida ──────────────────────────────────────────────────
@@ -656,6 +1015,77 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
         # Tendência térmica (últimos 30 min)
         trend = await _quick_trend(automation.store_id, zone, session)
         energy_strategy = _energy_strategy(automation)
+        freshness_ratio = _zone_freshness_ratio(devices)
+        recovery_state = await _recovery_state(automation.store_id, zone.key)
+        recovery_min_override: int | None = None
+
+        if recovery_state is not None and not getattr(automation, "recovery_enabled", True):
+            await _exit_recovery(
+                automation.store_id,
+                zone.key,
+                "manual_disable",
+                session,
+                zone_label=zone.label,
+            )
+            await session.commit()
+            recovery_state = None
+
+        if recovery_state is None:
+            await _maybe_log_recovery_unsuccessful(automation, zone, avg_temp, status, session)
+        elif status == "COLD":
+            await _exit_recovery(
+                automation.store_id,
+                zone.key,
+                "cold_zone",
+                session,
+                zone_label=zone.label,
+            )
+            await session.commit()
+            recovery_state = None
+        elif status == "COMFORT":
+            handled = await _advance_recovery_ramp(
+                automation,
+                zone,
+                recovery_state,
+                status,
+                avg_temp,
+                readable,
+                params_map,
+                session,
+            )
+            if handled:
+                return
+        elif status in ("WARM", "HOT", "CRITICAL"):
+            if recovery_state.get("ramp_state") == "ramping":
+                recovery_state = await _reset_recovery_for_reheat(automation, zone, recovery_state, session)
+            else:
+                recovery_state = {
+                    **recovery_state,
+                    "comfort_streak": 0,
+                    "last_evaluated_at": datetime.utcnow().isoformat(),
+                }
+                await _save_recovery_state(automation.store_id, zone.key, recovery_state)
+            recovery_min_override = _safe_int(
+                recovery_state.get("current_min_setpoint"),
+                automation.recovery_min_setpoint,
+            )
+
+        if (
+            recovery_state is None
+            and getattr(automation, "recovery_enabled", True)
+            and status in ("HOT", "CRITICAL")
+            and freshness_ratio >= FRESHNESS_MIN_RATIO
+            and _zone_at_setpoint_floor(readable, params_map, automation)
+            and not await redis_client.exists(f"zone:recovery_unsuccessful_logged:{automation.store_id}:{zone.key}")
+        ):
+            trigger_reason = (
+                f"Zona {status} ({avg_temp:.1f}°C) com ACs elegíveis no piso "
+                f"normal ({automation.setpoint_min}°C); usando piso temporário "
+                f"{automation.recovery_min_setpoint}°C por até "
+                f"{automation.recovery_max_duration_minutes}min."
+            )
+            recovery_state = await _enter_recovery(automation, zone, trigger_reason, session)
+            recovery_min_override = automation.recovery_min_setpoint
 
         if status == "COMFORT":
             local_status = _local_hotspot_status(hotspot, zone)
@@ -996,6 +1426,11 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
             )
             reason = _build_power_on_reason(avg_temp, zone, status, power_device.device, trend, hotspot=hotspot)
             reason = _append_energy_decision(reason, energy_payload)
+            if recovery_min_override is not None:
+                reason += (
+                    f" Recuperação térmica ativa: piso temporário "
+                    f"{recovery_min_override}°C. {RECOVERY_MARKER}"
+                )
             setpoint_before = power_params.setpoint_cool
             action_status = "suggestion"
             block_reason = None
@@ -1086,6 +1521,7 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                     thermal_impact_score=_pc.thermal_impact_score,
                     energy_cost_score=_pc.energy_cost_score,
                     final_score=_pc.final_score,
+                    was_in_recovery=recovery_min_override is not None,
                 )
                 await session.commit()
             except Exception as _le:
@@ -1146,6 +1582,7 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
             automation=automation,
             status=status,
             strategy=energy_strategy,
+            min_setpoint_override=recovery_min_override,
         )
         best = (
             (scored_setpoint_candidates[0].row, scored_setpoint_candidates[0].params)
@@ -1170,8 +1607,10 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                 return
             reason = _build_no_adjustable_reason(
                 readable, devices, params_map, direction,
-                automation.setpoint_min, automation.setpoint_max, zone,
+                recovery_min_override or automation.setpoint_min, automation.setpoint_max, zone,
             )
+            if recovery_min_override is not None:
+                reason += f" Recuperação térmica ativa. {RECOVERY_MARKER}"
             await _log_blocked(automation, zone, avg_temp, reason, session)
             return
 
@@ -1185,22 +1624,23 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
             )
             return
 
-        if not (automation.setpoint_min <= new_setpoint <= automation.setpoint_max):
+        effective_min = recovery_min_override or automation.setpoint_min
+        if not (effective_min <= new_setpoint <= automation.setpoint_max):
             await _log_blocked(
                 automation, zone, avg_temp,
-                f"Setpoint {new_setpoint}°C fora dos limites permitidos ({automation.setpoint_min}–{automation.setpoint_max}°C)",
+                f"Setpoint {new_setpoint}°C fora dos limites permitidos ({effective_min}–{automation.setpoint_max}°C)",
                 session,
             )
             return
 
         # Guard: rejeitar no-op — o setpoint efetivo não pode ser igual ao atual
-        effective_new = max(automation.setpoint_min, min(automation.setpoint_max, new_setpoint))
+        effective_new = max(effective_min, min(automation.setpoint_max, new_setpoint))
         if effective_new == best_params.setpoint_cool:
             await _log_blocked(
                 automation, zone, avg_temp,
                 f"Ação ignorada: setpoint de {best_device.device.name} já está em "
                 f"{best_params.setpoint_cool}°C — nenhuma alteração útil dentro dos limites "
-                f"{automation.setpoint_min}–{automation.setpoint_max}°C.",
+                f"{effective_min}–{automation.setpoint_max}°C.",
                 session,
             )
             return
@@ -1218,6 +1658,11 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
         )
         reason = _build_reason(avg_temp, zone, status, best_device.device, direction, trend, hotspot=hotspot)
         reason = _append_energy_decision(reason, energy_payload)
+        if recovery_min_override is not None:
+            reason += (
+                f" Recuperação térmica ativa: piso temporário "
+                f"{recovery_min_override}°C. {RECOVERY_MARKER}"
+            )
 
         # Captura ANTES de _execute_setpoint modificar params.setpoint_cool
         setpoint_before = best_params.setpoint_cool
@@ -1243,7 +1688,7 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                 return  # outro worker chegou primeiro entre o exists() e agora
             ok, _api_ms, fan_before, fan_after = await _execute_setpoint(
                 best_device.device, best_params, direction, automation, session,
-                step=step, zone_status=status,
+                step=step, zone_status=status, min_setpoint_override=recovery_min_override,
             )
             if ok:
                 action_status = "pending_verification"
@@ -1315,6 +1760,7 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                 thermal_impact_score=_sc.thermal_impact_score,
                 energy_cost_score=_sc.energy_cost_score,
                 final_score=_sc.final_score,
+                was_in_recovery=recovery_min_override is not None,
             )
             await session.commit()
         except Exception as _le:
@@ -1695,10 +2141,7 @@ def _planned_setpoint_after(
     if direction == "up":
         target = min(setpoint_max, current + 1)
         return target if target != current else None
-    if zone is not None and automation is not None:
-        floor = _normal_cooling_floor(zone, automation, status)
-    else:
-        floor = setpoint_min
+    floor = setpoint_min
     if current <= floor:
         return None
     target = max(floor, current - 1)
@@ -1873,6 +2316,7 @@ def _build_setpoint_candidates(
     automation: ZoneAutomation | None,
     status: str,
     strategy: str,
+    min_setpoint_override: int | None = None,
 ) -> list[EnergyCandidate]:
     candidates: list[EnergyCandidate] = []
     for row in readable:
@@ -1893,7 +2337,7 @@ def _build_setpoint_candidates(
             automation=automation,
             status=status,
             hotspot=hotspot,
-            setpoint_min=setpoint_min,
+            setpoint_min=min_setpoint_override if min_setpoint_override is not None else setpoint_min,
             setpoint_max=setpoint_max,
             strategy=strategy,
         )
@@ -2482,19 +2926,23 @@ async def _execute_setpoint(
     session: AsyncSession,
     step: int = 1,
     zone_status: str = "WARM",
-) -> tuple[bool, int]:
+    min_setpoint_override: int | None = None,
+    target_setpoint: int | None = None,
+) -> tuple[bool, int, int | None, int | None]:
     from app.services.action_dispatcher import brise_dispatcher
 
     if not await brise_dispatcher.can_execute():
         logger.warning(
             "_execute_setpoint: circuit breaker OPEN — %s bloqueado", device.name
         )
-        return False, 0
+        return False, 0, params.fan_speed, params.fan_speed
 
+    min_setpoint = min_setpoint_override if min_setpoint_override is not None else automation.setpoint_min
     delta = step if direction == "up" else -step
+    raw_target = target_setpoint if target_setpoint is not None else params.setpoint_cool + delta
     new_setpoint = max(
-        automation.setpoint_min,
-        min(automation.setpoint_max, params.setpoint_cool + delta),
+        min_setpoint,
+        min(automation.setpoint_max, raw_target),
     )
 
     # Guard de segurança: nunca enviar comando que não muda nada
@@ -2503,7 +2951,7 @@ async def _execute_setpoint(
             "_execute_setpoint: no-op para %s (setpoint=%d já no alvo)",
             device.name, new_setpoint,
         )
-        return False, 0
+        return False, 0, params.fan_speed, params.fan_speed
 
     fan_before = params.fan_speed
     fan_speed = _target_fan_speed(zone_status, params.fan_speed)
@@ -3015,6 +3463,7 @@ async def build_ai_view(
     ]
     hotspot = detect_hotspot(_spatial)
     trend = await _quick_trend(store_id, zone, session)
+    recovery = await _recovery_public_state(store_id, zone_key)
 
     # Ação recomendada (sintética — não dispara nada)
     recommended: dict = {"action": "none", "rationale": "Zona estável dentro da faixa ideal."}
@@ -3079,7 +3528,12 @@ async def build_ai_view(
             "setpoint_max": automation.setpoint_max,
             "allow_auto_power_off": automation.allow_auto_power_off,
             "is_critical_zone": automation.is_critical_zone,
+            "recovery_enabled": automation.recovery_enabled,
+            "recovery_min_setpoint": automation.recovery_min_setpoint,
+            "recovery_target_setpoint": automation.recovery_target_setpoint,
+            "recovery_max_duration_minutes": automation.recovery_max_duration_minutes,
         },
+        "recovery": recovery,
         "devices_summary": {
             "total": len(devices),
             "on": on_count,

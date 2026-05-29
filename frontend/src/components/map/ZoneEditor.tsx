@@ -119,6 +119,10 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
   const [formMax, setFormMax] = useState(24)
   const [formSpMin, setFormSpMin] = useState(18)  // limite operacional do setpoint (mín.)
   const [formSpMax, setFormSpMax] = useState(28)  // limite operacional do setpoint (máx.)
+  const [formRecoveryEnabled, setFormRecoveryEnabled] = useState(true)
+  const [formRecoveryMin, setFormRecoveryMin] = useState(18)
+  const [formRecoveryTarget, setFormRecoveryTarget] = useState(22)
+  const [formRecoveryDuration, setFormRecoveryDuration] = useState(60)
   const [formType, setFormType] = useState<'ABERTA'|'SALA_FECHADA'>('ABERTA')
   const [formColor, setFormColor] = useState(ZONE_COLORS[0])
   const [formDevices, setFormDevices] = useState<string[]>([])
@@ -248,11 +252,16 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
       const auto = storeAutomations.find((a: any) => a.zone_key === zone.zone_key)
       setFormSpMin(auto?.setpoint_min ?? 18)
       setFormSpMax(auto?.setpoint_max ?? 28)
+      setFormRecoveryEnabled(auto?.recovery_enabled ?? true)
+      setFormRecoveryMin(auto?.recovery_min_setpoint ?? 18)
+      setFormRecoveryTarget(auto?.recovery_target_setpoint ?? 22)
+      setFormRecoveryDuration(auto?.recovery_max_duration_minutes ?? 60)
       setAutoLinkedGeoKey(null)
     } else {
       setFormName(''); setFormMin(20); setFormMax(24); setFormType('ABERTA')
       setFormColor(ZONE_COLORS[0])
       setFormSpMin(18); setFormSpMax(28)
+      setFormRecoveryEnabled(true); setFormRecoveryMin(18); setFormRecoveryTarget(22); setFormRecoveryDuration(60)
       setFormDevices(geo ? devicesInsideGeo(geo) : [])
       setAutoLinkedGeoKey(null)
     }
@@ -278,6 +287,7 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
     if (!name) { setFormError('Nome obrigatório'); return }
     if (formMin >= formMax) { setFormError('Mín ideal deve ser < Máx ideal'); return }
     if (formSpMin >= formSpMax) { setFormError('Mín operacional deve ser < Máx operacional'); return }
+    if (formRecoveryMin >= formRecoveryTarget) { setFormError('Mín recuperação deve ser < alvo recuperação'); return }
     if (formMin < formSpMin || formMax > formSpMax) {
       setFormError('Faixa ideal precisa estar dentro do limite operacional')
       return
@@ -289,13 +299,24 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
         data: { name, ideal_min: formMin, ideal_max: formMax, zone_type: formType, color: formColor, device_ids: formDevices } })
       // 2. Atualiza limite operacional da automation (mode preservado)
       const auto = storeAutomations.find((a: any) => a.zone_key === selected.zone_key)
-      if (auto && (auto.setpoint_min !== formSpMin || auto.setpoint_max !== formSpMax)) {
+      if (auto && (
+        auto.setpoint_min !== formSpMin
+        || auto.setpoint_max !== formSpMax
+        || auto.recovery_enabled !== formRecoveryEnabled
+        || auto.recovery_min_setpoint !== formRecoveryMin
+        || auto.recovery_target_setpoint !== formRecoveryTarget
+        || auto.recovery_max_duration_minutes !== formRecoveryDuration
+      )) {
         try {
           await zonesApi.setMode(storeId, selected.zone_key, {
             mode: auto.mode ?? 'manual',
             priority: auto.priority,
             setpoint_min: formSpMin,
             setpoint_max: formSpMax,
+            recovery_enabled: formRecoveryEnabled,
+            recovery_min_setpoint: formRecoveryMin,
+            recovery_target_setpoint: formRecoveryTarget,
+            recovery_max_duration_minutes: formRecoveryDuration,
           })
           invalidate()
         } catch (e: any) {
@@ -308,12 +329,20 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
         {
           onSuccess: async (created: any) => {
             // Aplica limite operacional na automation recém-criada (defaults backend = 18-28)
-            if (formSpMin !== 18 || formSpMax !== 28) {
+            if (
+              formSpMin !== 18 || formSpMax !== 28
+              || !formRecoveryEnabled || formRecoveryMin !== 18
+              || formRecoveryTarget !== 22 || formRecoveryDuration !== 60
+            ) {
               try {
                 await zonesApi.setMode(storeId, created.zone_key, {
                   mode: 'manual',
                   setpoint_min: formSpMin,
                   setpoint_max: formSpMax,
+                  recovery_enabled: formRecoveryEnabled,
+                  recovery_min_setpoint: formRecoveryMin,
+                  recovery_target_setpoint: formRecoveryTarget,
+                  recovery_max_duration_minutes: formRecoveryDuration,
                 })
                 invalidate()
               } catch { /* já criou, falha silenciosa no setpoint custom */ }
@@ -322,7 +351,8 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
         },
       )
     }
-  }, [formName, formMin, formMax, formSpMin, formSpMax, formType, formColor, formDevices,
+  }, [formName, formMin, formMax, formSpMin, formSpMax, formRecoveryEnabled, formRecoveryMin,
+      formRecoveryTarget, formRecoveryDuration, formType, formColor, formDevices,
       selected, pendingGeo, floor, createMutation, updateMutation, storeAutomations, storeId])
 
   const cancelDrawing = useCallback(() => {
@@ -611,8 +641,8 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
 
       {/* Painel de propriedades */}
       {showForm && (
-        <foreignObject x={10} y={10} width={285} height={520}>
-          <div className="rounded-xl border border-violet-500/30 bg-gray-900/96 p-3 shadow-2xl backdrop-blur text-xs text-gray-300 space-y-2">
+        <foreignObject x={10} y={10} width={300} height={536}>
+          <div className="max-h-[520px] overflow-y-auto rounded-xl border border-violet-500/30 bg-gray-900/96 p-3 shadow-2xl backdrop-blur text-xs text-gray-300 space-y-2">
             <div className="flex items-center justify-between">
               <span className="font-semibold text-white text-sm">{selected ? 'Editar zona' : 'Nova zona'}</span>
               <div className="flex gap-1">
@@ -658,6 +688,37 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
                       className="w-full rounded-md border border-gray-700 bg-gray-800 px-2 py-1.5 text-xs text-white focus:border-orange-500 focus:outline-none" />
                   </div>
                 ))}
+              </div>
+            </div>
+            <div className="rounded-md border border-cyan-900/70 bg-cyan-950/20 p-2">
+              <label className="mb-2 flex items-center justify-between gap-2">
+                <span className="text-[10px] uppercase tracking-wide text-cyan-300">Recuperação térmica</span>
+                <input
+                  type="checkbox"
+                  checked={formRecoveryEnabled}
+                  onChange={e => setFormRecoveryEnabled(e.target.checked)}
+                  className="h-3.5 w-3.5 accent-cyan-500"
+                />
+              </label>
+              <div className="grid grid-cols-3 gap-2">
+                <div>
+                  <label className="block mb-0.5 text-gray-400">Mín °C</label>
+                  <input type="number" value={formRecoveryMin} min={16} max={30}
+                    onChange={e => setFormRecoveryMin(Number(e.target.value))}
+                    className="w-full rounded-md border border-gray-700 bg-gray-800 px-2 py-1.5 text-xs text-white focus:border-cyan-500 focus:outline-none" />
+                </div>
+                <div>
+                  <label className="block mb-0.5 text-gray-400">Alvo °C</label>
+                  <input type="number" value={formRecoveryTarget} min={16} max={30}
+                    onChange={e => setFormRecoveryTarget(Number(e.target.value))}
+                    className="w-full rounded-md border border-gray-700 bg-gray-800 px-2 py-1.5 text-xs text-white focus:border-cyan-500 focus:outline-none" />
+                </div>
+                <div>
+                  <label className="block mb-0.5 text-gray-400">Min</label>
+                  <input type="number" value={formRecoveryDuration} min={5} max={240}
+                    onChange={e => setFormRecoveryDuration(Number(e.target.value))}
+                    className="w-full rounded-md border border-gray-700 bg-gray-800 px-2 py-1.5 text-xs text-white focus:border-cyan-500 focus:outline-none" />
+                </div>
               </div>
             </div>
             <select value={formType} onChange={e => setFormType(e.target.value as any)}
@@ -722,7 +783,7 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
                 )}
               </div>
             </div>
-            <button type="button" disabled={!formName.trim()||formMin>=formMax||formSpMin>=formSpMax||formMin<formSpMin||formMax>formSpMax||createMutation.isPending||updateMutation.isPending}
+            <button type="button" disabled={!formName.trim()||formMin>=formMax||formSpMin>=formSpMax||formRecoveryMin>=formRecoveryTarget||formMin<formSpMin||formMax>formSpMax||createMutation.isPending||updateMutation.isPending}
               onClick={handleSave}
               className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-violet-600 px-3 py-2 text-xs font-semibold text-white hover:bg-violet-500 disabled:opacity-40 disabled:cursor-not-allowed">
               <Check className="h-3.5 w-3.5" />{selected ? 'Salvar' : 'Criar zona'}

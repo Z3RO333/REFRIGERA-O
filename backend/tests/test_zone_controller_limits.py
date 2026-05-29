@@ -6,8 +6,12 @@ import pytest
 
 from app.services.zone_controller import (
     DEVICE_WINDOW_MAX_CMDS,
+    ZoneConfig,
     _device_window_ok,
+    _planned_setpoint_after,
 )
+from app.models.device import DeviceParameters
+from app.models.zone import ZoneAutomation
 
 
 def make_mock_redis(count: int):
@@ -103,3 +107,43 @@ def test_migration_max_daily_adjustments_eh_guardada_por_coluna_existente():
     assert "ALTER COLUMN max_daily_adjustments DROP NOT NULL" in source
     assert "ALTER COLUMN max_daily_adjustments DROP DEFAULT" in source
     assert "IF EXISTS" in source
+
+
+def test_recovery_min_override_permite_descer_abaixo_do_piso_normal():
+    params = DeviceParameters(device_id=uuid.uuid4(), setpoint_cool=20)
+    automation = ZoneAutomation(
+        store_id=uuid.uuid4(),
+        zone_key="farma",
+        setpoint_min=20,
+        setpoint_max=28,
+    )
+    zone = ZoneConfig(
+        key="farma",
+        label="Farma",
+        sector_names=[],
+        ideal_min=20,
+        ideal_max=24,
+    )
+
+    planned = _planned_setpoint_after(
+        params,
+        "down",
+        zone,
+        automation,
+        "HOT",
+        setpoint_min=18,
+        setpoint_max=28,
+    )
+
+    assert planned == 19
+
+
+def test_migration_tem_campos_de_recuperacao_termica():
+    from pathlib import Path
+
+    source = Path("app/db/migrations.py").read_text()
+    assert "recovery_enabled" in source
+    assert "recovery_min_setpoint" in source
+    assert "recovery_target_setpoint" in source
+    assert "recovery_max_duration_minutes" in source
+    assert "was_in_recovery" in source

@@ -39,6 +39,12 @@ class ZoneAutomation(Base):
     # pois há circulação contínua de pessoas e o conforto térmico é prioritário.
     allow_auto_power_off: Mapped[bool] = mapped_column(Boolean, default=True)
 
+    # ── Recuperação térmica temporária ───────────────────────────────────────
+    recovery_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    recovery_min_setpoint: Mapped[int] = mapped_column(Integer, default=18)
+    recovery_target_setpoint: Mapped[int] = mapped_column(Integer, default=22)
+    recovery_max_duration_minutes: Mapped[int] = mapped_column(Integer, default=60)
+
     # ── Manutenção / bloqueio manual ─────────────────────────────────────────
     # mode == "maintenance" → automação completamente suspensa até liberação explícita
     blocked_reason: Mapped[str | None] = mapped_column(Text)

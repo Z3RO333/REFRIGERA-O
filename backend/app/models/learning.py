@@ -58,6 +58,7 @@ class AIDecision(Base):
     energy_cost_score: Mapped[float | None] = mapped_column(Float)
     final_score: Mapped[float | None] = mapped_column(Float)
     learning_bonus_applied: Mapped[float | None] = mapped_column(Float)  # bônus de aprendizado usado
+    was_in_recovery: Mapped[bool] = mapped_column(Boolean, default=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 

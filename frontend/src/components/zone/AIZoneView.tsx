@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { Brain, AlertTriangle, CheckCircle, XCircle, Activity } from 'lucide-react'
+import { Brain, AlertTriangle, CheckCircle, XCircle, Activity, RefreshCw } from 'lucide-react'
 import { zonesApi } from '../../api/client'
 import { cn, formatTime } from '../../lib/utils'
 
@@ -37,7 +37,21 @@ interface AIZoneViewData {
     setpoint_max: number
     allow_auto_power_off: boolean
     is_critical_zone: boolean
+    recovery_enabled: boolean
+    recovery_min_setpoint: number
+    recovery_target_setpoint: number
+    recovery_max_duration_minutes: number
   }
+  recovery: {
+    started_at: string
+    reason: string
+    current_min_setpoint: number
+    ramp_state: string
+    ramp_step_target: number
+    comfort_streak: number
+    last_evaluated_at: string
+    remaining_seconds: number | null
+  } | null
   devices_summary: {
     total: number
     on: number
@@ -83,6 +97,9 @@ export default function AIZoneView({
   if (error || !data) return <div className="p-3 text-xs text-red-400">Erro ao carregar visão da IA.</div>
 
   const action = ACTION_LABELS[data.recommended_action.action] ?? ACTION_LABELS.none
+  const recoveryMinutes = data.recovery?.remaining_seconds != null
+    ? Math.max(0, Math.ceil(data.recovery.remaining_seconds / 60))
+    : null
 
   return (
     <div className="space-y-3 rounded-lg border border-purple-500/30 bg-purple-950/20 p-3">
@@ -124,6 +141,23 @@ export default function AIZoneView({
         <div className={cn('mt-1 text-sm font-semibold', action.color)}>{action.label}</div>
         <div className="mt-1 text-xs text-gray-300">{data.recommended_action.rationale}</div>
       </div>
+
+      {data.recovery && (
+        <div className="rounded border border-cyan-500/40 bg-cyan-950/30 p-2">
+          <div className="flex items-center gap-1 text-[11px] uppercase text-cyan-300">
+            <RefreshCw size={12} /> Modo Recuperação
+          </div>
+          <div className="mt-1 grid grid-cols-2 gap-2 text-xs">
+            <Info label="Desde">{formatTime(data.recovery.started_at)}</Info>
+            <Info label="Restante">{recoveryMinutes != null ? `${recoveryMinutes} min` : '—'}</Info>
+            <Info label="Piso atual">{data.recovery.current_min_setpoint}°C</Info>
+            <Info label="Ramp">{data.recovery.ramp_state}</Info>
+            <Info label="Próximo SP">{data.recovery.ramp_step_target}°C</Info>
+            <Info label="Comfort">{data.recovery.comfort_streak}/2 ciclos</Info>
+          </div>
+          <div className="mt-2 text-xs text-cyan-100">{data.recovery.reason}</div>
+        </div>
+      )}
 
       {data.blockers.length > 0 && (
         <div className="space-y-1 rounded border border-orange-500/40 bg-orange-950/30 p-2">

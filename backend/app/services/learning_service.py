@@ -65,6 +65,7 @@ async def record_decision(
     energy_cost_score: float | None,
     final_score: float | None,
     learning_bonus_applied: float | None = None,
+    was_in_recovery: bool = False,
 ) -> AIDecision:
     decision = AIDecision(
         zone_action_id=zone_action_id,
@@ -95,6 +96,7 @@ async def record_decision(
         energy_cost_score=energy_cost_score,
         final_score=final_score,
         learning_bonus_applied=learning_bonus_applied,
+        was_in_recovery=was_in_recovery,
     )
     session.add(decision)
     await session.flush()  # garante que decision.id existe

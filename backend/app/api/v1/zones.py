@@ -27,6 +27,7 @@ from app.services.zone_controller import (
     _check_guardrails,
     _classify,
     _evaluate_zone,
+    _recovery_public_state,
     build_ai_view,
     get_or_create_automation,
     get_zone_last_action,
@@ -85,6 +86,7 @@ def _automation_dict(
     daily_count: int,
     consecutive_fail: int,
     guardrail_reason: str | None,
+    recovery: dict | None = None,
 ) -> dict:
     return {
         "zone_key": zone_key,
@@ -96,6 +98,11 @@ def _automation_dict(
         "mode": automation.mode if automation else "manual",
         "setpoint_min": automation.setpoint_min if automation else 18,
         "setpoint_max": automation.setpoint_max if automation else 28,
+        "recovery_enabled": automation.recovery_enabled if automation else True,
+        "recovery_min_setpoint": automation.recovery_min_setpoint if automation else 18,
+        "recovery_target_setpoint": automation.recovery_target_setpoint if automation else 22,
+        "recovery_max_duration_minutes": automation.recovery_max_duration_minutes if automation else 60,
+        "recovery": recovery,
         "daily_count": daily_count,
         "consecutive_failures": consecutive_fail,
         "cooldown_remaining_s": cooldown_ttl,
@@ -308,6 +315,7 @@ async def list_zones(store_id: uuid.UUID, db: AsyncSession = Depends(get_db)) ->
     for zone_key, zone_cfg in all_zones.items():
         automation = existing.get(zone_key)
         cooldown   = await _cooldown_ttl(store_id, zone_key)
+        recovery = await _recovery_public_state(store_id, zone_key)
 
         guardrail_reason: str | None = None
         if automation and automation.mode not in ("manual", "maintenance"):
@@ -320,6 +328,7 @@ async def list_zones(store_id: uuid.UUID, db: AsyncSession = Depends(get_db)) ->
             daily_counts.get(zone_key, 0),
             consec_fails.get(zone_key, 0),
             guardrail_reason,
+            recovery,
         ))
 
     return zones_out
@@ -366,6 +375,21 @@ async def set_zone_mode(
         raise HTTPException(400, "setpoint_min deve ser menor que setpoint_max")
     automation.setpoint_min = new_min
     automation.setpoint_max = new_max
+    recovery_enabled_was_disabled = (
+        "recovery_enabled" in fields_set
+        and data.recovery_enabled is False
+        and automation.recovery_enabled is True
+    )
+    if "recovery_enabled" in fields_set and data.recovery_enabled is not None:
+        automation.recovery_enabled = data.recovery_enabled
+    if "recovery_min_setpoint" in fields_set and data.recovery_min_setpoint is not None:
+        automation.recovery_min_setpoint = data.recovery_min_setpoint
+    if "recovery_target_setpoint" in fields_set and data.recovery_target_setpoint is not None:
+        automation.recovery_target_setpoint = data.recovery_target_setpoint
+    if "recovery_max_duration_minutes" in fields_set and data.recovery_max_duration_minutes is not None:
+        automation.recovery_max_duration_minutes = data.recovery_max_duration_minutes
+    if automation.recovery_min_setpoint >= automation.recovery_target_setpoint:
+        raise HTTPException(400, "recovery_min_setpoint deve ser menor que recovery_target_setpoint")
     if data.priority is not None:
         automation.priority = data.priority
 
@@ -395,6 +419,17 @@ async def set_zone_mode(
     )
     await db.commit()
 
+    if recovery_enabled_was_disabled:
+        from app.services.zone_controller import _exit_recovery
+        await _exit_recovery(
+            store_id,
+            zone_key,
+            "manual_disable",
+            db,
+            zone_label=zone_label,
+        )
+        await db.commit()
+
     # Fencing token (P0.4): incrementa epoch da loja para invalidar planos em curso
     # nos workers do zone_controller que usaram o snapshot anterior.
     from app.services.store_epochs import bump_epoch
@@ -412,10 +447,19 @@ async def set_zone_mode(
         "changed_at": datetime.utcnow().isoformat(),
         "blocked_reason": automation.blocked_reason,
         "blocked_until": automation.blocked_until.isoformat() if automation.blocked_until else None,
+        "recovery_enabled": automation.recovery_enabled,
     }
     await redis_client.publish("zone.automation.mode.changed", event_payload)
 
-    return {"zone_key": zone_key, "mode": mode, "priority": automation.priority}
+    return {
+        "zone_key": zone_key,
+        "mode": mode,
+        "priority": automation.priority,
+        "recovery_enabled": automation.recovery_enabled,
+        "recovery_min_setpoint": automation.recovery_min_setpoint,
+        "recovery_target_setpoint": automation.recovery_target_setpoint,
+        "recovery_max_duration_minutes": automation.recovery_max_duration_minutes,
+    }
 
 
 @router.get("/{store_id}/{zone_key}/ai-view")

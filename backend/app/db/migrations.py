@@ -206,6 +206,11 @@ _STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS ix_store_epochs_store ON store_epochs (store_id)",
     # allow_auto_power_off: False em zonas comerciais (farma/loja) — AC nunca desliga automaticamente
     "ALTER TABLE zone_automations ADD COLUMN IF NOT EXISTS allow_auto_power_off BOOLEAN NOT NULL DEFAULT true",
+    # recuperação térmica temporária por zona
+    "ALTER TABLE zone_automations ADD COLUMN IF NOT EXISTS recovery_enabled BOOLEAN NOT NULL DEFAULT true",
+    "ALTER TABLE zone_automations ADD COLUMN IF NOT EXISTS recovery_min_setpoint INTEGER NOT NULL DEFAULT 18",
+    "ALTER TABLE zone_automations ADD COLUMN IF NOT EXISTS recovery_target_setpoint INTEGER NOT NULL DEFAULT 22",
+    "ALTER TABLE zone_automations ADD COLUMN IF NOT EXISTS recovery_max_duration_minutes INTEGER NOT NULL DEFAULT 60",
     # allowed_end_next_day: True quando a zona opera até depois da meia-noite (Farma Flores, Boulevard)
     "ALTER TABLE zone_automations ADD COLUMN IF NOT EXISTS allowed_end_next_day BOOLEAN NOT NULL DEFAULT false",
     # horário de funcionamento por loja (usado para herdar nas zonas e exibir no dashboard)
@@ -258,6 +263,7 @@ _STATEMENTS = [
         energy_cost_score FLOAT,
         final_score FLOAT,
         learning_bonus_applied FLOAT,
+        was_in_recovery BOOLEAN NOT NULL DEFAULT false,
         created_at TIMESTAMP NOT NULL DEFAULT now()
     )""",
     "CREATE INDEX IF NOT EXISTS ix_ai_decisions_store ON ai_decisions (store_id)",
@@ -270,6 +276,7 @@ _STATEMENTS = [
     "ALTER TABLE ai_decisions ADD COLUMN IF NOT EXISTS thermal_impact_score FLOAT",
     "ALTER TABLE ai_decisions ADD COLUMN IF NOT EXISTS energy_cost_score FLOAT",
     "ALTER TABLE ai_decisions ADD COLUMN IF NOT EXISTS final_score FLOAT",
+    "ALTER TABLE ai_decisions ADD COLUMN IF NOT EXISTS was_in_recovery BOOLEAN NOT NULL DEFAULT false",
     # migra dados da coluna antiga 'trend' (versão pré-rename) para 'trend_c_per_hour'
     """DO $$ BEGIN
          IF EXISTS (SELECT 1 FROM information_schema.columns

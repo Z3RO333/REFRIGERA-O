@@ -173,6 +173,17 @@ export interface ZoneActionRecord {
   verified_at: string | null
 }
 
+export interface ZoneRecoveryState {
+  started_at: string
+  reason: string
+  current_min_setpoint: number
+  ramp_state: 'active' | 'ramping' | 'completed'
+  ramp_step_target: number
+  comfort_streak: number
+  last_evaluated_at: string
+  remaining_seconds: number | null
+}
+
 export interface ZoneAutomationState {
   zone_key: string
   zone_label: string
@@ -183,6 +194,11 @@ export interface ZoneAutomationState {
   mode: ZoneMode
   setpoint_min: number
   setpoint_max: number
+  recovery_enabled: boolean
+  recovery_min_setpoint: number
+  recovery_target_setpoint: number
+  recovery_max_duration_minutes: number
+  recovery: ZoneRecoveryState | null
   daily_count: number
   consecutive_failures: number
   cooldown_remaining_s: number | null

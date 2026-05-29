@@ -16,11 +16,19 @@ class ZoneModeUpdate(BaseModel):
     blocked_until: datetime | None = None
     setpoint_min: int | None = Field(default=None, ge=16, le=30)
     setpoint_max: int | None = Field(default=None, ge=16, le=30)
+    recovery_enabled: bool | None = None
+    recovery_min_setpoint: int | None = Field(default=None, ge=16, le=30)
+    recovery_target_setpoint: int | None = Field(default=None, ge=16, le=30)
+    recovery_max_duration_minutes: int | None = Field(default=None, ge=5, le=240)
+
     @model_validator(mode="after")
     def validate_setpoint_range(self):
         if self.setpoint_min is not None and self.setpoint_max is not None:
             if self.setpoint_min >= self.setpoint_max:
                 raise ValueError("setpoint_min deve ser menor que setpoint_max")
+        if self.recovery_min_setpoint is not None and self.recovery_target_setpoint is not None:
+            if self.recovery_min_setpoint >= self.recovery_target_setpoint:
+                raise ValueError("recovery_min_setpoint deve ser menor que recovery_target_setpoint")
         return self
 
 
