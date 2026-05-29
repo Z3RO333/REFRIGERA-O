@@ -1489,6 +1489,10 @@ function ZonePanel({
                       && lastAction.direction === 'down' && (
                       <> · ⏻ Ligou</>
                     )}
+                    {lastAction.fan_speed_before != null && lastAction.fan_speed_after != null
+                      && lastAction.fan_speed_before !== lastAction.fan_speed_after && (
+                      <> · 💨 fan {lastAction.fan_speed_before}→{lastAction.fan_speed_after}</>
+                    )}
                   </span>
                 </div>
                 {lastAction.temp_before != null && (

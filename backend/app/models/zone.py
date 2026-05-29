@@ -69,6 +69,9 @@ class ZoneAction(Base):
     ideal_max: Mapped[float] = mapped_column(Float, default=24)
     setpoint_before: Mapped[int | None] = mapped_column(Integer)
     setpoint_after: Mapped[int | None] = mapped_column(Integer)
+    # Mudança de fan_speed aplicada junto com o setpoint (1=auto, 2=baixa, 3=média, 4=alta)
+    fan_speed_before: Mapped[int | None] = mapped_column(Integer)
+    fan_speed_after: Mapped[int | None] = mapped_column(Integer)
 
     reason: Mapped[str | None] = mapped_column(Text)
     confidence: Mapped[float | None] = mapped_column(Float)        # 0.0 – 1.0

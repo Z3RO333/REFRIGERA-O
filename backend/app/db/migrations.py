@@ -152,6 +152,8 @@ _STATEMENTS = [
     "ALTER TABLE zone_actions ADD COLUMN IF NOT EXISTS decision_ms INTEGER",
     "ALTER TABLE zone_actions ADD COLUMN IF NOT EXISTS api_ms INTEGER",
     "ALTER TABLE zone_actions ADD COLUMN IF NOT EXISTS suggestion_signature VARCHAR(80)",
+    "ALTER TABLE zone_actions ADD COLUMN IF NOT EXISTS fan_speed_before INTEGER",
+    "ALTER TABLE zone_actions ADD COLUMN IF NOT EXISTS fan_speed_after INTEGER",
     "CREATE INDEX IF NOT EXISTS ix_zone_actions_suggestion_signature ON zone_actions (suggestion_signature)",
     """DO $$ BEGIN
          IF EXISTS (

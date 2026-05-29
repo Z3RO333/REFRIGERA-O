@@ -161,6 +161,8 @@ export interface ZoneActionRecord {
   ideal_max: number
   setpoint_before: number | null
   setpoint_after: number | null
+  fan_speed_before: number | null
+  fan_speed_after: number | null
   reason: string | null
   confidence: number | null
   mode: ZoneMode | null

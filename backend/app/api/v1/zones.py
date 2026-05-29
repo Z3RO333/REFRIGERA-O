@@ -62,6 +62,8 @@ def _action_dict(a: ZoneAction) -> dict:
         "ideal_max": a.ideal_max,
         "setpoint_before": a.setpoint_before,
         "setpoint_after": a.setpoint_after,
+        "fan_speed_before": getattr(a, "fan_speed_before", None),
+        "fan_speed_after": getattr(a, "fan_speed_after", None),
         "reason": a.reason,
         "confidence": a.confidence,
         "mode": a.mode,

@@ -444,6 +444,25 @@ def _target_fan_speed(status: str, current_fan_speed: int | None = None) -> int:
     return target
 
 
+_FAN_LABEL = {1: "baixa", 2: "média", 3: "alta", 4: "máxima"}
+
+
+def _append_fan_change(reason: str | None, fan_before: int | None, fan_after: int | None) -> str:
+    """Acrescenta info de mudança de velocidade da fan ao texto do motivo.
+
+    Só anexa se houve mudança real — operador precisa enxergar quando a IA
+    pisou no acelerador (subiu fan) ou economizou (desceu fan).
+    """
+    base = reason or ""
+    if fan_before is None or fan_after is None or fan_before == fan_after:
+        return base
+    before_lbl = _FAN_LABEL.get(fan_before, f"v{fan_before}")
+    after_lbl = _FAN_LABEL.get(fan_after, f"v{fan_after}")
+    arrow = "↑" if fan_after > fan_before else "↓"
+    note = f" Fan {arrow} {before_lbl}→{after_lbl} (v{fan_before}→v{fan_after})."
+    return base + note
+
+
 async def _log_trending(
     automation: ZoneAutomation,
     zone: ZoneConfig,
@@ -686,6 +705,8 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                     action_status = "suggestion"
                     block_reason = None
                     _api_ms: int | None = None
+                    fan_before = power_params.fan_speed
+                    fan_after = _target_fan_speed(status, power_params.fan_speed)
 
                     if automation.mode in ("auto", "semi"):
                         if not await _device_window_ok(power_device.device.id):
@@ -698,7 +719,7 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                         elif not await redis_client.acquire_lock(cooldown_key, ttl=ZONE_COOLDOWN_SECONDS):
                             return
                         else:
-                            ok, _api_ms = await _execute_power_on(
+                            ok, _api_ms, fan_before, fan_after = await _execute_power_on(
                                 power_device.device, power_params, session,
                                 target_setpoint=power_setpoint, zone_status=status,
                             )
@@ -714,6 +735,7 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                                 block_reason = "Falha ao ligar aparelho pela Brise API"
                                 await redis_client.release_lock(cooldown_key)
 
+                    reason = _append_fan_change(reason, fan_before, fan_after)
                     action = ZoneAction(
                         store_id=automation.store_id,
                         zone_key=zone.key,
@@ -726,6 +748,8 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                         ideal_max=zone.ideal_max,
                         setpoint_before=setpoint_before,
                         setpoint_after=power_setpoint,
+                        fan_speed_before=fan_before,
+                        fan_speed_after=fan_after,
                         reason=reason,
                         confidence=confidence,
                         mode=automation.mode,
@@ -819,6 +843,8 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                     action_status = "suggestion"
                     block_reason = None
                     _api_ms: int | None = None
+                    fan_before = best_params.fan_speed
+                    fan_after = _target_fan_speed(status, best_params.fan_speed)
 
                     if automation.mode in ("auto", "semi"):
                         if not await _device_window_ok(best_device.device.id):
@@ -831,7 +857,7 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                         elif not await redis_client.acquire_lock(cooldown_key, ttl=ZONE_COOLDOWN_SECONDS):
                             return
                         else:
-                            ok, _api_ms = await _execute_setpoint(
+                            ok, _api_ms, fan_before, fan_after = await _execute_setpoint(
                                 best_device.device, best_params, "down", automation, session,
                                 step=1, zone_status=status,
                             )
@@ -847,6 +873,7 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                                 block_reason = "Falha ao enviar comando para a Brise API"
                                 await redis_client.release_lock(cooldown_key)
 
+                    reason = _append_fan_change(reason, fan_before, fan_after)
                     action = ZoneAction(
                         store_id=automation.store_id,
                         zone_key=zone.key,
@@ -859,6 +886,8 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                         ideal_max=zone.ideal_max,
                         setpoint_before=setpoint_before,
                         setpoint_after=new_setpoint,
+                        fan_speed_before=fan_before,
+                        fan_speed_after=fan_after,
                         reason=reason,
                         confidence=confidence,
                         mode=automation.mode,
@@ -971,6 +1000,8 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
             action_status = "suggestion"
             block_reason = None
             _api_ms: int | None = None
+            fan_before = power_params.fan_speed
+            fan_after = _target_fan_speed(status, power_params.fan_speed)
 
             if automation.mode in ("auto", "semi"):
                 if not await _device_window_ok(power_device.device.id):
@@ -983,7 +1014,7 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                 elif not await redis_client.acquire_lock(cooldown_key, ttl=ZONE_COOLDOWN_SECONDS):
                     return
                 else:
-                    ok, _api_ms = await _execute_power_on(
+                    ok, _api_ms, fan_before, fan_after = await _execute_power_on(
                         power_device.device, power_params, session,
                         target_setpoint=power_setpoint, zone_status=status,
                     )
@@ -999,6 +1030,7 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                         await redis_client.release_lock(cooldown_key)
 
             _power_api_ms = _api_ms
+            reason = _append_fan_change(reason, fan_before, fan_after)
             action = ZoneAction(
                 store_id=automation.store_id,
                 zone_key=zone.key,
@@ -1011,6 +1043,8 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                 ideal_max=zone.ideal_max,
                 setpoint_before=setpoint_before,
                 setpoint_after=power_setpoint,
+                fan_speed_before=fan_before,
+                fan_speed_after=fan_after,
                 reason=reason,
                 confidence=confidence,
                 mode=automation.mode,
@@ -1045,8 +1079,8 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                     device_name=power_device.device.name,
                     setpoint_from=setpoint_before,
                     setpoint_to=power_setpoint,
-                    fan_speed_from=power_params.fan_speed,
-                    fan_speed_to=None,
+                    fan_speed_from=fan_before,
+                    fan_speed_to=fan_after,
                     confidence=confidence,
                     energy_strategy=energy_strategy,
                     thermal_impact_score=_pc.thermal_impact_score,
@@ -1190,6 +1224,8 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
         action_status = "suggestion"
         block_reason = None
         _api_ms: int | None = None
+        fan_before = best_params.fan_speed
+        fan_after = _target_fan_speed(status, best_params.fan_speed)
 
         if automation.mode in ("auto", "semi"):
             if not await _device_window_ok(best_device.device.id):
@@ -1204,7 +1240,7 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
             # acquire_lock é atômico (SET NX EX) — evita race entre múltiplos workers
             if not await redis_client.acquire_lock(cooldown_key, ttl=ZONE_COOLDOWN_SECONDS):
                 return  # outro worker chegou primeiro entre o exists() e agora
-            ok, _api_ms = await _execute_setpoint(
+            ok, _api_ms, fan_before, fan_after = await _execute_setpoint(
                 best_device.device, best_params, direction, automation, session,
                 step=step, zone_status=status,
             )
@@ -1221,6 +1257,7 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                 await redis_client.release_lock(cooldown_key)  # libera para próxima tentativa
 
         _setpoint_api_ms = _api_ms
+        reason = _append_fan_change(reason, fan_before, fan_after)
         action = ZoneAction(
             store_id=automation.store_id,
             zone_key=zone.key,
@@ -1233,6 +1270,8 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
             ideal_max=zone.ideal_max,
             setpoint_before=setpoint_before,
             setpoint_after=new_setpoint,
+            fan_speed_before=fan_before,
+            fan_speed_after=fan_after,
             reason=reason,
             confidence=confidence,
             mode=automation.mode,
@@ -1268,8 +1307,8 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                 device_name=best_device.device.name,
                 setpoint_from=setpoint_before,
                 setpoint_to=new_setpoint,
-                fan_speed_from=best_params.fan_speed,
-                fan_speed_to=None,
+                fan_speed_from=fan_before,
+                fan_speed_to=fan_after,
                 confidence=confidence,
                 energy_strategy=energy_strategy,
                 thermal_impact_score=_sc.thermal_impact_score,
@@ -2230,6 +2269,7 @@ async def _execute_power_on(
         return False, 0
 
     setpoint_cool = target_setpoint or params.setpoint_cool or 22
+    fan_before = params.fan_speed
     fan_speed = _target_fan_speed(zone_status, params.fan_speed)
     brise_params = {
         "modeDevice": 1,
@@ -2258,9 +2298,14 @@ async def _execute_power_on(
             device.status_latest.state = True
             device.status_latest.updated_at = datetime.utcnow()
         await session.commit()
+        if fan_before != fan_speed:
+            logger.info(
+                "Zone fan change: %s fan_speed %s→%s (status=%s)",
+                device.name, fan_before, fan_speed, zone_status,
+            )
     else:
         await brise_dispatcher.on_failure()
-    return success, _api_ms
+    return success, _api_ms, fan_before, fan_speed
 
 
 async def _try_power_off_cold_zone(
@@ -2458,6 +2503,7 @@ async def _execute_setpoint(
         )
         return False, 0
 
+    fan_before = params.fan_speed
     fan_speed = _target_fan_speed(zone_status, params.fan_speed)
     brise_params = {
         "modeDevice": 1,
@@ -2478,9 +2524,14 @@ async def _execute_setpoint(
         params.fan_speed = fan_speed
         params.synced_at = datetime.utcnow()
         await session.commit()
+        if fan_before != fan_speed:
+            logger.info(
+                "Zone fan change: %s fan_speed %s→%s (status=%s)",
+                device.name, fan_before, fan_speed, zone_status,
+            )
     else:
         await brise_dispatcher.on_failure()
-    return success, _api_ms
+    return success, _api_ms, fan_before, fan_speed
 
 
 # Mantido para métricas informacionais (daily_count no payload da API).
