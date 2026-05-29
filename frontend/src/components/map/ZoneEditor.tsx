@@ -5,7 +5,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Check, Search, Trash2, X } from 'lucide-react'
-import { customZonesApi, storesApi } from '../../api/client'
+import { customZonesApi, storesApi, zonesApi } from '../../api/client'
 import { cn, formatTemp } from '../../lib/utils'
 import type { CustomZone, Device, Sector, ZoneGeometry } from '../../types'
 
@@ -117,6 +117,8 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
   const [formName, setFormName] = useState('')
   const [formMin, setFormMin] = useState(20)
   const [formMax, setFormMax] = useState(24)
+  const [formSpMin, setFormSpMin] = useState(18)  // limite operacional do setpoint (mín.)
+  const [formSpMax, setFormSpMax] = useState(28)  // limite operacional do setpoint (máx.)
   const [formType, setFormType] = useState<'ABERTA'|'SALA_FECHADA'>('ABERTA')
   const [formColor, setFormColor] = useState(ZONE_COLORS[0])
   const [formDevices, setFormDevices] = useState<string[]>([])
@@ -137,6 +139,12 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
   const { data: sectors = [], isFetched: sectorsFetched } = useQuery<Sector[]>({
     queryKey: ['store-sectors', storeId],
     queryFn: () => storesApi.sectors(storeId),
+    enabled: editMode || showForm,
+  })
+  // Automations da loja — usadas para ler/escrever setpoint_min/max ao editar zona
+  const { data: storeAutomations = [] } = useQuery<any[]>({
+    queryKey: ['zones-automation', storeId],
+    queryFn: () => zonesApi.list(storeId),
     enabled: editMode || showForm,
   })
 
@@ -236,16 +244,21 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
       setFormName(zone.name); setFormMin(zone.ideal_min); setFormMax(zone.ideal_max)
       setFormType(zone.zone_type as any); setFormColor(zone.color ?? ZONE_COLORS[0])
       setFormDevices(zone.device_ids)
+      // Limite operacional vem da ZoneAutomation, não da CustomZone — busca pela key
+      const auto = storeAutomations.find((a: any) => a.zone_key === zone.zone_key)
+      setFormSpMin(auto?.setpoint_min ?? 18)
+      setFormSpMax(auto?.setpoint_max ?? 28)
       setAutoLinkedGeoKey(null)
     } else {
       setFormName(''); setFormMin(20); setFormMax(24); setFormType('ABERTA')
       setFormColor(ZONE_COLORS[0])
+      setFormSpMin(18); setFormSpMax(28)
       setFormDevices(geo ? devicesInsideGeo(geo) : [])
       setAutoLinkedGeoKey(null)
     }
     setFormSearch('')
     setFormError(null); setShowForm(true)
-  }, [devicesInsideGeo])
+  }, [devicesInsideGeo, storeAutomations])
 
   const closeForm = useCallback(() => {
     setShowForm(false); setPendingGeo(null); setSelected(null); setFormError(null); setFormSearch(''); setAutoLinkedGeoKey(null)
@@ -260,19 +273,57 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
     setAutoLinkedGeoKey(key)
   }, [showForm, selected, pendingGeo, devicesFetched, sectorsFetched, autoLinkedGeoKey, devicesInsideGeo])
 
-  const handleSave = useCallback(() => {
+  const handleSave = useCallback(async () => {
     const name = formName.trim()
     if (!name) { setFormError('Nome obrigatório'); return }
-    if (formMin >= formMax) { setFormError('Mín deve ser < Máx'); return }
+    if (formMin >= formMax) { setFormError('Mín ideal deve ser < Máx ideal'); return }
+    if (formSpMin >= formSpMax) { setFormError('Mín operacional deve ser < Máx operacional'); return }
+    if (formMin < formSpMin || formMax > formSpMax) {
+      setFormError('Faixa ideal precisa estar dentro do limite operacional')
+      return
+    }
     setFormError(null)
     if (selected) {
+      // 1. Atualiza dados da custom zone (nome, ideal, devices...)
       updateMutation.mutate({ key: selected.zone_key,
         data: { name, ideal_min: formMin, ideal_max: formMax, zone_type: formType, color: formColor, device_ids: formDevices } })
+      // 2. Atualiza limite operacional da automation (mode preservado)
+      const auto = storeAutomations.find((a: any) => a.zone_key === selected.zone_key)
+      if (auto && (auto.setpoint_min !== formSpMin || auto.setpoint_max !== formSpMax)) {
+        try {
+          await zonesApi.setMode(storeId, selected.zone_key, {
+            mode: auto.mode ?? 'manual',
+            priority: auto.priority,
+            setpoint_min: formSpMin,
+            setpoint_max: formSpMax,
+          })
+          invalidate()
+        } catch (e: any) {
+          setFormError(e?.response?.data?.detail ?? 'Erro ao salvar limite operacional.')
+        }
+      }
     } else if (pendingGeo) {
       createMutation.mutate({ name, ideal_min: formMin, ideal_max: formMax, zone_type: formType,
-        color: formColor, device_ids: formDevices, floor, geometry: pendingGeo })
+        color: formColor, device_ids: formDevices, floor, geometry: pendingGeo },
+        {
+          onSuccess: async (created: any) => {
+            // Aplica limite operacional na automation recém-criada (defaults backend = 18-28)
+            if (formSpMin !== 18 || formSpMax !== 28) {
+              try {
+                await zonesApi.setMode(storeId, created.zone_key, {
+                  mode: 'manual',
+                  setpoint_min: formSpMin,
+                  setpoint_max: formSpMax,
+                })
+                invalidate()
+              } catch { /* já criou, falha silenciosa no setpoint custom */ }
+            }
+          },
+        },
+      )
     }
-  }, [formName, formMin, formMax, formType, formColor, formDevices, selected, pendingGeo, floor, createMutation, updateMutation])
+  }, [formName, formMin, formMax, formSpMin, formSpMax, formType, formColor, formDevices,
+      selected, pendingGeo, floor, createMutation, updateMutation, storeAutomations, storeId])
 
   const cancelDrawing = useCallback(() => {
     setRectStart(null)
@@ -577,15 +628,37 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
             {formError && <p className="rounded bg-red-900/40 px-2 py-1 text-red-400">{formError}</p>}
             <input value={formName} onChange={e => setFormName(e.target.value)} placeholder="Nome da zona"
               className="w-full rounded-md border border-gray-700 bg-gray-800 px-2 py-1.5 text-xs text-white focus:border-violet-500 focus:outline-none" />
-            <div className="flex gap-2">
-              {[['Mín °C', formMin, setFormMin],['Máx °C', formMax, setFormMax]].map(([label, val, setter]) => (
-                <div key={String(label)} className="flex-1">
-                  <label className="block mb-0.5 text-gray-400">{String(label)}</label>
-                  <input type="number" value={val as number} min={16} max={30}
-                    onChange={e => (setter as Function)(Number(e.target.value))}
-                    className="w-full rounded-md border border-gray-700 bg-gray-800 px-2 py-1.5 text-xs text-white focus:border-violet-500 focus:outline-none" />
-                </div>
-              ))}
+            <div>
+              <div className="mb-0.5 flex items-center justify-between">
+                <span className="text-[10px] uppercase tracking-wide text-violet-300">Faixa ideal</span>
+                <span className="text-[10px] text-gray-500">temperatura ambiente esperada</span>
+              </div>
+              <div className="flex gap-2">
+                {[['Mín °C', formMin, setFormMin],['Máx °C', formMax, setFormMax]].map(([label, val, setter]) => (
+                  <div key={String(label)} className="flex-1">
+                    <label className="block mb-0.5 text-gray-400">{String(label)}</label>
+                    <input type="number" value={val as number} min={16} max={30}
+                      onChange={e => (setter as Function)(Number(e.target.value))}
+                      className="w-full rounded-md border border-gray-700 bg-gray-800 px-2 py-1.5 text-xs text-white focus:border-violet-500 focus:outline-none" />
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div>
+              <div className="mb-0.5 flex items-center justify-between">
+                <span className="text-[10px] uppercase tracking-wide text-orange-300">Limite operacional</span>
+                <span className="text-[10px] text-gray-500">até onde a IA pode mexer no setpoint</span>
+              </div>
+              <div className="flex gap-2">
+                {[['Mín °C', formSpMin, setFormSpMin],['Máx °C', formSpMax, setFormSpMax]].map(([label, val, setter]) => (
+                  <div key={`sp-${label}`} className="flex-1">
+                    <label className="block mb-0.5 text-gray-400">{String(label)}</label>
+                    <input type="number" value={val as number} min={16} max={30}
+                      onChange={e => (setter as Function)(Number(e.target.value))}
+                      className="w-full rounded-md border border-gray-700 bg-gray-800 px-2 py-1.5 text-xs text-white focus:border-orange-500 focus:outline-none" />
+                  </div>
+                ))}
+              </div>
             </div>
             <select value={formType} onChange={e => setFormType(e.target.value as any)}
               className="w-full rounded-md border border-gray-700 bg-gray-800 px-2 py-1.5 text-xs text-white focus:border-violet-500 focus:outline-none">
@@ -649,7 +722,7 @@ export default function ZoneEditor({ storeId, floor, editMode, svgRef, viewbox, 
                 )}
               </div>
             </div>
-            <button type="button" disabled={!formName.trim()||formMin>=formMax||createMutation.isPending||updateMutation.isPending}
+            <button type="button" disabled={!formName.trim()||formMin>=formMax||formSpMin>=formSpMax||formMin<formSpMin||formMax>formSpMax||createMutation.isPending||updateMutation.isPending}
               onClick={handleSave}
               className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-violet-600 px-3 py-2 text-xs font-semibold text-white hover:bg-violet-500 disabled:opacity-40 disabled:cursor-not-allowed">
               <Check className="h-3.5 w-3.5" />{selected ? 'Salvar' : 'Criar zona'}
