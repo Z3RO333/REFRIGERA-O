@@ -1003,6 +1003,9 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
         devices, params_map = await _get_zone_devices(automation.store_id, zone, session)
         await _sync_zone_parameters_from_brise(devices, params_map, session)
 
+        if _is_weekend_now():
+            zone = replace(zone, ideal_max=zone.ideal_max + 2.0)
+
         # Fontes de temperatura: ACs ativos + sensores externos + ACs desligados que
         # ainda reportam temperatura. DESLIGADO observa o hotspot, mas nao recebe setpoint.
         temp_sources = [d for d in devices if _is_thermal_observation_source(d)]

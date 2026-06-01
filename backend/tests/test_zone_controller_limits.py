@@ -292,3 +292,17 @@ def test_is_weekend_now_dia_util():
         with patch("app.services.zone_controller.datetime") as mock_dt:
             mock_dt.now.return_value = mock_now
             assert _is_weekend_now() is False, f"weekday={weekday} deveria retornar False"
+
+
+def test_weekend_ideal_max_offset_aplicado():
+    """No fim de semana, ideal_max + 2.0 move classificação de WARM para COMFORT."""
+    from app.services.zone_controller import _classify
+
+    ideal_max_original = 24.0
+    temp = 25.5  # 1.5°C acima do ideal_max → WARM sem offset
+
+    # Sem offset: 25.5 <= 24.0 + 1.5 = 25.5 → WARM
+    assert _classify(temp, 22.0, ideal_max_original) == "WARM"
+
+    # Com offset: 25.5 <= 26.0 → COMFORT
+    assert _classify(temp, 22.0, ideal_max_original + 2.0) == "COMFORT"
