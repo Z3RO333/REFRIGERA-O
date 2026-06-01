@@ -228,3 +228,67 @@ def test_hotspot_no_piso_normal_libera_recuperacao_local():
     )
 
     assert _hotspot_at_setpoint_floor([row], {device_id: params}, automation, hotspot) is True
+
+
+# ── Fim de semana ─────────────────────────────────────────────────────────────
+
+def test_weekend_max_devices_zona_1_ac():
+    from app.services.zone_controller import _weekend_max_devices
+    assert _weekend_max_devices(1) == 0
+
+
+def test_weekend_max_devices_zona_2_acs():
+    from app.services.zone_controller import _weekend_max_devices
+    assert _weekend_max_devices(2) == 1
+
+
+def test_weekend_max_devices_zona_3_acs():
+    from app.services.zone_controller import _weekend_max_devices
+    assert _weekend_max_devices(3) == 2
+
+
+def test_weekend_max_devices_zona_4_acs():
+    from app.services.zone_controller import _weekend_max_devices
+    assert _weekend_max_devices(4) == 2
+
+
+def test_weekend_max_devices_zona_0_acs():
+    from app.services.zone_controller import _weekend_max_devices
+    assert _weekend_max_devices(0) == 0
+
+
+def test_is_weekend_now_sabado():
+    from unittest.mock import patch, MagicMock
+    from app.services.zone_controller import _is_weekend_now
+
+    mock_now = MagicMock()
+    mock_now.weekday.return_value = 5  # sábado
+
+    with patch("app.services.zone_controller.datetime") as mock_dt:
+        mock_dt.now.return_value = mock_now
+        assert _is_weekend_now() is True
+
+
+def test_is_weekend_now_domingo():
+    from unittest.mock import patch, MagicMock
+    from app.services.zone_controller import _is_weekend_now
+
+    mock_now = MagicMock()
+    mock_now.weekday.return_value = 6  # domingo
+
+    with patch("app.services.zone_controller.datetime") as mock_dt:
+        mock_dt.now.return_value = mock_now
+        assert _is_weekend_now() is True
+
+
+def test_is_weekend_now_dia_util():
+    from unittest.mock import patch, MagicMock
+    from app.services.zone_controller import _is_weekend_now
+
+    for weekday in range(5):  # segunda a sexta
+        mock_now = MagicMock()
+        mock_now.weekday.return_value = weekday
+
+        with patch("app.services.zone_controller.datetime") as mock_dt:
+            mock_dt.now.return_value = mock_now
+            assert _is_weekend_now() is False, f"weekday={weekday} deveria retornar False"

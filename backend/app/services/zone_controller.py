@@ -17,7 +17,7 @@ import json
 import math
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from statistics import mean
 from zoneinfo import ZoneInfo
@@ -68,6 +68,23 @@ KILL_SWITCH_KEY = "automation:kill_switch"
 
 # Janela anti-spam para sugestões iguais de IA/automação.
 SUGGESTION_DEDUPE_SECONDS = 1800
+
+# ── Regras de fim de semana ───────────────────────────────────────────────────
+
+def _is_weekend_now() -> bool:
+    """Retorna True se o horário atual de Manaus é sábado ou domingo."""
+    return datetime.now(tz=LOCAL_TZ).weekday() >= 5
+
+
+def _weekend_max_devices(total_ac_devices: int) -> int:
+    """Máximo de ACs que a automação pode ligar automaticamente no fim de semana.
+
+    total=0 → 0  (nada a controlar)
+    total=1 → 0  (só manual)
+    total=2 → 1
+    total=3+ → 2
+    """
+    return min(2, max(0, total_ac_devices - 1))
 
 # Gate de frescura: proporção mínima de leituras frescas para execução autônoma.
 # Zonas com menos de 60 % de devices frescos não recebem comandos automáticos.
