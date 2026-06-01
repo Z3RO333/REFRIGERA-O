@@ -1197,6 +1197,19 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
                     await _raise_zone_alert(automation, zone, avg_temp, session)
                     return
 
+                if _is_weekend_now():
+                    _wk_ac = [d for d in devices if not d.device.dnd and not d.device.source_url]
+                    _wk_on = sum(1 for d in _wk_ac if _device_is_on(d, params_map.get(d.device.id)))
+                    _wk_max = _weekend_max_devices(len(_wk_ac))
+                    if _wk_on >= _wk_max:
+                        await _log_blocked(
+                            automation, zone, avg_temp,
+                            f"Fim de semana: limite de {_wk_max} AC(s) por zona atingido "
+                            f"({_wk_on}/{len(_wk_ac)} ligados). Ligue manualmente se necessário.",
+                            session,
+                        )
+                        return
+
                 power_candidates = _build_power_on_candidates(
                     devices, params_map, hotspot=hotspot, strategy=energy_strategy
                 )
@@ -1499,6 +1512,19 @@ async def _evaluate_zone(automation: ZoneAutomation, zone_override: ZoneConfig |
 
         direction = "down" if status in ("WARM", "HOT", "CRITICAL") else "up"
         step = _step_size(status)
+
+        if direction == "down" and _is_weekend_now():
+            _wk_ac = [d for d in devices if not d.device.dnd and not d.device.source_url]
+            _wk_on = sum(1 for d in _wk_ac if _device_is_on(d, params_map.get(d.device.id)))
+            _wk_max = _weekend_max_devices(len(_wk_ac))
+            if _wk_on >= _wk_max:
+                await _log_blocked(
+                    automation, zone, avg_temp,
+                    f"Fim de semana: limite de {_wk_max} AC(s) por zona atingido "
+                    f"({_wk_on}/{len(_wk_ac)} ligados). Ligue manualmente se necessário.",
+                    session,
+                )
+                return
 
         power_candidates = (
             _build_power_on_candidates(devices, params_map, hotspot=hotspot, strategy=energy_strategy)

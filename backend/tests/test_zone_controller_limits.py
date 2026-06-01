@@ -306,3 +306,53 @@ def test_weekend_ideal_max_offset_aplicado():
 
     # Com offset: 25.5 <= 26.0 → COMFORT
     assert _classify(temp, 22.0, ideal_max_original + 2.0) == "COMFORT"
+
+
+def test_weekend_bloqueio_power_on_zona_1_ac():
+    """Zona com 1 AC: limite = 0 → power_on sempre bloqueado no fim de semana."""
+    from app.services.zone_controller import _weekend_max_devices
+
+    total = 1
+    devices_on = 0  # nenhum ligado, mas máximo é 0
+    max_on = _weekend_max_devices(total)
+    assert devices_on >= max_on  # condição de bloqueio deve ser verdadeira
+
+
+def test_weekend_bloqueio_power_on_zona_2_acs_ja_tem_1():
+    """Zona com 2 ACs: limite = 1 → bloqueado quando 1 já está ligado."""
+    from app.services.zone_controller import _weekend_max_devices
+
+    total = 2
+    devices_on = 1
+    max_on = _weekend_max_devices(total)
+    assert devices_on >= max_on  # deve bloquear
+
+
+def test_weekend_permite_power_on_zona_2_acs_nenhum_ligado():
+    """Zona com 2 ACs: limite = 1 → permitido quando nenhum está ligado."""
+    from app.services.zone_controller import _weekend_max_devices
+
+    total = 2
+    devices_on = 0
+    max_on = _weekend_max_devices(total)
+    assert devices_on < max_on  # deve permitir
+
+
+def test_weekend_bloqueio_power_on_zona_3_acs_tem_2():
+    """Zona com 3 ACs: limite = 2 → bloqueado quando 2 já estão ligados."""
+    from app.services.zone_controller import _weekend_max_devices
+
+    total = 3
+    devices_on = 2
+    max_on = _weekend_max_devices(total)
+    assert devices_on >= max_on  # deve bloquear
+
+
+def test_weekend_permite_power_on_zona_3_acs_tem_1():
+    """Zona com 3 ACs: limite = 2 → permitido quando apenas 1 está ligado."""
+    from app.services.zone_controller import _weekend_max_devices
+
+    total = 3
+    devices_on = 1
+    max_on = _weekend_max_devices(total)
+    assert devices_on < max_on  # deve permitir
