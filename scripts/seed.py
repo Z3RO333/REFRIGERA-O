@@ -1,6 +1,12 @@
 """
-Script de seed inicial: cria usuário admin e uma loja de exemplo.
-Uso: python scripts/seed.py
+Script de seed inicial para ambiente local.
+
+Variáveis obrigatórias:
+- SEED_ADMIN_EMAIL
+- SEED_ADMIN_PASSWORD
+
+Uso:
+  SEED_ADMIN_EMAIL=admin@example.com SEED_ADMIN_PASSWORD='use-a-strong-password' python scripts/seed.py
 """
 import asyncio
 import sys
@@ -9,40 +15,50 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 async def main():
+    admin_email = os.getenv("SEED_ADMIN_EMAIL")
+    admin_password = os.getenv("SEED_ADMIN_PASSWORD")
+
+    if not admin_email or not admin_password:
+        raise RuntimeError(
+            "Defina SEED_ADMIN_EMAIL e SEED_ADMIN_PASSWORD antes de executar o seed."
+        )
+    if len(admin_password) < 12:
+        raise RuntimeError("SEED_ADMIN_PASSWORD deve ter pelo menos 12 caracteres.")
+
     os.chdir(os.path.join(os.path.dirname(__file__), "..", "backend"))
     sys.path.insert(0, ".")
 
     from app.db.session import engine, Base, AsyncSessionLocal
-    import app.models  # garante que todos os models estão registrados no metadata
+    import app.models
     from app.models.store import Store, StoreSector
     from app.models.user import User
     import bcrypt
 
-    def hash_password(p): return bcrypt.hashpw(p.encode(), bcrypt.gensalt()).decode()
+    def hash_password(password: str) -> str:
+        return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
     async with AsyncSessionLocal() as session:
-        # Usuário admin padrão
         from sqlalchemy import select
-        existing = await session.execute(select(User).where(User.email == "admin@bemol.com.br"))
+
+        existing = await session.execute(select(User).where(User.email == admin_email))
         if not existing.scalar_one_or_none():
             admin = User(
                 name="Administrador",
-                email="admin@bemol.com.br",
-                hashed_password=hash_password("admin123"),
+                email=admin_email,
+                hashed_password=hash_password(admin_password),
                 role="ADMIN",
             )
             session.add(admin)
-            print("✓ Usuário admin criado: admin@bemol.com.br / admin123")
+            print(f"✓ Usuário admin criado: {admin_email}")
 
-        # Loja de exemplo
-        existing_store = await session.execute(select(Store).where(Store.code == "MATRIZ"))
+        existing_store = await session.execute(select(Store).where(Store.code == "DEMO"))
         if not existing_store.scalar_one_or_none():
             store = Store(
-                name="Escritório Matriz",
-                code="MATRIZ",
+                name="Unidade de Demonstração",
+                code="DEMO",
                 city="Manaus",
                 state="AM",
                 timezone=-4,
@@ -51,17 +67,16 @@ async def main():
             await session.flush()
 
             setores = [
-                StoreSector(store_id=store.id, name="Eletrodomésticos", floor=1),
-                StoreSector(store_id=store.id, name="Informática", floor=1),
-                StoreSector(store_id=store.id, name="Têxtil", floor=1),
-                StoreSector(store_id=store.id, name="Celulares", floor=1),
-                StoreSector(store_id=store.id, name="Alimentos", floor=1, is_critical=True),
+                StoreSector(store_id=store.id, name="Setor A", floor=1),
+                StoreSector(store_id=store.id, name="Setor B", floor=1),
+                StoreSector(store_id=store.id, name="Setor C", floor=1, is_critical=True),
             ]
-            for s in setores:
-                session.add(s)
-            print(f"✓ Escritório Matriz criado com {len(setores)} setores")
+            for setor in setores:
+                session.add(setor)
+            print(f"✓ Unidade de demonstração criada com {len(setores)} setores")
 
         await session.commit()
+
     print("\n✅ Seed concluído!")
 
 if __name__ == "__main__":
